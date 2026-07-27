@@ -65,6 +65,8 @@ import {
   getWorkflowRecordById,
   initializeStorage,
   listLibraryAssetsByType,
+  linkExistingAssetToProject,
+  unlinkAssetFromProjectById,
   listProjectAssets,
   listProjectTasks,
   listProjects,
@@ -2804,7 +2806,7 @@ async function saveGeneratedMeshAssets({
     // When the mesh was edited from a connected mesh, save it as a version (child)
     // of that mesh instead of creating a new root asset.
     savedAssets.push(normalizedParentAssetId
-      ? await createAssetVersion({ assetId: normalizedParentAssetId, ...assetPayload, thumbnailPath: thumbnailFilename, inheritThumbnail: false })
+      ? await createAssetVersion({ assetId: normalizedParentAssetId, ...assetPayload, thumbnailPath: thumbnailFilename, inheritThumbnail: false, projectId: Number(projectId) })
       : await createProjectAsset({ projectId: Number(projectId), ...assetPayload, thumbnailPath: thumbnailFilename }));
   }
 
@@ -3564,7 +3566,7 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
     const persistProcessingCard = String(req.body.persistProcessingCard || '').toLowerCase() !== 'false';
     const persistGeneratedAssets = String(req.body.persistGeneratedAssets || '').toLowerCase() !== 'false';
     // Brainstorming Board generations link assets to the project without creating
-    // a visible Kanban card (see ensureDetachedCard).
+    // a visible Kanban card (an Assets_Projects row and no Cards_Assets row).
     const persistAssetsDetached = String(req.body.detachedAsset || '').toLowerCase() === 'true';
     // Default ON: when no explicit parentAssetId is given, save each output under
     // the resolved input asset of the same type — a mesh output becomes a version of
@@ -3842,7 +3844,7 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
         // of the source image. Otherwise it's a new root asset.
         const outputParentId = resolveOutputParentId(inferredAssetType);
         const persistedAsset = (outputParentId && inferredAssetType === 'mesh')
-          ? await createAssetVersion({ assetId: outputParentId, ...generatedAssetPayload, thumbnailPath: meshThumbnailFilename, inheritThumbnail: false })
+          ? await createAssetVersion({ assetId: outputParentId, ...generatedAssetPayload, thumbnailPath: meshThumbnailFilename, inheritThumbnail: false, projectId: hasProjectId ? normalizedProjectId : null })
           : (outputParentId && inferredAssetType === 'image')
             ? {
                 ...(await createAssetEditRecord({
@@ -3852,6 +3854,7 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
                   filePath: storedFilePath,
                   width: dimensions.width,
                   height: dimensions.height,
+                  projectId: hasProjectId ? normalizedProjectId : null,
                   createdAt: generatedAssetPayload.createdAt
                 })),
                 type: 'image'
@@ -4390,7 +4393,7 @@ app.post('/api/meshes/generate', async (req, res) => {
     // When a mesh was connected to the node and used to edit it, save the
     // result as a version (child) of that mesh instead of a new root asset.
     const savedAsset = normalizedParentAssetId
-      ? await createAssetVersion({ assetId: normalizedParentAssetId, ...meshAssetPayload, inheritThumbnail: false })
+      ? await createAssetVersion({ assetId: normalizedParentAssetId, ...meshAssetPayload, inheritThumbnail: false, projectId: Number(projectId) })
       : await createProjectAsset({ projectId: Number(projectId), ...meshAssetPayload });
 
     await clearCardProcessingState(processingProjectId, processingCardId, {
@@ -5205,6 +5208,50 @@ app.delete('/api/projects/:id', async (req, res) => {
   }
 });
 
+// Project <-> asset membership (Assets_Projects). An asset belongs to a project
+// on its own, with no card required: any asset id works, root or edit/version.
+app.post('/api/projects/:id/assets', async (req, res) => {
+  try {
+    const assetId = Number(req.body?.assetId);
+
+    if (!Number.isFinite(assetId)) {
+      return res.status(400).json({ error: 'assetId is required' });
+    }
+
+    const linked = await linkExistingAssetToProject(Number(req.params.id), assetId, {
+      cascadeChildren: req.body?.cascadeChildren === true
+    });
+
+    res.status(201).json(linked);
+  } catch (err) {
+    if (err.message === 'Asset not found') {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+    if (err.message?.startsWith('Project not found:')) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    console.error('Failed to link asset to project:', err);
+    res.status(500).json({ error: 'Failed to link asset to project' });
+  }
+});
+
+app.delete('/api/projects/:id/assets/:assetId', async (req, res) => {
+  try {
+    const result = await unlinkAssetFromProjectById(Number(req.params.id), Number(req.params.assetId), {
+      cascadeChildren: req.query.cascadeChildren !== 'false'
+    });
+
+    if (result.status === 'not-found') {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error('Failed to unlink asset from project:', err);
+    res.status(500).json({ error: 'Failed to unlink asset from project' });
+  }
+});
+
 // Turn a filesystem-unsafe name into a folder base name (letters, digits,
 // spaces, dot, dash, underscore) so it can name the export folder + .3dgp file.
 function sanitizeProjectExportName(name, fallback = 'project') {
@@ -5316,8 +5363,12 @@ app.post('/api/projects/import', async (req, res) => {
 });
 
 app.get('/api/assets', async (req, res) => {
-  const { projectId } = req.query;
-  res.json(await listProjectAssets(projectId ? Number(projectId) : null));
+  const { projectId, includeChildren } = req.query;
+  // includeChildren returns every project-linked edit/version as a row of its
+  // own, on top of the copies nested in each root's `children` array.
+  res.json(await listProjectAssets(projectId ? Number(projectId) : null, {
+    includeChildren: String(includeChildren || '').toLowerCase() === 'true'
+  }));
 });
 
 app.get('/api/cards', async (req, res) => {
@@ -6565,10 +6616,40 @@ app.get('/api/assets/resolve-source', async (req, res) => {
 
 app.post('/api/assets/link', async (req, res) => {
   try {
-    const { projectId, filename, type = 'image', name, metadata, detached } = req.body;
+    const { projectId, assetId, filename, type = 'image', name, metadata, detached } = req.body;
 
-    if (!projectId || !filename) {
-      return res.status(400).json({ error: 'projectId and filename are required' });
+    if (!projectId) {
+      return res.status(400).json({ error: 'projectId is required' });
+    }
+
+    // Link an EXISTING asset by id — works for a root asset as well as for an
+    // image edit or a mesh version, which have no file of their own to look up
+    // in the library and previously could not be attached to a project at all.
+    if (assetId !== undefined && assetId !== null && assetId !== '') {
+      const numericAssetId = Number(assetId);
+
+      if (!Number.isFinite(numericAssetId)) {
+        return res.status(400).json({ error: 'assetId must be a number' });
+      }
+
+      try {
+        const linked = await linkExistingAssetToProject(Number(projectId), numericAssetId, {
+          cascadeChildren: req.body.cascadeChildren === true
+        });
+        return res.status(201).json(linked);
+      } catch (linkErr) {
+        if (linkErr.message === 'Asset not found') {
+          return res.status(404).json({ error: 'Asset not found' });
+        }
+        if (linkErr.message?.startsWith('Project not found:')) {
+          return res.status(404).json({ error: 'Project not found' });
+        }
+        throw linkErr;
+      }
+    }
+
+    if (!filename) {
+      return res.status(400).json({ error: 'assetId or filename is required' });
     }
 
     const assetType = type || inferAssetTypeFromFilename(filename);
@@ -6613,7 +6694,10 @@ app.post('/api/assets/link', async (req, res) => {
 app.delete('/api/assets/:id', async (req, res) => {
   try {
     const assetId = Number(req.params.id);
-    const result = await deleteAssetById(assetId);
+    // With ?projectId= the asset is detached from that project only; without it,
+    // from every project (and deleted outright when it belonged to none).
+    const projectId = req.query.projectId ? Number(req.query.projectId) : null;
+    const result = await deleteAssetById(assetId, { projectId });
 
     if (result.status === 'not-found') {
       return res.status(404).json({ error: 'Asset card not found' });

@@ -49,10 +49,15 @@ export function registerAssetTools(server, { api, notifyMutation }) {
   server.registerTool('list_assets', {
     title: 'List project assets',
     description: 'List a project\'s assets (images, meshes, workflows) with their version/edit trees and direct download URLs.',
-    inputSchema: { projectId: z.number().int() },
+    inputSchema: {
+      projectId: z.number().int(),
+      includeChildren: z.boolean().optional().describe('Also return every project-linked edit/version as a top-level entry, not only nested under its root.')
+    },
     annotations: { readOnlyHint: true }
-  }, toolHandler(async ({ projectId }) => {
-    const assets = await api.apiJson('GET', '/assets', { query: { projectId } });
+  }, toolHandler(async ({ projectId, includeChildren }) => {
+    const assets = await api.apiJson('GET', '/assets', {
+      query: { projectId, ...(includeChildren ? { includeChildren: 'true' } : {}) }
+    });
     return (Array.isArray(assets) ? assets : []).map(asset => withAssetUrls(api, asset));
   }));
 
@@ -101,20 +106,46 @@ export function registerAssetTools(server, { api, notifyMutation }) {
 
   server.registerTool('link_asset', {
     title: 'Link existing asset',
-    description: 'Attach an already-stored asset file (by its stored filename) to a project — creates the card/link without re-uploading.',
+    description: 'Attach an existing asset to a project. Pass assetId to link an asset that is already in the database — this works for a root asset AND for an image edit or mesh version (use the child id from list_assets). Pass filename instead to link a stored file from the asset library.',
     inputSchema: {
       projectId: z.number().int(),
-      filename: z.string().min(1).describe('Stored asset filename (from list_library_assets)'),
+      assetId: z.number().int().optional().describe('Asset id to link — root, image edit or mesh version. Preferred over filename.'),
+      filename: z.string().min(1).optional().describe('Stored asset filename (from list_library_assets). Used when assetId is not given.'),
       type: z.enum(['image', 'mesh']).default('image'),
       name: z.string().optional(),
-      metadata: z.record(z.string(), z.any()).optional()
+      metadata: z.record(z.string(), z.any()).optional(),
+      cascadeChildren: z.boolean().optional().describe('With assetId: also link every edit/version of that asset.')
     }
-  }, toolHandler(async ({ projectId, filename, type, name, metadata }) => {
-    const asset = await api.apiJson('POST', '/assets/link', {
-      body: { projectId, filename, type, ...(name ? { name } : {}), ...(metadata ? { metadata } : {}) }
-    });
+  }, toolHandler(async ({ projectId, assetId, filename, type, name, metadata, cascadeChildren }) => {
+    if (assetId === undefined && !filename) {
+      throw new Error('Pass either assetId or filename.');
+    }
+
+    const asset = assetId !== undefined
+      ? await api.apiJson('POST', `/projects/${projectId}/assets`, {
+        body: { assetId, ...(cascadeChildren ? { cascadeChildren: true } : {}) }
+      })
+      : await api.apiJson('POST', '/assets/link', {
+        body: { projectId, filename, type, ...(name ? { name } : {}), ...(metadata ? { metadata } : {}) }
+      });
+
     notifyMutation(projectId);
     return withAssetUrls(api, asset);
+  }));
+
+  server.registerTool('unlink_asset', {
+    title: 'Unlink asset from project',
+    description: 'Remove an asset from a project without deleting the file or the library record. Also removes it from any card/node it sits on in that project.',
+    inputSchema: {
+      projectId: z.number().int(),
+      assetId: z.number().int().describe('Asset id — root, image edit or mesh version'),
+      cascadeChildren: z.boolean().default(true).describe('Also unlink every edit/version of that asset.')
+    }
+  }, toolHandler(async ({ projectId, assetId, cascadeChildren }) => {
+    const query = cascadeChildren === false ? { cascadeChildren: 'false' } : {};
+    const result = await api.apiJson('DELETE', `/projects/${projectId}/assets/${assetId}`, { query });
+    notifyMutation(projectId);
+    return result;
   }));
 
   server.registerTool('view_asset', {

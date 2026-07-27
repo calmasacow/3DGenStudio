@@ -590,8 +590,9 @@ export function ProjectProvider({ children }) {
     return data
   }
 
-  const getProjectAssets = async (projectId) => {
-    const res = await fetch(`${API_BASE}/assets?projectId=${projectId}`)
+  const getProjectAssets = async (projectId, { includeChildren = false } = {}) => {
+    const query = includeChildren ? '&includeChildren=true' : ''
+    const res = await fetch(`${API_BASE}/assets?projectId=${projectId}${query}`)
     return await res.json()
   }
 
@@ -878,6 +879,39 @@ export function ProjectProvider({ children }) {
     return data
   }
 
+  // Attach any EXISTING asset — a root, an image edit or a mesh version — to a
+  // project. Membership lives in Assets_Projects, so this needs no card.
+  const linkAssetToProject = async (projectId, assetId, { cascadeChildren = false } = {}) => {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/assets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId, cascadeChildren })
+    })
+
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to link asset to project')
+    }
+
+    return data
+  }
+
+  const unlinkAssetFromProject = async (projectId, assetId, { cascadeChildren = true } = {}) => {
+    const query = cascadeChildren ? '' : '?cascadeChildren=false'
+    const res = await fetch(`${API_BASE}/projects/${projectId}/assets/${assetId}${query}`, {
+      method: 'DELETE'
+    })
+
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to unlink asset from project')
+    }
+
+    return data
+  }
+
   const deleteLibraryAsset = async ({ type, filename, force = false }) => {
     const params = new URLSearchParams({ type, filename })
     if (force) {
@@ -903,8 +937,9 @@ export function ProjectProvider({ children }) {
     return data
   }
 
-  const deleteAsset = async (assetId) => {
-    const res = await fetch(`${API_BASE}/assets/${assetId}`, { method: 'DELETE' })
+  const deleteAsset = async (assetId, { projectId = null } = {}) => {
+    const query = projectId ? `?projectId=${projectId}` : ''
+    const res = await fetch(`${API_BASE}/assets/${assetId}${query}`, { method: 'DELETE' })
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
@@ -1318,6 +1353,8 @@ export function ProjectProvider({ children }) {
       getPaintDocument,
       savePaintDocument,
       attachExistingAsset,
+      linkAssetToProject,
+      unlinkAssetFromProject,
       resolveAssetSourceReference,
       deleteAsset,
       moveKanbanCard,

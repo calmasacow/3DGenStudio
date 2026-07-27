@@ -497,7 +497,9 @@ export default function KanbanPage() {
 
   const handleRemoveImage = async (assetId) => {
     try {
-      await deleteAsset(assetId)
+      // Scope the removal to THIS project — an asset shared with another project
+      // must keep its membership there.
+      await deleteAsset(assetId, { projectId })
       await Promise.all([refreshProjectAssets(), refreshCardAttributes()])
     } catch (err) {
       console.error('Failed to remove image:', err)
@@ -508,7 +510,7 @@ export default function KanbanPage() {
   const handleRemoveImageCard = async (cardId, cardAssets) => {
     try {
       for (const asset of cardAssets) {
-        await deleteAsset(asset.id)
+        await deleteAsset(asset.id, { projectId })
       }
 
       if (cardId) {

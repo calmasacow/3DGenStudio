@@ -454,8 +454,15 @@ export default function AssetsPage() {
 
   // An asset can be linked to multiple projects, so resolve every project key it
   // belongs to (falling back to the single projectId, then "Unassigned").
+  // Edits/versions carry their own project links, and an asset shown here is a
+  // root — so a root also counts as belonging to every project one of its
+  // children was attached to, otherwise attaching an edit would show nothing.
   const getAssetProjectKeys = useCallback((asset) => {
-    const ids = Array.isArray(asset?.projectIds) ? asset.projectIds : []
+    const ids = [
+      ...(Array.isArray(asset?.projectIds) ? asset.projectIds : []),
+      ...(Array.isArray(asset?.children) ? asset.children : [])
+        .flatMap(child => (Array.isArray(child?.projectIds) ? child.projectIds : []))
+    ]
     const keys = [...new Set(
       ids.filter(id => id !== null && id !== undefined).map(id => String(id))
     )]

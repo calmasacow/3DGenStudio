@@ -407,6 +407,7 @@ function mapChildAssetRow(row) {
     id: row.id,
     parentId: row.parentId ?? null,
     parentProjectId: row.parentProjectId ?? null,
+    projectIds: Array.isArray(row.projectIds) ? row.projectIds : [],
     editId: metadata?.editId || null,
     name: row.name || '',
     filePath: row.filePath,
@@ -469,7 +470,13 @@ function mapAssetRow(row) {
 
   return {
     id: row.id,
-    projectId: row.projectId,
+    projectId: row.projectId ?? null,
+    // Every project this asset is linked to (Assets_Projects is many-to-many);
+    // `projectId` above is just the one this view was resolved for.
+    projectIds: Array.isArray(row.projectIds)
+      ? row.projectIds
+      : (row.projectId != null ? [row.projectId] : []),
+    parentId: row.parentId ?? null,
     type: String(row.assetTypeName || '').toLowerCase(),
     name: row.name,
     filePath: row.filePath,
@@ -564,6 +571,223 @@ async function migrateLegacyAssetEditsToAssets(db) {
   }
 }
 
+// One-time backfill for databases created before Assets_Projects existed:
+// project membership used to be derived as Assets -> Cards_Assets -> Cards.projectId,
+// and child assets (image edits / mesh versions) had no link of their own — they
+// inherited their root's project implicitly. Reproduce both here so nothing that
+// was visible in a project before the upgrade disappears after it.
+async function backfillAssetProjectLinks(db) {
+  await run(
+    db,
+    `INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt)
+     SELECT DISTINCT ca.assetId, c.projectId, COALESCE(a.creationDate, 0)
+     FROM Cards_Assets ca
+     JOIN Cards c ON c.id = ca.cardId
+     JOIN Assets a ON a.id = ca.assetId
+     WHERE c.projectId IS NOT NULL`
+  );
+
+  // Propagate every link down the full parentId tree, so edits/versions land in
+  // the same project(s) their root was in. Done level by level rather than with a
+  // recursive CTE: the seed set is the very table being inserted into, and
+  // reading a table while writing it is exactly the case a plain loop makes safe.
+  let inserted = 0;
+  let guard = 0;
+  do {
+    const result = await run(
+      db,
+      `INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt)
+       SELECT child.id, ap.projectId, COALESCE(child.creationDate, 0)
+       FROM Assets child
+       JOIN Assets_Projects ap ON ap.assetId = child.parentId
+       WHERE child.parentId IS NOT NULL`
+    );
+    inserted = result?.changes ?? 0;
+    guard += 1;
+  } while (inserted > 0 && guard < 100);
+
+  const linked = await get(db, 'SELECT COUNT(*) AS total FROM Assets_Projects');
+  console.log(`Assets_Projects backfill complete: ${linked?.total ?? 0} asset/project links.`);
+
+  // The "board-assets" container cards existed only to carry Cards_Assets rows
+  // for assets that must belong to a project without appearing on the Kanban
+  // board. Their links have just been copied into Assets_Projects, so the cards
+  // themselves are now dead weight — drop them (Cards_Assets cascades).
+  const removed = await run(
+    db,
+    `DELETE FROM Cards
+     WHERE clientKey = 'board-assets'
+       AND kanbanColumnId IS NULL
+       AND nodeTypeId IS NULL`
+  );
+  if (removed?.changes) {
+    console.log(`Removed ${removed.changes} legacy detached container card(s).`);
+  }
+}
+
+// --- Asset <-> project membership -------------------------------------------
+// Every write that makes an asset part of a project funnels through these, so
+// Assets_Projects can never drift from what the rest of the code believes.
+
+async function linkAssetToProject(db, assetId, projectId, { cascadeChildren = false } = {}) {
+  const normalizedAssetId = Number(assetId);
+  const normalizedProjectId = Number(projectId);
+
+  if (!Number.isFinite(normalizedAssetId) || !Number.isFinite(normalizedProjectId)) {
+    return;
+  }
+
+  await run(
+    db,
+    'INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt) VALUES (?, ?, ?)',
+    [normalizedAssetId, normalizedProjectId, Date.now()]
+  );
+
+  if (!cascadeChildren) return;
+
+  const children = await all(db, 'SELECT id FROM Assets WHERE parentId = ?', [normalizedAssetId]);
+  for (const child of children) {
+    await linkAssetToProject(db, child.id, normalizedProjectId, { cascadeChildren: true });
+  }
+}
+
+async function unlinkAssetFromProject(db, assetId, projectId, { cascadeChildren = true } = {}) {
+  const normalizedAssetId = Number(assetId);
+  const normalizedProjectId = Number(projectId);
+
+  if (!Number.isFinite(normalizedAssetId) || !Number.isFinite(normalizedProjectId)) {
+    return;
+  }
+
+  await run(
+    db,
+    'DELETE FROM Assets_Projects WHERE assetId = ? AND projectId = ?',
+    [normalizedAssetId, normalizedProjectId]
+  );
+
+  if (!cascadeChildren) return;
+
+  const children = await all(db, 'SELECT id FROM Assets WHERE parentId = ?', [normalizedAssetId]);
+  for (const child of children) {
+    await unlinkAssetFromProject(db, child.id, normalizedProjectId, { cascadeChildren: true });
+  }
+}
+
+// Copy every project a source asset belongs to onto a freshly created child, so
+// a new edit/version is immediately part of the same project(s) as its parent.
+async function inheritProjectLinks(db, fromAssetId, toAssetId) {
+  await run(
+    db,
+    `INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt)
+     SELECT ?, projectId, ? FROM Assets_Projects WHERE assetId = ?`,
+    [Number(toAssetId), Date.now(), Number(fromAssetId)]
+  );
+}
+
+export async function listAssetProjectIds(assetId) {
+  const db = await getDb();
+  const rows = await all(
+    db,
+    'SELECT projectId FROM Assets_Projects WHERE assetId = ? ORDER BY projectId ASC',
+    [Number(assetId)]
+  );
+
+  return rows.map(row => row.projectId);
+}
+
+// Batch variant used by the listings: assetId -> [projectId, …].
+async function listProjectIdsByAssetIds(db, assetIds = []) {
+  const uniqueIds = [...new Set(assetIds.map(Number).filter(Number.isFinite))];
+  const byAssetId = new Map();
+
+  if (uniqueIds.length === 0) {
+    return byAssetId;
+  }
+
+  const rows = await all(
+    db,
+    `SELECT assetId, projectId FROM Assets_Projects
+     WHERE assetId IN (${uniqueIds.map(() => '?').join(', ')})
+     ORDER BY projectId ASC`,
+    uniqueIds
+  );
+
+  for (const row of rows) {
+    if (!byAssetId.has(row.assetId)) {
+      byAssetId.set(row.assetId, []);
+    }
+    byAssetId.get(row.assetId).push(row.projectId);
+  }
+
+  return byAssetId;
+}
+
+export async function isAssetInProject(projectId, assetId) {
+  const db = await getDb();
+  const row = await get(
+    db,
+    'SELECT 1 FROM Assets_Projects WHERE assetId = ? AND projectId = ? LIMIT 1',
+    [Number(assetId), Number(projectId)]
+  );
+
+  return Boolean(row);
+}
+
+// Attach an EXISTING asset (root, edit or version) to a project without going
+// through a card. This is the operation the old model could not express.
+export async function linkExistingAssetToProject(projectId, assetId, { cascadeChildren = false } = {}) {
+  const normalizedProjectId = await ensureProjectExists(projectId);
+  const asset = await getAssetRecordById(assetId);
+
+  if (!asset) {
+    throw new Error('Asset not found');
+  }
+
+  const db = await getDb();
+  await linkAssetToProject(db, asset.id, normalizedProjectId, { cascadeChildren });
+
+  return await getAssetViewById(asset.id, { projectId: normalizedProjectId });
+}
+
+export async function unlinkAssetFromProjectById(projectId, assetId, { cascadeChildren = true } = {}) {
+  const normalizedProjectId = Number(projectId);
+  const asset = await getAssetRecordById(assetId);
+
+  if (!asset) {
+    return { status: 'not-found' };
+  }
+
+  const db = await getDb();
+  await unlinkAssetFromProject(db, asset.id, normalizedProjectId, { cascadeChildren });
+
+  // Placement follows membership: an asset that is no longer part of the project
+  // must not stay on one of its cards/nodes either.
+  const links = await all(
+    db,
+    `SELECT ca.cardId
+     FROM Cards_Assets ca JOIN Cards c ON c.id = ca.cardId
+     WHERE ca.assetId = ? AND c.projectId = ?`,
+    [asset.id, normalizedProjectId]
+  );
+
+  if (links.length > 0) {
+    await run(
+      db,
+      `DELETE FROM Cards_Assets
+       WHERE assetId = ? AND cardId IN (${links.map(() => '?').join(', ')})`,
+      [asset.id, ...links.map(link => link.cardId)]
+    );
+
+    for (const link of links) {
+      await normalizeCardAssetPositions(link.cardId);
+    }
+
+    await deleteCardsIfEmpty(links.map(link => link.cardId));
+  }
+
+  return { status: 'unlinked', remainingProjectIds: await listAssetProjectIds(asset.id) };
+}
+
 function groupChildAssetsByParentFilePath(rows = [], baseUrl = null) {
   return rows.reduce((accumulator, row) => {
     if (!accumulator[row.parentFilePath]) {
@@ -592,17 +816,16 @@ async function listChildAssetsByParentFilePaths(db, parentFilePaths = [], assetT
     return [];
   }
 
-  return await all(
+  const rows = await all(
     db,
     `SELECT child.id, child.parentId, child.name, child.filePath, child.creationDate, child.metadata, child.thumbnail,
             child.width, child.height,
             parent.filePath AS parentFilePath,
             (
-              SELECT c.projectId
-              FROM Cards_Assets ca
-              JOIN Cards c ON c.id = ca.cardId
-              WHERE ca.assetId = parent.id
-              ORDER BY c.creationDate DESC, c.id DESC
+              SELECT ap.projectId
+              FROM Assets_Projects ap
+              WHERE ap.assetId = parent.id
+              ORDER BY ap.addedAt DESC, ap.projectId DESC
               LIMIT 1
             ) AS parentProjectId
      FROM Assets child
@@ -616,6 +839,13 @@ async function listChildAssetsByParentFilePaths(db, parentFilePaths = [], assetT
      ORDER BY child.creationDate ASC, child.id ASC`,
     [assetTypeName, assetTypeName, ...parentFilePaths]
   );
+
+  // A child carries its own project links now, so the Assets page can group and
+  // filter an edit/version by the project it was attached to — not only by the
+  // project its root happens to sit in.
+  const projectIdsByAssetId = await listProjectIdsByAssetIds(db, rows.map(row => row.id));
+
+  return rows.map(row => ({ ...row, projectIds: projectIdsByAssetId.get(row.id) || [] }));
 }
 
 async function getRootAssetById(assetId) {
@@ -927,6 +1157,11 @@ export async function initializeStorage() {
   // (e.g. a fresh Columns table beside the still-named KanbanColumns).
   await migrateNodesIntoCards(db);
 
+  // Captured BEFORE the CREATE TABLE block below so we can tell a database that
+  // predates Assets_Projects (needs the one-time backfill) from one that already
+  // has it (where a re-backfill would resurrect links the user has since removed).
+  const hadAssetProjectsTable = await tableExists(db, 'Assets_Projects');
+
   await exec(
     db,
     `
@@ -1083,11 +1318,27 @@ export async function initializeStorage() {
       updatedAt INTEGER NOT NULL,
       FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
     );
+
+    -- Asset <-> project membership. THE source of truth for "which project does
+    -- this asset belong to". Cards_Assets is now only about PLACEMENT (which
+    -- kanban card / graph node displays the asset), never about ownership.
+    -- Every asset gets its own row, children (image edits / mesh versions)
+    -- included — membership is never inherited through parentId at read time,
+    -- so an edit can be linked to a project its root does not belong to.
+    CREATE TABLE IF NOT EXISTS Assets_Projects (
+      assetId INTEGER NOT NULL,
+      projectId INTEGER NOT NULL,
+      addedAt INTEGER NOT NULL,
+      PRIMARY KEY(assetId, projectId),
+      FOREIGN KEY(assetId) REFERENCES Assets(id) ON DELETE CASCADE,
+      FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
+    );
     `
   );
 
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_wikipages_parentId ON WikiPages(parentId)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_boards_projectId ON Boards(projectId)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_projects_projectId ON Assets_Projects(projectId)');
 
   const assetColumns = await all(db, 'PRAGMA table_info(Assets)');
   if (!assetColumns.some(column => column.name === 'thumbnail')) {
@@ -1118,6 +1369,10 @@ export async function initializeStorage() {
 
   if (await tableExists(db, 'Assets_Edits')) {
     await run(db, 'DROP TABLE Assets_Edits');
+  }
+
+  if (!hadAssetProjectsTable) {
+    await backfillAssetProjectLinks(db);
   }
 
   await seedReferenceTables(db);
@@ -1518,27 +1773,44 @@ async function insertAsset({ name, type, filePath, thumbnailPath = null, width =
   return result.lastID;
 }
 
-async function getAssetViewById(assetId) {
+// Project membership comes from Assets_Projects; the card join only supplies
+// PLACEMENT (which card/column shows the asset) and is scoped to the resolved
+// project so an asset shared by two projects never reports the other's card.
+async function getAssetViewById(assetId, { projectId = null } = {}) {
   const db = await getDb();
+  const normalizedAssetId = Number(assetId);
+
+  const projectIds = (await all(
+    db,
+    'SELECT projectId FROM Assets_Projects WHERE assetId = ? ORDER BY addedAt ASC, projectId ASC',
+    [normalizedAssetId]
+  )).map(row => row.projectId);
+
+  const requestedProjectId = projectId != null ? Number(projectId) : null;
+  const resolvedProjectId = requestedProjectId != null && projectIds.includes(requestedProjectId)
+    ? requestedProjectId
+    : (projectIds[0] ?? null);
+
   const row = await get(
     db,
     `SELECT a.id, a.name, a.filePath, a.creationDate, a.metadata, a.thumbnail,
-            a.width, a.height,
+            a.width, a.height, a.parentId,
             at.name AS assetTypeName,
-            c.projectId, c.id AS cardId, c.clientKey, c.kanbanColumnId, kc.name AS kanbanColumnName, c.position AS cardPosition,
+            c.id AS cardId, c.clientKey, c.name AS cardName, c.kanbanColumnId,
+            kc.name AS kanbanColumnName, c.position AS cardPosition,
             ca.position AS assetPosition
      FROM Assets a
      JOIN AssetTypes at ON at.id = a.assetTypeId
      LEFT JOIN Cards_Assets ca ON ca.assetId = a.id
-     LEFT JOIN Cards c ON c.id = ca.cardId
-      LEFT JOIN Columns kc ON kc.id = c.kanbanColumnId
+     LEFT JOIN Cards c ON c.id = ca.cardId AND (? IS NULL OR c.projectId = ?)
+     LEFT JOIN Columns kc ON kc.id = c.kanbanColumnId
      WHERE a.id = ?
-     ORDER BY ca.position ASC
+     ORDER BY (c.id IS NULL) ASC, ca.position ASC
      LIMIT 1`,
-    [assetId]
+    [resolvedProjectId, resolvedProjectId, normalizedAssetId]
   );
 
-  return row ? mapAssetRow(row) : null;
+  return row ? mapAssetRow({ ...row, projectId: resolvedProjectId, projectIds }) : null;
 }
 
 export async function getAssetRecordById(assetId) {
@@ -1573,7 +1845,7 @@ export async function findAssetByFilePath(type, filePath) {
   );
 }
 
-export async function createAssetVersion({ assetId, name, type, filePath, thumbnailPath = null, width = 0, height = 0, metadata = {}, createdAt = Date.now(), inheritThumbnail = true }) {
+export async function createAssetVersion({ assetId, name, type, filePath, thumbnailPath = null, width = 0, height = 0, metadata = {}, createdAt = Date.now(), inheritThumbnail = true, projectId = null }) {
   const sourceAsset = await getAssetRecordById(assetId);
 
   if (!sourceAsset) {
@@ -1601,7 +1873,17 @@ export async function createAssetVersion({ assetId, name, type, filePath, thumbn
     parentId: rootAsset.id
   });
 
-  return await getAssetViewById(nextAssetId);
+  // A version is a first-class member of every project the asset it was derived
+  // from belongs to — both the immediate source (which may itself be a version
+  // linked somewhere its root is not) and the root it gets parented to.
+  const db = await getDb();
+  await inheritProjectLinks(db, sourceAsset.id, nextAssetId);
+  await inheritProjectLinks(db, rootAsset.id, nextAssetId);
+  if (projectId != null) {
+    await linkAssetToProject(db, nextAssetId, projectId);
+  }
+
+  return await getAssetViewById(nextAssetId, { projectId });
 }
 
 export async function replaceAssetFileById(assetId, { name, type, filePath, thumbnailPath, width, height, metadata = {} }) {
@@ -1644,13 +1926,15 @@ export async function replaceAssetFileById(assetId, { name, type, filePath, thum
   return await getAssetViewById(Number(assetId));
 }
 
+// Membership is a direct Assets_Projects lookup, so this now resolves child
+// assets (image edits / mesh versions) too — they carry their own project link
+// instead of borrowing their root's card.
 export async function getProjectAssetById(projectId, assetId) {
-  const asset = await getAssetViewById(assetId);
-  if (!asset || Number(asset.projectId) !== Number(projectId)) {
+  if (!(await isAssetInProject(projectId, assetId))) {
     return null;
   }
 
-  return asset;
+  return await getAssetViewById(assetId, { projectId });
 }
 
 // Fall back to resolving an edit/version by its own file when its parent root
@@ -1702,41 +1986,36 @@ async function resolveEditSourceByFilePath(db, editFilePath, typeName) {
   };
 }
 
-// Resolve an image/mesh input source by asset id, accepting EITHER a root/card
-// asset OR a child edit/version. A child (an image edit or a mesh version) has no
-// Cards_Assets link of its own — only its root does — so getProjectAssetById(id)
-// returns null for it; here we accept it as long as its root belongs to the
-// project, using the child's own file as the input. This lets callers reference an
-// edit/version by its plain asset id, the same way they reference a root asset.
+// Resolve an image/mesh input source by asset id, accepting EITHER a root asset
+// OR a child edit/version — both carry their own Assets_Projects link, so this
+// is a single membership check. The root fallback below only exists for rows
+// that predate the backfill (a child whose own link is missing but whose root
+// is in the project).
 async function resolveProjectAssetSourceById(projectId, assetId, typeName) {
   const expectedType = typeName.toLowerCase();
 
-  const direct = await getProjectAssetById(projectId, assetId);
-  if (direct) {
-    if (direct.type !== expectedType) {
+  const record = await getAssetRecordById(assetId);
+  if (!record || String(record.assetTypeName || '').toLowerCase() !== expectedType) {
+    return null;
+  }
+
+  if (!(await isAssetInProject(projectId, record.id))) {
+    const root = record.parentId ? await getRootAssetById(record.id) : null;
+    if (!root || !(await isAssetInProject(projectId, root.id))) {
       return null;
     }
+  }
+
+  if (record.parentId == null) {
+    const view = await getAssetViewById(record.id, { projectId });
     return {
-      asset: direct,
-      inputFilePath: direct.filePath,
-      inputFilename: direct.filename,
-      inputName: direct.name,
+      asset: view || { id: record.id, type: expectedType, name: record.name, filePath: record.filePath },
+      inputFilePath: record.filePath,
+      inputFilename: toAssetUrlPath(record.filePath),
+      inputName: record.name,
       isEdit: false,
       editId: null
     };
-  }
-
-  // Not a card-linked asset — try to resolve it as a child edit/version whose
-  // root lives in this project.
-  const record = await getAssetRecordById(assetId);
-  if (!record || !record.parentId || String(record.assetTypeName || '').toLowerCase() !== expectedType) {
-    return null;
-  }
-
-  const root = await getRootAssetById(assetId);
-  const rootInProject = root ? await getProjectAssetById(projectId, root.id) : null;
-  if (!rootInProject) {
-    return null;
   }
 
   const metadata = parseJson(record.metadata, {});
@@ -1750,6 +2029,55 @@ async function resolveProjectAssetSourceById(projectId, assetId, typeName) {
   };
 }
 
+// Resolve an "edit:<storedFilePath>" reference inside a project. The edit (or its
+// root) must be a member of the project; the returned `asset` is the root, so a
+// result produced from this input is saved as a version/edit of that root.
+async function resolveProjectEditSourceByFilePath(db, projectId, editFilePath, typeName) {
+  const child = await get(
+    db,
+    `SELECT child.id, child.parentId, child.name, child.filePath, child.width, child.height, child.metadata
+     FROM Assets child
+     JOIN AssetTypes childType ON childType.id = child.assetTypeId
+     WHERE child.filePath = ? AND child.parentId IS NOT NULL AND childType.name = ?
+     ORDER BY child.creationDate DESC, child.id DESC
+     LIMIT 1`,
+    [editFilePath, typeName]
+  );
+
+  if (!child) {
+    return null;
+  }
+
+  const belongs = await isAssetInProject(projectId, child.id)
+    || await isAssetInProject(projectId, child.parentId);
+  if (!belongs) {
+    return null;
+  }
+
+  const rootAsset = await getRootAssetById(child.parentId);
+  const assetView = rootAsset ? await getAssetViewById(rootAsset.id, { projectId }) : null;
+  const expectedType = typeName.toLowerCase();
+  const editMetadata = parseJson(child.metadata, {});
+
+  return {
+    asset: assetView && assetView.type === expectedType
+      ? assetView
+      : {
+        id: rootAsset?.id ?? child.parentId,
+        type: expectedType,
+        name: rootAsset?.name || child.name || '',
+        filePath: rootAsset?.filePath || child.filePath
+      },
+    inputFilePath: child.filePath,
+    inputFilename: toAssetUrlPath(child.filePath),
+    inputName: child.name || `${expectedType === 'mesh' ? 'Version' : 'Edit'} ${editMetadata?.editId || child.id}`,
+    width: child.width ?? 0,
+    height: child.height ?? 0,
+    isEdit: true,
+    editId: editMetadata?.editId || null
+  };
+}
+
 export async function resolveProjectImageSource(projectId, sourceReference) {
   const parsedReference = typeof sourceReference === 'string'
     ? sourceReference
@@ -1760,46 +2088,9 @@ export async function resolveProjectImageSource(projectId, sourceReference) {
   if (typeof parsedReference === 'string' && parsedReference.startsWith('edit:')) {
     const editFilePath = parsedReference.slice(5);
     const db = await getDb();
-    const row = await get(
-      db,
-       `SELECT projectAsset.id AS assetId, c.projectId, projectAsset.name AS assetName, projectAsset.filePath AS assetFilePath,
-              child.name AS editName, child.filePath AS editFilePath, child.width AS editWidth, child.height AS editHeight,
-              child.creationDate, child.metadata AS editMetadata
-       FROM Assets child
-       JOIN Assets sourceAsset ON sourceAsset.id = child.parentId
-       JOIN Assets projectAsset ON projectAsset.filePath = sourceAsset.filePath
-         AND projectAsset.assetTypeId = sourceAsset.assetTypeId
-       JOIN Cards_Assets ca ON ca.assetId = projectAsset.id
-       JOIN Cards c ON c.id = ca.cardId
-       JOIN AssetTypes sourceType ON sourceType.id = sourceAsset.assetTypeId
-       JOIN AssetTypes childType ON childType.id = child.assetTypeId
-       WHERE c.projectId = ? AND child.filePath = ? AND sourceType.name = 'Image' AND childType.name = 'Image'
-       ORDER BY c.creationDate DESC, projectAsset.creationDate DESC, projectAsset.id DESC
-       LIMIT 1`,
-      [projectId, editFilePath]
-    );
 
-    if (!row) {
-      return await resolveEditSourceByFilePath(db, editFilePath, 'Image');
-    }
-
-    const asset = await getProjectAssetById(projectId, row.assetId);
-    if (!asset) {
-      return await resolveEditSourceByFilePath(db, editFilePath, 'Image');
-    }
-
-    const editMetadata = parseJson(row.editMetadata, {});
-
-    return {
-      asset,
-      inputFilePath: row.editFilePath,
-      inputFilename: toAssetUrlPath(row.editFilePath),
-      inputName: row.editName || `Edit ${editMetadata?.editId || row.assetId}`,
-      width: row.editWidth ?? 0,
-      height: row.editHeight ?? 0,
-      isEdit: true,
-      editId: editMetadata?.editId || null
-    };
+    return await resolveProjectEditSourceByFilePath(db, projectId, editFilePath, 'Image')
+      || await resolveEditSourceByFilePath(db, editFilePath, 'Image');
   }
 
   const assetId = typeof parsedReference === 'string' && parsedReference.startsWith('asset:')
@@ -1845,9 +2136,8 @@ export async function resolveEditableSourceReference(projectId, type, filePathOr
     db,
     `SELECT a.id FROM Assets a
      JOIN AssetTypes at ON at.id = a.assetTypeId
-     JOIN Cards_Assets ca ON ca.assetId = a.id
-     JOIN Cards c ON c.id = ca.cardId
-     WHERE a.filePath = ? AND a.parentId IS NULL AND at.name = ? AND c.projectId = ?
+     JOIN Assets_Projects ap ON ap.assetId = a.id
+     WHERE a.filePath = ? AND a.parentId IS NULL AND at.name = ? AND ap.projectId = ?
      LIMIT 1`,
     [stored, normalizedType, normalizedProjectId]
   );
@@ -1855,16 +2145,21 @@ export async function resolveEditableSourceReference(projectId, type, filePathOr
     return { sourceReference: `asset:${projectRoot.id}`, isEdit: false };
   }
 
-  // 3. Library root not in this project → attach it (detached, no Kanban card).
+  // 3. Library root not in this project → make it a member. When the row already
+  // exists we just add the link; only a file with no Assets row at all needs a
+  // new record. (Before Assets_Projects this had to clone the asset row onto a
+  // detached card, which left duplicate Assets rows sharing one filePath.)
   const libraryAsset = await findLibraryAssetByFilePath(lowerType, stored);
+  if (libraryAsset) {
+    await linkAssetToProject(db, libraryAsset.id, normalizedProjectId);
+    return { sourceReference: `asset:${libraryAsset.id}`, isEdit: false, attached: true };
+  }
+
   const attached = await createProjectAsset({
     projectId: normalizedProjectId,
     type: lowerType,
-    name: libraryAsset?.name || stored.split('/').pop(),
+    name: stored.split('/').pop(),
     filePath: stored,
-    thumbnailPath: libraryAsset?.thumbnail || null,
-    width: libraryAsset?.width ?? 0,
-    height: libraryAsset?.height ?? 0,
     metadata: { source: 'ASSET LIB' },
     detached: true
   });
@@ -1881,46 +2176,9 @@ export async function resolveProjectMeshSource(projectId, sourceReference) {
   if (typeof parsedReference === 'string' && parsedReference.startsWith('edit:')) {
     const editFilePath = parsedReference.slice(5);
     const db = await getDb();
-    const row = await get(
-      db,
-       `SELECT projectAsset.id AS assetId, c.projectId, projectAsset.name AS assetName, projectAsset.filePath AS assetFilePath,
-              child.name AS editName, child.filePath AS editFilePath, child.width AS editWidth, child.height AS editHeight,
-              child.creationDate, child.metadata AS editMetadata
-       FROM Assets child
-       JOIN Assets sourceAsset ON sourceAsset.id = child.parentId
-       JOIN Assets projectAsset ON projectAsset.filePath = sourceAsset.filePath
-         AND projectAsset.assetTypeId = sourceAsset.assetTypeId
-       JOIN Cards_Assets ca ON ca.assetId = projectAsset.id
-       JOIN Cards c ON c.id = ca.cardId
-       JOIN AssetTypes sourceType ON sourceType.id = sourceAsset.assetTypeId
-       JOIN AssetTypes childType ON childType.id = child.assetTypeId
-       WHERE c.projectId = ? AND child.filePath = ? AND sourceType.name = 'Mesh' AND childType.name = 'Mesh'
-       ORDER BY c.creationDate DESC, projectAsset.creationDate DESC, projectAsset.id DESC
-       LIMIT 1`,
-      [projectId, editFilePath]
-    );
 
-    if (!row) {
-      return await resolveEditSourceByFilePath(db, editFilePath, 'Mesh');
-    }
-
-    const asset = await getProjectAssetById(projectId, row.assetId);
-    if (!asset) {
-      return await resolveEditSourceByFilePath(db, editFilePath, 'Mesh');
-    }
-
-    const editMetadata = parseJson(row.editMetadata, {});
-
-    return {
-      asset,
-      inputFilePath: row.editFilePath,
-      inputFilename: toAssetUrlPath(row.editFilePath),
-      inputName: row.editName || `Version ${editMetadata?.editId || row.assetId}`,
-      width: row.editWidth ?? 0,
-      height: row.editHeight ?? 0,
-      isEdit: true,
-      editId: editMetadata?.editId || null
-    };
+    return await resolveProjectEditSourceByFilePath(db, projectId, editFilePath, 'Mesh')
+      || await resolveEditSourceByFilePath(db, editFilePath, 'Mesh');
   }
 
   const assetId = typeof parsedReference === 'string' && parsedReference.startsWith('asset:')
@@ -1998,10 +2256,7 @@ export async function deleteProjectById(projectId, { deleteAssets = false } = {}
   if (deleteAssets) {
     const projectAssetRows = await all(
       db,
-      `SELECT DISTINCT ca.assetId AS assetId
-       FROM Cards_Assets ca
-       JOIN Cards c ON c.id = ca.cardId
-       WHERE c.projectId = ?`,
+      'SELECT DISTINCT assetId FROM Assets_Projects WHERE projectId = ?',
       [projectId]
     );
     const directIds = projectAssetRows.map(row => row.assetId);
@@ -2024,6 +2279,8 @@ export async function deleteProjectById(projectId, { deleteAssets = false } = {}
 
   const placeholders = candidateAssetIds.map(() => '?').join(',');
 
+  // The Projects row is gone, so its Assets_Projects rows cascaded with it: an
+  // asset with no membership left belonged to this project only and can go.
   const eligibleRows = await all(
     db,
     `SELECT a.id, a.filePath, a.thumbnail
@@ -2032,6 +2289,7 @@ export async function deleteProjectById(projectId, { deleteAssets = false } = {}
        AND a.assetTypeId NOT IN (
              SELECT id FROM AssetTypes WHERE name IN ('Workflow', 'Brush')
            )
+       AND NOT EXISTS (SELECT 1 FROM Assets_Projects WHERE Assets_Projects.assetId = a.id)
        AND NOT EXISTS (SELECT 1 FROM Cards_Assets WHERE Cards_Assets.assetId = a.id)`,
     candidateAssetIds
   );
@@ -2144,6 +2402,9 @@ async function setNodeCardAsset(db, cardId, assetId) {
 
   const owner = await get(db, 'SELECT projectId FROM Cards WHERE id = ?', [cardId]);
   if (owner) {
+    // Placing an asset on a node makes it part of that node's project.
+    await linkAssetToProject(db, Number(assetId), owner.projectId);
+
     const backingLinks = await all(
       db,
       `SELECT ca.cardId
@@ -2609,36 +2870,67 @@ export async function createTask(projectId, taskData = {}) {
   return mapTaskRow(row);
 }
 
-export async function listProjectAssets(projectId = null) {
+// Driven by Assets_Projects, so an asset belongs to a project whether or not it
+// has anywhere to sit on the board. Cards supply placement only, and the card
+// join is scoped to the same project so an asset shared across projects never
+// reports another project's card.
+//
+// Children (image edits / mesh versions) are normally returned nested in each
+// root's `children` array rather than as rows of their own. The exception is a
+// child linked to a project its root is NOT in — there is no root row to nest it
+// under, so it surfaces as a top-level row (with parentId set). Pass
+// includeChildren to get every linked child as a row regardless.
+export async function listProjectAssets(projectId = null, { includeChildren = false } = {}) {
   const db = await getDb();
   const params = [];
   let whereClause = `WHERE at.name IN ('Image', 'Mesh')`;
 
   if (projectId !== null && projectId !== undefined) {
-    whereClause += ' AND c.projectId = ?';
-    params.push(projectId);
+    whereClause += ' AND ap.projectId = ?';
+    params.push(Number(projectId));
+  }
+
+  if (!includeChildren) {
+    whereClause += `
+       AND (
+         a.parentId IS NULL
+         OR NOT EXISTS (
+           SELECT 1 FROM Assets_Projects rootLink
+           WHERE rootLink.assetId = a.parentId AND rootLink.projectId = ap.projectId
+         )
+       )`;
   }
 
   const rows = await all(
     db,
-    `SELECT a.id, a.name, a.filePath, a.creationDate, a.metadata, a.thumbnail, a.width, a.height,
+    `SELECT a.id, a.name, a.filePath, a.creationDate, a.metadata, a.thumbnail, a.width, a.height, a.parentId,
             at.name AS assetTypeName,
-            c.projectId, c.id AS cardId, c.clientKey, c.name AS cardName, c.status AS cardStatus, c.progress AS cardProgress,
+            ap.projectId,
+            c.id AS cardId, c.clientKey, c.name AS cardName, c.status AS cardStatus, c.progress AS cardProgress,
             c.metadata AS cardMetadata, c.kanbanColumnId, kc.name AS kanbanColumnName, c.position AS cardPosition,
             ca.position AS assetPosition
-     FROM Assets a
+     FROM Assets_Projects ap
+     JOIN Assets a ON a.id = ap.assetId
      JOIN AssetTypes at ON at.id = a.assetTypeId
-     JOIN Cards_Assets ca ON ca.assetId = a.id
-     JOIN Cards c ON c.id = ca.cardId
-     -- LEFT JOIN so this returns ALL project assets, including those on
-     -- column-less "detached" container cards (Brainstorming Board assets) —
-     -- MCP/clients rely on the full list. The Kanban board frontend is
-     -- responsible for hiding null-column (detached) assets from its columns.
+     -- At most ONE placement row per (asset, project): pick this project's first
+     -- card, otherwise the asset has no card and every card column stays NULL.
+     -- The Kanban board is responsible for hiding card-less assets from columns.
+     LEFT JOIN Cards_Assets ca ON ca.assetId = a.id AND ca.cardId = (
+       SELECT innerCa.cardId
+       FROM Cards_Assets innerCa
+       JOIN Cards innerCard ON innerCard.id = innerCa.cardId
+       WHERE innerCa.assetId = a.id AND innerCard.projectId = ap.projectId
+       ORDER BY innerCa.position ASC, innerCa.cardId ASC
+       LIMIT 1
+     )
+     LEFT JOIN Cards c ON c.id = ca.cardId
      LEFT JOIN Columns kc ON kc.id = c.kanbanColumnId
      ${whereClause}
      ORDER BY c.kanbanColumnId ASC, c.position ASC, ca.position ASC, a.creationDate DESC`,
     params
   );
+
+  const projectIdsByAssetId = await listProjectIdsByAssetIds(db, rows.map(row => row.id));
 
   const assetFilePaths = [...new Set(rows.map(row => row.filePath).filter(Boolean))];
 
@@ -2693,7 +2985,8 @@ export async function listProjectAssets(projectId = null) {
       ...mapAssetRow({
         ...row,
         name: canonicalAsset?.name || row.name,
-        thumbnail: row.thumbnail || canonicalAsset?.thumbnail || null
+        thumbnail: row.thumbnail || canonicalAsset?.thumbnail || null,
+        projectIds: projectIdsByAssetId.get(row.id) || (row.projectId != null ? [row.projectId] : [])
       }),
       children: assetChildren,
       childCount: assetChildren.length,
@@ -2746,7 +3039,7 @@ export async function createCardAttribute(projectId, externalCardId, { attribute
   return await getCardAttributeView(card.id, position);
 }
 
-export async function createAssetEditRecord({ assetId, editId, name = '', filePath, width = 0, height = 0, createdAt = Date.now() }) {
+export async function createAssetEditRecord({ assetId, editId, name = '', filePath, width = 0, height = 0, createdAt = Date.now(), projectId = null }) {
   const parentAsset = await getRootAssetById(assetId);
 
   if (!parentAsset) {
@@ -2767,6 +3060,15 @@ export async function createAssetEditRecord({ assetId, editId, name = '', filePa
     createdAt,
     parentId: parentAsset.id
   });
+
+  // An edit belongs to the same project(s) as the image it was made from, so it
+  // shows up in that project without needing a card of its own.
+  const db = await getDb();
+  await inheritProjectLinks(db, Number(assetId), childAssetId);
+  await inheritProjectLinks(db, parentAsset.id, childAssetId);
+  if (projectId != null) {
+    await linkAssetToProject(db, childAssetId, projectId);
+  }
 
   return {
     id: childAssetId,
@@ -2993,38 +3295,16 @@ export async function moveCard(projectId, externalCardId, kanbanColumnId, positi
   return await resolveProjectCard(projectId, externalCardId);
 }
 
-// A per-project "container" card that holds assets which must be linked to the
-// project but must NOT appear on the Kanban board. It has no kanbanColumnId (so
-// listProjectCards' INNER JOIN on Columns excludes it) and no nodeTypeId (so the
-// graph node listing excludes it too) — yet the library listing still resolves
-// the asset's project through it. Used for Brainstorming Board generations.
-async function ensureDetachedCard(projectId, clientKey = 'board-assets') {
-  const normalizedProjectId = await ensureProjectExists(projectId);
-  const db = await getDb();
-
-  const existing = await get(
-    db,
-    'SELECT id, clientKey FROM Cards WHERE projectId = ? AND clientKey = ? AND kanbanColumnId IS NULL AND nodeTypeId IS NULL',
-    [normalizedProjectId, clientKey]
-  );
-  if (existing) {
-    return { id: existing.id, clientKey: existing.clientKey };
-  }
-
-  const result = await run(
-    db,
-    `INSERT INTO Cards (projectId, kanbanColumnId, nodeTypeId, clientKey, name, position, creationDate)
-     VALUES (?, NULL, NULL, ?, ?, NULL, ?)`,
-    [normalizedProjectId, clientKey, 'Board assets', Date.now()]
-  );
-
-  return { id: result.lastID, clientKey };
-}
-
 export async function createProjectAsset({ projectId, type, name, filePath, thumbnailPath = null, width = 0, height = 0, metadata = {}, createdAt = Date.now(), detached = false }) {
+  const normalizedProjectId = await ensureProjectExists(projectId);
+
+  // `detached` means "part of the project, but with no place on the Kanban
+  // board" (Brainstorming Board generations). That used to require a fake
+  // column-less container card to hang a Cards_Assets row on; membership now
+  // lives in Assets_Projects, so a detached asset simply gets no card at all.
   const card = detached
-    ? await ensureDetachedCard(projectId)
-    : await ensureCard(projectId, 'Images', metadata.cardId, {
+    ? null
+    : await ensureCard(normalizedProjectId, 'Images', metadata.cardId, {
         creationDate: createdAt
       });
   const assetId = await insertAsset({
@@ -3038,15 +3318,20 @@ export async function createProjectAsset({ projectId, type, name, filePath, thum
     createdAt
   });
   const db = await getDb();
-  const position = await getNextCardAssetPosition(card.id);
 
-  await run(
-    db,
-    'INSERT INTO Cards_Assets (cardId, assetId, position) VALUES (?, ?, ?)',
-    [card.id, assetId, position]
-  );
+  await linkAssetToProject(db, assetId, normalizedProjectId);
 
-  return await getAssetViewById(assetId);
+  if (card) {
+    const position = await getNextCardAssetPosition(card.id);
+
+    await run(
+      db,
+      'INSERT INTO Cards_Assets (cardId, assetId, position) VALUES (?, ?, ?)',
+      [card.id, assetId, position]
+    );
+  }
+
+  return await getAssetViewById(assetId, { projectId: normalizedProjectId });
 }
 
 export async function updateAssetThumbnail(assetId, thumbnailPath) {
@@ -3105,7 +3390,7 @@ export async function renameLibraryAssetByFilePath(type, filePath, name) {
   const matchingAssets = await all(
     db,
       `SELECT a.id, a.thumbnail, a.width, a.height,
-            EXISTS (SELECT 1 FROM Cards_Assets ca WHERE ca.assetId = a.id) AS isLinked
+            EXISTS (SELECT 1 FROM Assets_Projects ap WHERE ap.assetId = a.id) AS isLinked
      FROM Assets a
      JOIN AssetTypes at ON at.id = a.assetTypeId
      WHERE at.name = ?
@@ -3256,6 +3541,21 @@ function escapeLikePattern(value) {
 // (an "edit:<filePath>" reference held in a card attribute or node metadata).
 // Returns the first project found, or null when the version is unlinked.
 async function findProjectLinkedToVersion(db, versionId, editReference) {
+  // 0. The version's own project membership — the direct answer. The probes
+  //    below are heuristics kept for references that live only in card/node
+  //    state (a selected source that was never attached as an asset).
+  const membership = await get(
+    db,
+    `SELECT ap.projectId, p.name AS projectName
+     FROM Assets_Projects ap
+     LEFT JOIN Projects p ON p.id = ap.projectId
+     WHERE ap.assetId = ?
+     ORDER BY ap.addedAt DESC, ap.projectId DESC
+     LIMIT 1`,
+    [versionId]
+  );
+  if (membership) return membership;
+
   // 1. Kanban card with this version selected as a workflow input source.
   const cardAttribute = await get(
     db,
@@ -3335,6 +3635,7 @@ export async function deleteAssetVersionByFilePath(filePath, { force = false } =
   // ON DELETE SET NULL, so direct graph-node attachments clear when the row goes.
   await run(db, 'DELETE FROM Cards_Attributes WHERE attributeValue = ?', [editReference]);
   await run(db, 'DELETE FROM Cards_Assets WHERE assetId = ?', [version.id]);
+  await run(db, 'DELETE FROM Assets_Projects WHERE assetId = ?', [version.id]);
 
   await run(db, 'DELETE FROM Assets WHERE id = ? AND parentId IS NOT NULL', [version.id]);
 
@@ -3350,18 +3651,21 @@ export async function deleteLibraryAssetByFilePath(type, filePath, { force = fal
   const db = await getDb();
   const storedFilePath = toStoredAssetPath(type, filePath);
   const normalizedType = normalizeAssetTypeName(type);
+  // Protected when the asset itself OR any of its edits/versions belongs to a
+  // project — deleting the root file would break the whole tree.
   const linkedProject = await get(
     db,
-    `SELECT c.projectId, p.name AS projectName
+    `SELECT ap.projectId, p.name AS projectName
      FROM Assets a
      JOIN AssetTypes at ON at.id = a.assetTypeId
-     JOIN Cards_Assets ca ON ca.assetId = a.id
-     JOIN Cards c ON c.id = ca.cardId
-     LEFT JOIN Projects p ON p.id = c.projectId
+     JOIN Assets_Projects ap ON ap.assetId = a.id OR ap.assetId IN (
+       SELECT child.id FROM Assets child WHERE child.parentId = a.id
+     )
+     LEFT JOIN Projects p ON p.id = ap.projectId
      WHERE at.name = ?
        AND a.parentId IS NULL
        AND a.filePath = ?
-     ORDER BY c.creationDate DESC
+     ORDER BY ap.addedAt DESC
      LIMIT 1`,
     [normalizedType, storedFilePath]
   );
@@ -3512,7 +3816,10 @@ async function deleteCardsIfEmpty(cardIds = []) {
   }
 }
 
-export async function deleteAssetById(assetId) {
+// Removing an asset that still belongs to a project only detaches it (the file
+// and the library record survive); a project-less asset is deleted for real.
+// Pass projectId to detach from ONE project and leave the others alone.
+export async function deleteAssetById(assetId, { projectId = null } = {}) {
   const db = await getDb();
   const asset = await get(db, 'SELECT id FROM Assets WHERE id = ?', [assetId]);
 
@@ -3520,13 +3827,26 @@ export async function deleteAssetById(assetId) {
     return { status: 'not-found' };
   }
 
+  if (projectId != null) {
+    return await unlinkAssetFromProjectById(projectId, assetId);
+  }
+
+  const memberships = await all(db, 'SELECT projectId FROM Assets_Projects WHERE assetId = ?', [assetId]);
   const links = await all(db, 'SELECT cardId FROM Cards_Assets WHERE assetId = ?', [assetId]);
-  if (links.length > 0) {
-    await run(db, 'DELETE FROM Cards_Assets WHERE assetId = ?', [assetId]);
-    for (const link of links) {
-      await normalizeCardAssetPositions(link.cardId);
+
+  if (memberships.length > 0 || links.length > 0) {
+    for (const membership of memberships) {
+      await unlinkAssetFromProject(db, assetId, membership.projectId, { cascadeChildren: true });
     }
-    await deleteCardsIfEmpty(links.map(link => link.cardId));
+
+    if (links.length > 0) {
+      await run(db, 'DELETE FROM Cards_Assets WHERE assetId = ?', [assetId]);
+      for (const link of links) {
+        await normalizeCardAssetPositions(link.cardId);
+      }
+      await deleteCardsIfEmpty(links.map(link => link.cardId));
+    }
+
     return { status: 'unlinked' };
   }
 
@@ -3699,11 +4019,10 @@ export async function listLibraryAssetsByType(type, baseUrl) {
       db,
       `SELECT a.id, a.name, a.filePath, a.thumbnail, a.width, a.height, a.creationDate,
               (
-                SELECT c.projectId
-                FROM Cards_Assets ca
-                JOIN Cards c ON c.id = ca.cardId
-                WHERE ca.assetId = a.id
-                ORDER BY c.creationDate DESC, c.id DESC
+                SELECT ap.projectId
+                FROM Assets_Projects ap
+                WHERE ap.assetId = a.id
+                ORDER BY ap.addedAt DESC, ap.projectId DESC
                 LIMIT 1
               ) AS projectId
        FROM Assets a
@@ -3726,19 +4045,22 @@ export async function listLibraryAssetsByType(type, baseUrl) {
 
   // Every project an asset is linked to (an asset can belong to several), so the
   // library UI can show it under each project when filtering/grouping by project.
+  // A root also counts as belonging to a project when one of its edits/versions
+  // is linked there — otherwise attaching an edit to a project would leave the
+  // Assets page with nothing to show, since it lists roots.
   const projectLinkRows = candidateStoredPaths.length > 0
     ? await all(
       db,
-      `SELECT DISTINCT a.filePath, c.projectId
+      `SELECT DISTINCT a.filePath, ap.projectId
        FROM Assets a
        JOIN AssetTypes at ON at.id = a.assetTypeId
-       JOIN Cards_Assets ca ON ca.assetId = a.id
-       JOIN Cards c ON c.id = ca.cardId
+       JOIN Assets_Projects ap ON ap.assetId = a.id OR ap.assetId IN (
+         SELECT child.id FROM Assets child WHERE child.parentId = a.id
+       )
        WHERE at.name = ?
          AND a.parentId IS NULL
          AND a.filePath IN (${candidateStoredPaths.map(() => '?').join(', ')})
-         AND c.projectId IS NOT NULL
-       ORDER BY c.projectId`,
+       ORDER BY ap.projectId`,
       [normalizeAssetTypeName(type), ...candidateStoredPaths]
     )
     : [];
@@ -3905,7 +4227,10 @@ export async function deletePaintDocument(assetId) {
 // project, allocating fresh asset IDs/filenames and remapping every reference.
 // ---------------------------------------------------------------------------
 
-export const PROJECT_EXPORT_SCHEMA_VERSION = 1;
+// 2 added `projectAssetRefIds` (explicit Assets_Projects membership). Version 1
+// bundles are still importable — their membership is derived from card links.
+export const PROJECT_EXPORT_SCHEMA_VERSION = 2;
+const SUPPORTED_PROJECT_EXPORT_SCHEMA_VERSIONS = [1, 2];
 
 // Map an AssetTypes.name ("Image", "Mesh", …) to its on-disk subdirectory.
 function assetSubdirForTypeName(typeName) {
@@ -4014,6 +4339,16 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     [project.id]
   );
   cardAssetRows.forEach(row => seedAssetIds.add(row.assetId));
+
+  // Project membership itself — the authoritative set, and a superset of the
+  // card links above (which are kept as a seed so a bundle exported from a
+  // half-migrated database still carries everything).
+  const memberAssetRows = await all(
+    db,
+    'SELECT assetId FROM Assets_Projects WHERE projectId = ?',
+    [project.id]
+  );
+  memberAssetRows.forEach(row => seedAssetIds.add(row.assetId));
 
   // Expand the seed set: include every ancestor (up the parentId chain) and
   // every descendant so the full version/edit tree travels with the project.
@@ -4146,6 +4481,12 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     },
     mode,
     assets,
+    // Asset <-> project membership (schemaVersion 2+). Independent of cards, so
+    // detached assets and edits/versions attached straight to the project travel
+    // with the bundle. v1 bundles have no such list and fall back to card links.
+    projectAssetRefIds: memberAssetRows
+      .map(row => row.assetId)
+      .filter(assetId => collectedIds.has(assetId)),
     cards: cards.map(card => ({
       refKey: card.id,
       columnName: card.columnName,
@@ -4291,7 +4632,7 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
   if (!manifest || typeof manifest !== 'object') {
     throw new Error('The .3dgp file is empty or invalid.');
   }
-  if (Number(manifest.schemaVersion) !== PROJECT_EXPORT_SCHEMA_VERSION) {
+  if (!SUPPORTED_PROJECT_EXPORT_SCHEMA_VERSIONS.includes(Number(manifest.schemaVersion))) {
     throw new Error(`Unsupported .3dgp version: ${manifest.schemaVersion}`);
   }
 
@@ -4533,6 +4874,49 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
           `INSERT OR IGNORE INTO Connections (sourceCardId, targetCardId, inputId, outputId) VALUES (?, ?, ?, ?)`,
           [sourceId, targetId, conn.inputId, conn.outputId]
         );
+      }
+    }
+
+    // --- Phase E: asset <-> project membership (Assets_Projects) ---
+    {
+      const now = Date.now();
+
+      for (const refId of manifest.projectAssetRefIds || []) {
+        const newAssetId = assetIdMap.get(refId);
+        if (newAssetId == null) continue;
+        await linkAssetToProject(db, newAssetId, newProjectId);
+      }
+
+      // Anything placed on a card or node is a member too — this is also what
+      // gives v1 bundles (no projectAssetRefIds) their membership.
+      await run(
+        db,
+        `INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt)
+         SELECT DISTINCT ca.assetId, c.projectId, ?
+         FROM Cards_Assets ca JOIN Cards c ON c.id = ca.cardId
+         WHERE c.projectId = ?`,
+        [now, newProjectId]
+      );
+
+      // v1 had no per-child links: an edit/version belonged to whatever project
+      // its root did. Reproduce that so nothing goes missing on import. v2
+      // bundles carry each child's membership explicitly, so leave them alone.
+      if (Number(manifest.schemaVersion) === 1) {
+        let inserted = 0;
+        let guard = 0;
+        do {
+          const result = await run(
+            db,
+            `INSERT OR IGNORE INTO Assets_Projects (assetId, projectId, addedAt)
+             SELECT child.id, ap.projectId, ?
+             FROM Assets child
+             JOIN Assets_Projects ap ON ap.assetId = child.parentId
+             WHERE ap.projectId = ? AND child.parentId IS NOT NULL`,
+            [now, newProjectId]
+          );
+          inserted = result?.changes ?? 0;
+          guard += 1;
+        } while (inserted > 0 && guard < 100);
       }
     }
 
