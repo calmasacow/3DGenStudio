@@ -24,6 +24,17 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.1.1',
+    date: '2026-07-27',
+    items: [
+			'ComfyUI: Custom models folder',
+			'Mesh Export: Save last output folder',
+			'DB: Fixed assets linked to a project',
+			'Kanban: Can add more meshes and images from any column',
+			'Desktop App: Fixed Graph page slowness'
+    ],
+  },
+  {
     version: 'v2.1.0',
     date: '2026-07-23',
     items: [
