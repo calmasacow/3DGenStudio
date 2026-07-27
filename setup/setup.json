@@ -181,7 +181,8 @@
 					"Inputs": [
 						{ "Node": "112", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "116", "Input": "seed",  "Name": "Seed",   "Type": "Number" },
-						{ "Node": "116", "Input": "steps", "Name": "Steps",  "Type": "Number" }
+						{ "Node": "116", "Input": "steps", "Name": "Steps",  "Type": "Number" },
+						{ "Node": "114",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "90", "Name": "Save Image", "Type": "Image" }
@@ -294,7 +295,8 @@
 					"Inputs": [
 						{ "Node": "34:27", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "34:3",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
-						{ "Node": "34:3",  "Input": "steps", "Name": "Steps",  "Type": "Number" }
+						{ "Node": "34:3",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
+						{ "Node": "34:13",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "43", "Name": "Save Image", "Type": "Image" }
@@ -327,7 +329,8 @@
 						{ "Node": "6", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "7",  "Input": "noise_seed",  "Name": "Seed",   "Type": "Number" },
 						{ "Node": "8:17",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
-						{ "Node": "65",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
+						{ "Node": "65",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" },
+						{ "Node": "8:18",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "63", "Name": "Save Image", "Type": "Image" }
@@ -389,7 +392,8 @@
 						{ "Node": "6", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "7",  "Input": "noise_seed",  "Name": "Seed",   "Type": "Number" },
 						{ "Node": "8:17",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
-						{ "Node": "65",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
+						{ "Node": "65",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" },
+						{ "Node": "8:18",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "63", "Name": "Save Image", "Type": "Image" }
@@ -473,7 +477,8 @@
 						{ "Node": "6", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "2",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
 						{ "Node": "2",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
-						{ "Node": "31",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
+						{ "Node": "31",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" },
+						{ "Node": "10",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "22", "Name": "Save Image", "Type": "Image" }
@@ -498,7 +503,8 @@
 						{ "Node": "23", "Input": "text",  "Name": "Prompt", "Type": "String" },
 						{ "Node": "3",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
 						{ "Node": "3",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
-						{ "Node": "46",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
+						{ "Node": "46",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" },
+						{ "Node": "43",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
 						{ "Node": "47", "Name": "Save Image", "Type": "Image" }
