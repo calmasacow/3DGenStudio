@@ -7436,7 +7436,7 @@ app.post('/api/settings', async (req, res) => {
 
     // Get the primary GPU controller
     const gpu = graphics.controllers[0] || {};
-    
+
     res.json({
       cpu: Math.round(cpu.currentLoad),
       ram: {
@@ -7632,7 +7632,8 @@ async function findComfyModelFile(comfyPath, relativeDir, fileName, roots) {
     const size = await fileSizeOrNull(candidate);
     if (size !== null && size > 0) return { size, path: candidate };
   }
-  return { size: null, path: candidates[0] };
+  const externalCandidate = roots.filter(x => parts.includes(x.key)).map(x => path.join(x.root, fileName))[0];
+  return { size: null, path: externalCandidate || candidates[0] };
 }
 
 
