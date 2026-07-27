@@ -785,7 +785,11 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  backdrop-filter: blur(10px);
+  /* A flat fill instead of backdrop-filter: blur(). Every blurred element inside
+     the React Flow viewport costs a backdrop readback per frame, and with 3-4
+     badges per node (70+ on screen at low zoom) that collapsed dragging to
+     ~2 fps in the desktop app (Electron/Chromium 130) while browsers coped. */
+  background: rgba(12, 14, 16, 0.55);
   pointer-events: none;
 }
 
