@@ -138,7 +138,7 @@ export default function KanbanPage() {
   const fileInputRef = useRef(null)
   const fileUploadContextRef = useRef({ cardId: null, closeDraft: true })
   const meshFileInputRef = useRef(null)
-  const meshUploadContextRef = useRef({ closeDraft: true })
+  const meshUploadContextRef = useRef({ cardId: null, closeDraft: true })
   const pendingMeshProgressSubscriptionRef = useRef(null)
   const pendingComfyProgressSubscriptionRef = useRef(null)
   const imageEditProgressSubscriptionsRef = useRef(new Map())
@@ -147,11 +147,11 @@ export default function KanbanPage() {
 	
 	const [assetSelectorOpen, setAssetSelectorOpen] = useState(false);
 	const [pendingAssetCardId, setPendingAssetCardId] = useState(null);
-	const [assetSelectorType, setAssetSelectorType] = useState('image'); // only 'image' for now	
+	const [assetSelectorType, setAssetSelectorType] = useState('image'); // 'image' | 'mesh'
 
-	const handleOpenAssetSelector = (cardId) => {
+	const handleOpenAssetSelector = (cardId, type = 'image') => {
 		setPendingAssetCardId(cardId);
-		setAssetSelectorType('image');
+		setAssetSelectorType(type);
 		setAssetSelectorOpen(true);
 	};
 
@@ -237,6 +237,7 @@ export default function KanbanPage() {
   }
 
   const openImageSourceMenu = (cardId = null) => {
+    setMeshDraft(null)
     setImageDraft({ mode: 'select', cardId })
   }
 
@@ -711,7 +712,10 @@ export default function KanbanPage() {
 				}
 			});
 			if (isMesh) {
-				await moveCardToMeshGen(cardId);
+				// Only a freshly created card needs relocating — an existing card keeps its column.
+				if (!pendingAssetCardId) {
+					await moveCardToMeshGen(cardId);
+				}
 				await ensureGeneratedMeshThumbnails(attachedAsset);
 			}
 			await refreshProjectAssets();
@@ -1041,12 +1045,15 @@ export default function KanbanPage() {
   // ---- "Add New Mesh" (Mesh Gen column) ----------------------------------
   const selectedMeshComfyWorkflow = meshGenWorkflows.find(workflow => workflow.id == meshDraft?.workflowId) || null
 
-  const openMeshSourceMenu = () => {
-    setMeshDraft({ mode: 'select' })
+  // `cardId` targets an existing card ("Add more meshes" on any card); null
+  // creates a brand new Mesh Gen card ("ADD NEW MESH" at the bottom of the column).
+  const openMeshSourceMenu = (cardId = null) => {
+    setImageDraft(null)
+    setMeshDraft({ mode: 'select', cardId })
   }
 
-  const openMeshLocalFilePicker = () => {
-    meshUploadContextRef.current = { closeDraft: true }
+  const openMeshLocalFilePicker = (cardId = meshDraft?.cardId || null) => {
+    meshUploadContextRef.current = { cardId, closeDraft: true }
 
     if (meshFileInputRef.current) {
       meshFileInputRef.current.value = ''
@@ -1058,8 +1065,8 @@ export default function KanbanPage() {
     const files = Array.from(e.target.files || [])
     if (files.length === 0) return
 
-    const { closeDraft } = meshUploadContextRef.current
-    const cardId = createImageCardId()
+    const { cardId: targetCardId, closeDraft } = meshUploadContextRef.current
+    const cardId = targetCardId || createImageCardId()
 
     try {
       setLoading(true)
@@ -1075,7 +1082,10 @@ export default function KanbanPage() {
         uploadedAssets.push(uploaded)
       }
 
-      await moveCardToMeshGen(cardId)
+      // Only a freshly created card needs relocating — an existing card keeps its column.
+      if (!targetCardId) {
+        await moveCardToMeshGen(cardId)
+      }
       await ensureGeneratedMeshThumbnails(uploadedAssets)
       await refreshProjectAssets()
 
@@ -1088,23 +1098,21 @@ export default function KanbanPage() {
     } finally {
       setLoading(false)
       e.target.value = ''
-      meshUploadContextRef.current = { closeDraft: true }
+      meshUploadContextRef.current = { cardId: null, closeDraft: true }
     }
   }
 
-  const openMeshAssetLibrary = async () => {
+  const openMeshAssetLibrary = async (cardId = meshDraft?.cardId || null) => {
     try {
       await getLibraryAssets() // preload library if needed
-      setPendingAssetCardId(null)
-      setAssetSelectorType('mesh')
-      setAssetSelectorOpen(true)
+      handleOpenAssetSelector(cardId, 'mesh')
     } catch (err) {
       console.error('Failed to load mesh library:', err)
       showStatusMessage(err.message || 'Failed to load meshes library', 'error')
     }
   }
 
-  const openMeshComfyDraft = () => {
+  const openMeshComfyDraft = (cardId = meshDraft?.cardId || null) => {
     if (meshGenWorkflows.length === 0) {
       showStatusMessage('No compatible ComfyUI workflows available. Import a workflow with at least one mesh output.', 'error')
       return
@@ -1112,16 +1120,16 @@ export default function KanbanPage() {
 
     setMeshDraft({
       ...getComfyDraftFromWorkflow(meshGenWorkflows[0]),
-      cardId: null
+      cardId
     })
   }
 
   const handleMeshComfyWorkflowChange = (workflowId) => {
     const workflow = meshGenWorkflows.find(item => item.id == workflowId)
-    setMeshDraft({
+    setMeshDraft(prev => ({
       ...getComfyDraftFromWorkflow(workflow),
-      cardId: null
-    })
+      cardId: prev?.cardId || null
+    }))
   }
 
   const handleMeshComfyInputChange = (parameter, rawValue) => {
@@ -1183,7 +1191,8 @@ export default function KanbanPage() {
           detail: 'Preparing ComfyUI workflow',
           progressPercent: 0,
           currentNodeLabel: 'Waiting for ComfyUI execution to start',
-          promptId
+          promptId,
+          cardId: draft.cardId || null
         })
         setMeshDraft(null)
         setLoading(true)
@@ -1211,7 +1220,10 @@ export default function KanbanPage() {
           currentNodeLabel: 'Generated mesh received'
         } : prev)
         await persistWorkflowDefaultsIfRequested(draft, workflow)
-        await moveCardToMeshGen(cardId)
+        // Only a freshly created card needs relocating — an existing card keeps its column.
+        if (!draft.cardId) {
+          await moveCardToMeshGen(cardId)
+        }
         await ensureGeneratedMeshThumbnails(generatedMeshes)
         await refreshProjectAssets()
         completeJob(promptId, { status: 'completed' })
@@ -1246,16 +1258,16 @@ export default function KanbanPage() {
     }
 
     const prompt = draft.prompt.trim()
-    const cardId = createImageCardId()
+    const cardId = draft.cardId || createImageCardId()
     const isTencentMeshApi = isTencentMeshGenerationApi(draft.selectedApi)
     const isTripoMeshApi = isTripoMeshGenerationApi(draft.selectedApi)
     const isHitemMeshApi = isHitemMeshGenerationApi(draft.selectedApi)
     const isTripoP1Model = isTripoMeshApi && (draft.modelVersion || 'v2.5-20250123') === 'P1-20260311'
 
-    // Hitem3D is image-to-3D only; the "Add New Mesh" draft has no image source,
-    // so it must be run from a Mesh Gen card that has an image dragged into it.
+    // Hitem3D is image-to-3D only; the mesh source draft has no image source, so
+    // it must be run from a card that already holds an image, via its Action menu.
     if (isHitemMeshApi) {
-      showStatusMessage('Hitem3D needs an image source. Drag an image into the Mesh Gen column and run it from the card.', 'error')
+      showStatusMessage('Hitem3D needs an image source. Add an image to a card and run it from the card Action menu.', 'error')
       return
     }
 
@@ -1270,7 +1282,8 @@ export default function KanbanPage() {
         selectedApi: draft.selectedApi,
         title: name,
         source: providerLabel,
-        detail: 'Submitting mesh generation request'
+        detail: 'Submitting mesh generation request',
+        cardId: draft.cardId || null
       })
       setMeshDraft(null)
       setLoading(true)
@@ -1658,7 +1671,9 @@ export default function KanbanPage() {
 
   const getCardPreviewItems = (card, showAttributes = false) => {
     const hasMeshAssets = (card.meshAssets?.length || 0) > 0
-    const useMixedAssetCarousel = showAttributes && [3, 4, 5, 6].includes(card.kanbanColumnId) && hasMeshAssets
+    // Image Edit (2) is included so a mesh attached there via "Add more meshes"
+    // stays visible instead of being dropped from the preview.
+    const useMixedAssetCarousel = showAttributes && [2, 3, 4, 5, 6].includes(card.kanbanColumnId) && hasMeshAssets
 
     if (!useMixedAssetCarousel) {
       return []
@@ -2995,9 +3010,18 @@ export default function KanbanPage() {
     )
   }
 
-  const draftColumnId = imageDraft?.cardId
-    ? imageCards.find(card => card.id === imageDraft.cardId)?.kanbanColumnId || IMAGE_CARD_COLUMNS[0].dbId
-    : IMAGE_CARD_COLUMNS[0].dbId
+  // Image / mesh source drafts render inside the column of the card they target
+  // ("Add more images" / "Add more meshes"), and default to their own column when
+  // they are creating a brand new card.
+  const resolveDraftColumnId = (cardId, fallbackColumnId) => (
+    cardId
+      ? imageCards.find(card => card.id === cardId)?.kanbanColumnId || fallbackColumnId
+      : fallbackColumnId
+  )
+
+  const draftColumnId = resolveDraftColumnId(imageDraft?.cardId, IMAGE_CARD_COLUMNS[0].dbId)
+  const meshDraftColumnId = resolveDraftColumnId(meshDraft?.cardId, MESH_GEN_COLUMN_ID)
+  const pendingMeshColumnId = resolveDraftColumnId(pendingMeshGeneration?.cardId, MESH_GEN_COLUMN_ID)
 
   const renderDropZone = (columnId, position, isEmpty = false) => {
     const isActive = dropTarget?.columnId === columnId && dropTarget?.position === position
@@ -3010,7 +3034,11 @@ export default function KanbanPage() {
         onDragOver={event => handleCardDragOver(event, columnId, position)}
         onDrop={event => handleCardDrop(event, columnId, position)}
       >
-        {isEmpty && !imageDraft && !pendingImageGeneration && !(columnId === MESH_GEN_COLUMN_ID && (meshDraft || pendingMeshGeneration)) && (
+        {isEmpty
+          && !(imageDraft && draftColumnId === columnId)
+          && !(pendingImageGeneration && columnId === IMAGE_CARD_COLUMNS[0].dbId)
+          && !(meshDraft && meshDraftColumnId === columnId)
+          && !(pendingMeshGeneration && pendingMeshColumnId === columnId) && (
           <span className="kanban-drop-zone__label font-label">
             {column?.emptyLabel || 'Drop image cards here'}
           </span>
@@ -3049,6 +3077,7 @@ export default function KanbanPage() {
     handleCardDragStart,
     handleCardDragEnd,
     openImageSourceMenu,
+    openMeshSourceMenu,
     handleRemoveImageCard,
     openMeshPreview,
     handleRemoveImage,
@@ -3334,44 +3363,33 @@ export default function KanbanPage() {
             </div>
           )}
 
-          {column.dbId === IMAGE_CARD_COLUMNS[0].dbId && (
-            <>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                style={{ display: 'none' }}
-                onChange={handleFileUpload}
-                ref={fileInputRef}
-              />
-
-              {!imageDraft && !pendingImageGeneration && (
-                <button className="kanban-col__add-btn" id="add-image-btn" onClick={() => openImageSourceMenu()}>
-                  <span className="material-symbols-outlined">add_photo_alternate</span>
-                  <span className="font-label">ADD NEW IMAGE</span>
-                </button>
-              )}
-            </>
+          {column.dbId === IMAGE_CARD_COLUMNS[0].dbId
+            && !(imageDraft && draftColumnId === column.dbId)
+            && !pendingImageGeneration && (
+            <button className="kanban-col__add-btn" id="add-image-btn" onClick={() => openImageSourceMenu()}>
+              <span className="material-symbols-outlined">add_photo_alternate</span>
+              <span className="font-label">ADD NEW IMAGE</span>
+            </button>
           )}
 
-          {meshDraft && column.dbId === MESH_GEN_COLUMN_ID && (
+          {meshDraft && meshDraftColumnId === column.dbId && (
             <div className="image-card image-card--draft">
               {meshDraft.mode === 'select' && (
                 <div className="image-card__options">
                   <span className="font-label" style={{ fontSize: '0.65rem', color: 'var(--primary)', marginBottom: '0.5rem' }}>MESH SOURCE</span>
-                  <button className="option-btn" onClick={() => openMeshLocalFilePicker()}>
+                  <button className="option-btn" onClick={() => openMeshLocalFilePicker(meshDraft?.cardId || null)}>
                     <span className="material-symbols-outlined">computer</span>
                     Local Computer
                   </button>
-                  <button className="option-btn" onClick={() => openMeshAssetLibrary()}>
+                  <button className="option-btn" onClick={() => openMeshAssetLibrary(meshDraft?.cardId || null)}>
                     <span className="material-symbols-outlined">folder_open</span>
                     From Assets
                   </button>
-                  <button className="option-btn" onClick={() => openMeshComfyDraft()}>
+                  <button className="option-btn" onClick={() => openMeshComfyDraft(meshDraft?.cardId || null)}>
                     <span className="material-symbols-outlined">account_tree</span>
                     ComfyUI Workflow
                   </button>
-                  <button className="option-btn" onClick={() => setMeshDraft({ mode: 'api', selectedApi: meshGenerationApis[0]?.id || '', prompt: '', name: '', ...getMeshGenApiDefaults() })}>
+                  <button className="option-btn" onClick={() => setMeshDraft({ mode: 'api', selectedApi: meshGenerationApis[0]?.id || '', prompt: '', name: '', ...getMeshGenApiDefaults(), cardId: meshDraft?.cardId || null })}>
                     <span className="material-symbols-outlined">api</span>
                     Remote API
                   </button>
@@ -3491,7 +3509,7 @@ export default function KanbanPage() {
                       <span>No mesh workflows available. Open the Library page to import one.</span>
                     </div>
                   )}
-                  <button className="kanban-sidebar__nav-item" onClick={() => openMeshSourceMenu()} style={{ justifyContent: 'center' }}>BACK</button>
+                  <button className="kanban-sidebar__nav-item" onClick={() => openMeshSourceMenu(meshDraft?.cardId || null)} style={{ justifyContent: 'center' }}>BACK</button>
                 </div>
               )}
 
@@ -3549,13 +3567,13 @@ export default function KanbanPage() {
                       <span>No mesh generation APIs available. Configure one in Settings.</span>
                     </div>
                   )}
-                  <button className="kanban-sidebar__nav-item" onClick={() => openMeshSourceMenu()} style={{ justifyContent: 'center' }}>BACK</button>
+                  <button className="kanban-sidebar__nav-item" onClick={() => openMeshSourceMenu(meshDraft?.cardId || null)} style={{ justifyContent: 'center' }}>BACK</button>
                 </div>
               )}
             </div>
           )}
 
-          {pendingMeshGeneration && column.dbId === MESH_GEN_COLUMN_ID && (
+          {pendingMeshGeneration && pendingMeshColumnId === column.dbId && (
             <div className="image-card image-card--loading" id="mesh-card-loading">
               <div className="image-card__thumb image-card__thumb--loading">
                 <div className="image-card__loading-state">
@@ -3584,24 +3602,13 @@ export default function KanbanPage() {
             </div>
           )}
 
-          {column.dbId === MESH_GEN_COLUMN_ID && (
-            <>
-              <input
-                type="file"
-                accept={getWorkflowFileInputAccept('mesh')}
-                multiple
-                style={{ display: 'none' }}
-                onChange={handleMeshFileUpload}
-                ref={meshFileInputRef}
-              />
-
-              {!meshDraft && !pendingMeshGeneration && (
-                <button className="kanban-col__add-btn" id="add-mesh-btn" onClick={() => openMeshSourceMenu()}>
-                  <span className="material-symbols-outlined">deployed_code</span>
-                  <span className="font-label">ADD NEW MESH</span>
-                </button>
-              )}
-            </>
+          {column.dbId === MESH_GEN_COLUMN_ID
+            && !(meshDraft && meshDraftColumnId === column.dbId)
+            && !(pendingMeshGeneration && pendingMeshColumnId === column.dbId) && (
+            <button className="kanban-col__add-btn" id="add-mesh-btn" onClick={() => openMeshSourceMenu()}>
+              <span className="material-symbols-outlined">deployed_code</span>
+              <span className="font-label">ADD NEW MESH</span>
+            </button>
           )}
         </div>
       </div>
@@ -3627,6 +3634,25 @@ export default function KanbanPage() {
       )}
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {/* Rendered once at page level: "Add more images"/"Add more meshes" can be
+          triggered from a card in any column, not just Images / Mesh Gen. */}
+      <input
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFileUpload}
+        ref={fileInputRef}
+      />
+      <input
+        type="file"
+        accept={getWorkflowFileInputAccept('mesh')}
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleMeshFileUpload}
+        ref={meshFileInputRef}
+      />
 
       {meshPreviewAsset && <MeshPreviewDialog asset={meshPreviewAsset} titleId="kanban-mesh-preview-dialog-title" onClose={() => setMeshPreviewAsset(null)} />}
 

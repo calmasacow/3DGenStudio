@@ -51,6 +51,7 @@ export default function KanbanImageCard({
   handleCardDragStart,
   handleCardDragEnd,
   openImageSourceMenu,
+  openMeshSourceMenu,
   handleRemoveImageCard,
   openMeshPreview,
   handleRemoveImage,
@@ -86,9 +87,12 @@ export default function KanbanImageCard({
   const isMeshWorkflowCard = isMeshGenCard || isMeshEditCard || isTexturingCard || isRiggingCard
   const carouselItems = getCardPreviewItems(card, showAttributes)
   const useAssetCarousel = carouselItems.length > 0
-  const previewAssets = isMeshWorkflowCard && (card.meshAssets?.length || 0) > 0 && !useAssetCarousel
-    ? card.meshAssets
-    : card.assets
+  const previewAssets = useAssetCarousel
+    ? card.assets
+    : isMeshWorkflowCard && (card.meshAssets?.length || 0) > 0
+      ? card.meshAssets
+      // Images column: meshes attached via "Add more meshes" sit alongside the images.
+      : (card.allAssets?.length ? card.allAssets : card.assets)
   const totalPages = useAssetCarousel
     ? Math.max(1, carouselItems.length)
     : Math.max(1, Math.ceil(previewAssets.length / 4))
@@ -114,19 +118,28 @@ export default function KanbanImageCard({
       onDragEnd={handleCardDragEnd}
     >
       <div className="image-card__actions">
-        {!showAttributes && (
-          <button
-            className="image-card__action-btn"
-            disabled={cardLocked}
-            onClick={(e) => {
-              e.stopPropagation()
-              openImageSourceMenu(card.id)
-            }}
-            title="Add more images"
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>add_photo_alternate</span>
-          </button>
-        )}
+        <button
+          className="image-card__action-btn"
+          disabled={cardLocked}
+          onClick={(e) => {
+            e.stopPropagation()
+            openMeshSourceMenu(card.id)
+          }}
+          title="Add more meshes"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>deployed_code</span>
+        </button>
+        <button
+          className="image-card__action-btn"
+          disabled={cardLocked}
+          onClick={(e) => {
+            e.stopPropagation()
+            openImageSourceMenu(card.id)
+          }}
+          title="Add more images"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>add_photo_alternate</span>
+        </button>
         <button
           className="image-card__action-btn image-card__delete"
           disabled={cardLocked}
@@ -148,9 +161,12 @@ export default function KanbanImageCard({
               ? Math.min(imageEditPreviewIndexes[asset.id] || 0, Math.max(0, displayItems.length - 1))
               : 0
             const previewItem = showAttributes ? (displayItems[previewIndex] || displayItems[0]) : asset
+            // Meshes rendered outside the carousel carry their thumbnail on
+            // `thumbnail`; the carousel pre-resolves it into `previewFilename`.
+            const meshThumbnail = useAssetCarousel ? asset.previewFilename : (asset.type === 'mesh' ? asset.thumbnail : null)
             const previewFilename = useAssetCarousel
               ? (asset.previewFilename || asset.filename)
-              : (showAttributes ? previewItem?.filename : asset.filename)
+              : (showAttributes ? previewItem?.filename : (meshThumbnail || asset.filename))
             const previewName = useAssetCarousel
               ? asset.name
               : (showAttributes ? previewItem?.name : asset.name)
@@ -181,7 +197,7 @@ export default function KanbanImageCard({
               } : undefined}
             >
               {previewType === 'mesh' && previewUrl ? (
-                asset.previewFilename ? (
+                meshThumbnail ? (
                   <img
                     src={previewUrl}
                     alt={previewName}
@@ -213,13 +229,13 @@ export default function KanbanImageCard({
                     e.stopPropagation()
                     handleRemoveImage(asset.id)
                   }}
-                  title="Remove image"
+                  title={previewType === 'mesh' ? 'Remove mesh' : 'Remove image'}
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>close</span>
                 </button>
               )}
 
-              {previewType === 'mesh' && sourceAsset?.id && (
+              {useAssetCarousel && previewType === 'mesh' && sourceAsset?.id && (
                 <button
                   className="image-card__thumb-remove image-card__thumb-remove--left"
                   disabled={cardLocked}
