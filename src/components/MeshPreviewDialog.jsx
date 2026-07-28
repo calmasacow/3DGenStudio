@@ -8,6 +8,7 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
   const [showGrid, setShowGrid] = useState(true)
   const [showShadows, setShowShadows] = useState(false)
   const [showAlbedo, setShowAlbedo] = useState(false)
+  const [showWireframe, setShowWireframe] = useState(false)
   const [showLightSlider, setShowLightSlider] = useState(false)
   const [lightIntensity, setLightIntensity] = useState(2.2)
   const [showExport, setShowExport] = useState(false)
@@ -45,6 +46,15 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
                 title="Toggle albedo (unlit) / PBR"
               >
                 A
+              </button>
+              <button
+                type="button"
+                className={`mesh-preview-dialog__tool ${showWireframe ? 'mesh-preview-dialog__tool--active' : ''}`}
+                onClick={() => setShowWireframe(current => !current)}
+                aria-pressed={showWireframe}
+                title="Toggle wireframe"
+              >
+                W
               </button>
               <button
                 type="button"
@@ -93,6 +103,7 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
               showGrid={showGrid}
               showShadows={showShadows}
               showAlbedo={showAlbedo}
+              showWireframe={showWireframe}
               lightIntensity={lightIntensity}
               fitMode="center"
             />

@@ -184,6 +184,36 @@ function applyDisplayMaterial(object, showNormals, showShadows, showAlbedo) {
   })
 }
 
+function applyWireframeOverlay(object, showWireframe) {
+  if (!showWireframe || !object) {
+    return
+  }
+
+  const meshes = []
+  object.traverse(child => {
+    if (child.isMesh && child.geometry) {
+      meshes.push(child)
+    }
+  })
+
+  meshes.forEach(mesh => {
+    const overlay = new THREE.Mesh(
+      mesh.geometry,
+      new THREE.MeshBasicMaterial({
+        color: '#ffffff',
+        wireframe: true,
+        transparent: true,
+        opacity: 0.36,
+        depthWrite: false
+      })
+    )
+    overlay.castShadow = false
+    overlay.receiveShadow = false
+    overlay.userData.isWireframeOverlay = true
+    mesh.add(overlay)
+  })
+}
+
 async function loadModelFromUrl(url, fitMode = 'ground') {
   const extension = getExtensionFromUrl(url)
 
@@ -249,6 +279,7 @@ export default function Viewer({
   showGrid = true,
   showShadows = true,
   showAlbedo = false,
+  showWireframe = false,
   lightIntensity = 2.2,
   fitMode = 'ground'
 }) {
@@ -294,8 +325,9 @@ export default function Viewer({
 
     const modelClone = modelState.object.clone(true)
     applyDisplayMaterial(modelClone, showNormals, showShadows, showAlbedo)
+    applyWireframeOverlay(modelClone, showWireframe)
     return modelClone
-  }, [modelState, modelUrl, showNormals, showShadows, showAlbedo])
+  }, [modelState, modelUrl, showNormals, showShadows, showAlbedo, showWireframe])
 
   const cameraTarget = modelState?.modelUrl === modelUrl ? modelState.target : new THREE.Vector3(0, 0.75, 0)
   const cameraPosition = modelState?.modelUrl === modelUrl ? modelState.cameraPosition : new THREE.Vector3(3, 3, 5)
