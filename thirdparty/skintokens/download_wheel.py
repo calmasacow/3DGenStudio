@@ -14,7 +14,9 @@ exits non-zero on failure so the caller can skip the install.
 """
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import sys
 import tempfile
 import urllib.parse
@@ -40,13 +42,21 @@ def download(url: str) -> str:
         return hf_hub_download(repo_id=repo_id, filename=filename)
 
     # Plain HTTP(S) download (e.g. GitHub release assets).
-    fd, path = tempfile.mkstemp(suffix=".whl", prefix="flash_attn_")
-    import os
-
-    os.close(fd)
+    #
+    # The original basename MUST be preserved. pip/uv read the distribution name,
+    # version and compatibility tags out of the wheel FILENAME, so a mkstemp name
+    # like "flash_attn_t5eu90p9.whl" is rejected before the file is even opened:
+    #   error: The wheel filename "flash_attn_t5eu90p9.whl" is invalid: Must have a version
+    # So download into a temp DIRECTORY and keep the name the server gave us.
+    name = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+    if not name.endswith(".whl"):
+        raise ValueError(f"URL does not name a .whl file: {url}")
+    path = os.path.join(tempfile.mkdtemp(prefix="flash_attn_"), name)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    # copyfileobj streams: these wheels are a few hundred MB and don't need to be
+    # held in memory in one piece.
     with urllib.request.urlopen(req) as resp, open(path, "wb") as out:
-        out.write(resp.read())
+        shutil.copyfileobj(resp, out)
     return path
 
 
