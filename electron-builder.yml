@@ -41,6 +41,9 @@ files:
   - package.json
   - dist/**/*
   - electron/**/*
+  # App icon shown on the splash/setup windows (electron/splash.html loads it
+  # from disk, so it must ship even though dist/ has its own copy).
+  - public/favicon.png
   - comfyui_workflows/**/*
   - setup/**/*
   - tools/**/*

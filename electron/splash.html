@@ -52,6 +52,13 @@
     box-shadow: 0 0 22px rgba(124,92,255,0.55);
     display: flex; align-items: center; justify-content: center;
     font-size: 22px;
+    overflow: hidden;
+  }
+  /* App icon fills the orb; if the file is missing the emoji underneath shows. */
+  .orb img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; border-radius: 50%;
+    -webkit-user-drag: none;
   }
   .title {
     font-size: 26px; font-weight: 700; letter-spacing: .3px;
@@ -68,7 +75,7 @@
     <div class="glow"></div>
     <div class="mark">
       <div class="ring"></div>
-      <div class="orb">🌌</div>
+      <div class="orb">🌌<img src="../public/favicon.png" alt="" onerror="this.remove()" /></div>
     </div>
     <div class="title">3D Gen Studio</div>
     <div class="status">Starting local services<span class="dots"></span></div>
