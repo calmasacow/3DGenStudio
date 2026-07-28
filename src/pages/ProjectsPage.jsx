@@ -24,6 +24,15 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.1.2',
+    date: '2026-07-28',
+    items: [
+			'Fixed Desktop App on Linux',
+			'ComfyUI: Added Enums',
+			'Wireframe mode in Mesh Previewer'
+    ],
+  },
+  {
     version: 'v2.1.1',
     date: '2026-07-27',
     items: [

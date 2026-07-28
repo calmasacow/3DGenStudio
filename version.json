@@ -1,4 +1,4 @@
 {
-	"version": "2.1.1",
-	"message": "ComfyUI custom models folder, Kanban: Can add more meshes/images from any column"
+	"version": "2.1.2",
+	"message": "Fixed Desktop App on Linux - ComfyUI: Added Enums - Wireframe in Mesh Previewer"
 }
