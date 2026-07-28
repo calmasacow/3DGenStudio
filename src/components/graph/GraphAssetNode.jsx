@@ -42,6 +42,7 @@ import {
   resolveImageSourceOption,
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import LastActionInfo from './LastActionInfo'
 
@@ -175,6 +176,21 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
             </div>
             <span>{parameter.label || 'Toggle value'}</span>
           </label>
+        )
+      }
+
+      const enumOptions = getWorkflowEnumOptions(parameter, currentValue)
+      if (enumOptions) {
+        return (
+          <select
+            className="params-card__select nodrag"
+            value={currentValue === undefined || currentValue === null ? '' : String(currentValue)}
+            onChange={event => data.onDraftInputChange?.(data.id, parameter, resolveWorkflowEnumValue(parameter, event.target.value))}
+          >
+            {enumOptions.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
         )
       }
 

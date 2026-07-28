@@ -55,6 +55,7 @@ import {
   normalizeCustomApiType
 } from '../utils/kanbanHelpers'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../utils/workflowEnums'
 
 // Database id of the "Mesh Gen" kanban column (see IMAGE_CARD_COLUMNS).
 const MESH_GEN_COLUMN_ID = 3
@@ -3218,6 +3219,16 @@ export default function KanbanPage() {
                                     </div>
                                     <span>{parameter.label || 'Toggle value'}</span>
                                   </label>
+                                ) : getWorkflowEnumOptions(parameter, imageDraft.inputs?.[parameter.id]) ? (
+                                  <select
+                                    className="params-card__select"
+                                    value={imageDraft.inputs?.[parameter.id] == null ? '' : String(imageDraft.inputs[parameter.id])}
+                                    onChange={e => handleComfyInputChange(parameter, resolveWorkflowEnumValue(parameter, e.target.value))}
+                                  >
+                                    {getWorkflowEnumOptions(parameter, imageDraft.inputs?.[parameter.id]).map(option => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
                                 ) : getWorkflowParameterValueType(parameter) === 'string' ? (
                                   <div className="comfy-textfield-wrap">
                                     <textarea
@@ -3452,6 +3463,16 @@ export default function KanbanPage() {
                                     </div>
                                     <span>{parameter.label || 'Toggle value'}</span>
                                   </label>
+                                ) : getWorkflowEnumOptions(parameter, meshDraft.inputs?.[parameter.id]) ? (
+                                  <select
+                                    className="params-card__select"
+                                    value={meshDraft.inputs?.[parameter.id] == null ? '' : String(meshDraft.inputs[parameter.id])}
+                                    onChange={e => handleMeshComfyInputChange(parameter, resolveWorkflowEnumValue(parameter, e.target.value))}
+                                  >
+                                    {getWorkflowEnumOptions(parameter, meshDraft.inputs?.[parameter.id]).map(option => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
                                 ) : getWorkflowParameterValueType(parameter) === 'string' ? (
                                   <textarea
                                     className="gen-prompt-input image-card__param-textarea"

@@ -21,7 +21,11 @@ export function buildWorkflowDefaultsPayload(workflow, values = {}) {
     const base = {
       id: parameter.id,
       name: parameter.name,
-      valueType
+      valueType,
+      // Echo the allowed-value list back so saving defaults never drops it.
+      ...(Array.isArray(parameter.enums) && parameter.enums.length > 0
+        ? { enums: [...parameter.enums] }
+        : {})
     }
 
     // Only String / Number / Boolean fields are saved as defaults. File-type params

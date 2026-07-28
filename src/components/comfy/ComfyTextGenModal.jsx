@@ -13,6 +13,7 @@ import {
   createComfyExecutionId
 } from '../../utils/graphHelpers'
 import { getComfyDraftFromWorkflow } from '../../utils/kanbanHelpers'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 import { buildAssetUrl } from '../../utils/meshTexturing'
 import './ComfyTextGenModal.css'
 
@@ -320,6 +321,24 @@ export default function ComfyTextGenModal({ open, onClose, onResult }) {
             />
             <span>{parameter.name}</span>
           </label>
+        </div>
+      )
+    }
+
+    const enumOptions = getWorkflowEnumOptions(parameter, value)
+    if (enumOptions) {
+      return (
+        <div key={parameter.id} className="comfy-tg-field">
+          <label className="comfy-tg-label">{parameter.name} • {valueType.toUpperCase()}</label>
+          <select
+            className="comfy-tg-input"
+            value={value == null ? '' : String(value)}
+            onChange={event => handleInputChange(parameter, resolveWorkflowEnumValue(parameter, event.target.value))}
+          >
+            {enumOptions.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
         </div>
       )
     }

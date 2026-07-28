@@ -1,10 +1,29 @@
 // Renders a single non-image ComfyUI workflow parameter (boolean checkbox or
 // text/number input). Shared by the AI control panels. Presentational.
 import { getValueType } from '../../../utils/imageEditorCanvas'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../../utils/workflowEnums'
 import ComfyTextButton from '../../comfy/ComfyTextButton'
 
 export default function WorkflowParameterField({ parameter, value, onChange }) {
   const valueType = getValueType(parameter)
+  const enumOptions = getWorkflowEnumOptions(parameter, value)
+
+  if (enumOptions) {
+    return (
+      <label className="image-editor-label">
+        {parameter.name}
+        <select
+          className="image-editor-input"
+          value={value == null ? '' : String(value)}
+          onChange={event => onChange(parameter.id, resolveWorkflowEnumValue(parameter, event.target.value))}
+        >
+          {enumOptions.map(option => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </label>
+    )
+  }
 
   if (valueType === 'boolean') {
     return (

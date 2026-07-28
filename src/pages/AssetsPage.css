@@ -519,6 +519,23 @@
   color: var(--on-surface);
 }
 
+.library-textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+/* Enum editor: label + textarea + hint sit tighter than a top-level form field. */
+.library-selected-item .library-field {
+  gap: 0.35rem;
+}
+
+.library-hint {
+  font-size: 0.72rem;
+  color: var(--on-surface-variant);
+}
+
 .library-config-fields,
 .library-config-actions,
 .library-workflow-card__actions,

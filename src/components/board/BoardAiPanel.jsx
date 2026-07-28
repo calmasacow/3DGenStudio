@@ -14,6 +14,7 @@ import {
   createComfyExecutionId
 } from '../../utils/graphHelpers'
 import { getComfyDraftFromWorkflow } from '../../utils/kanbanHelpers'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 import AssetSelectorModal from '../AssetSelectorModal'
 
 // An image/file input value chosen from the Assets library (vs an uploaded File).
@@ -276,6 +277,24 @@ export default function BoardAiPanel({ projectId, projectName, boardId, onImageG
           />
           <span className="board-ai-panel__label" style={{ margin: 0 }}>{label}</span>
         </label>
+      )
+    }
+
+    const enumOptions = getWorkflowEnumOptions(parameter, value)
+    if (enumOptions) {
+      return (
+        <div className="board-ai-panel__field" key={parameter.id}>
+          <span className="board-ai-panel__label">{label}</span>
+          <select
+            className="board-ai-panel__select"
+            value={value == null ? '' : String(value)}
+            onChange={(e) => setInputValue(parameter.id, resolveWorkflowEnumValue(parameter, e.target.value))}
+          >
+            {enumOptions.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </div>
       )
     }
 

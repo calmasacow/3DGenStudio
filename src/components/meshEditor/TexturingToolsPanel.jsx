@@ -1,4 +1,5 @@
 import { getWorkflowValueType } from '../../utils/meshTexturing'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 
 // Texturing-mode left panel (brush/crop/feather, AI workflow + image-input
@@ -162,11 +163,23 @@ export default function TexturingToolsPanel({
         {textureWorkflowParameters.map(parameter => {
           const valueType = getWorkflowValueType(parameter)
           const currentValue = textureWorkflowInputs?.[parameter.id]
+          const enumOptions = getWorkflowEnumOptions(parameter, currentValue)
 
           return (
             <label key={parameter.id} className="mesh-editor-workflow-field">
               <span>{parameter.name}</span>
-              {valueType === 'boolean' ? (
+              {enumOptions ? (
+                <select
+                  className="mesh-editor-panel__input"
+                  value={currentValue == null ? '' : String(currentValue)}
+                  onChange={event => handleTextureWorkflowInputChange(parameter, resolveWorkflowEnumValue(parameter, event.target.value))}
+                  disabled={!!texturingUnavailableReason || !!pendingPatch}
+                >
+                  {enumOptions.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              ) : valueType === 'boolean' ? (
                 <button
                   type="button"
                   className={`mesh-editor-toggle ${currentValue ? 'mesh-editor-toggle--active' : ''}`}

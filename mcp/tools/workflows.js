@@ -31,7 +31,7 @@ async function resolveWorkflowJson({ workflowJson, filePath }) {
 export function registerWorkflowTools(server, { api, notifyMutation }) {
   server.registerTool('list_workflows', {
     title: 'List ComfyUI workflows',
-    description: 'List the ComfyUI workflows saved in the library, with their configured parameters (inputs the caller can set, each with id/name/valueType/defaultValue) and output nodes.',
+    description: 'List the ComfyUI workflows saved in the library, with their configured parameters (inputs the caller can set, each with id/name/valueType/defaultValue, plus enums when the parameter only accepts a fixed list of values) and output nodes.',
     annotations: { readOnlyHint: true }
   }, toolHandler(async () => {
     const workflows = await api.apiJson('GET', '/library/comfy-workflows');
@@ -58,7 +58,7 @@ export function registerWorkflowTools(server, { api, notifyMutation }) {
 
   server.registerTool('import_workflow', {
     title: 'Import ComfyUI workflow',
-    description: 'Save a ComfyUI workflow into the library. parameters selects which inspected inputs become runtime parameters ({id, name?, valueType?: image|mesh|video|string|number|boolean}); outputs selects which terminal nodes\' results are saved ({nodeId, name?}). At least one output is required. When importing a .3dgw share bundle via filePath, the bundled parameter/output configuration is used automatically unless overridden.',
+    description: 'Save a ComfyUI workflow into the library. parameters selects which inspected inputs become runtime parameters ({id, name?, valueType?: image|mesh|video|string|number|boolean, enums?: allowed values for a string/number parameter}); outputs selects which terminal nodes\' results are saved ({nodeId, name?}). At least one output is required. When importing a .3dgw share bundle via filePath, the bundled parameter/output configuration is used automatically unless overridden.',
     inputSchema: {
       name: z.string().min(1).describe('Workflow name in the library'),
       workflowJson: z.any().optional().describe('ComfyUI API-format graph JSON (object or string)'),
@@ -66,7 +66,9 @@ export function registerWorkflowTools(server, { api, notifyMutation }) {
       parameters: z.array(z.object({
         id: z.string(),
         name: z.string().optional(),
-        valueType: z.string().optional()
+        valueType: z.string().optional(),
+        enums: z.array(z.union([z.string(), z.number()])).optional()
+          .describe('Allowed values for a string/number parameter — the app renders it as a dropdown limited to this list. Ignored for other value types.')
       })).optional().describe('Inputs to expose as parameters (ids from inspect_workflow)'),
       outputs: z.array(z.object({
         nodeId: z.string(),

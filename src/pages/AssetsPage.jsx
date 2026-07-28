@@ -8,6 +8,11 @@ import { useProjects } from '../context/ProjectContext'
 import { createMeshThumbnailFile, isMeshFile } from '../utils/meshThumbnail'
 import { parseAbrFile } from '../utils/brushAbr'
 import { downloadShareableWorkflow, isShareableWorkflow } from '../utils/workflowShare'
+import {
+  formatWorkflowEnumsInput,
+  isEnumWorkflowValueType,
+  parseWorkflowEnumsInput
+} from '../utils/workflowEnums'
 import './AssetsPage.css'
 
 const ASSETS_PER_PAGE = 20
@@ -74,7 +79,8 @@ function createSelectionMap(items, getLabel, isOutput = false, selected = false)
       {
         selected,
         name: getLabel(item),
-        valueType: getDefaultValueType(item, isOutput)
+        valueType: getDefaultValueType(item, isOutput),
+        enumsText: formatWorkflowEnumsInput(item?.enums)
       }
     ])
   )
@@ -92,7 +98,8 @@ function hydrateWorkflowSelection(workflow) {
         {
           selected: Boolean(selectedParameter),
           name: selectedParameter?.name || input.name,
-          valueType: getDefaultValueType(selectedParameter || input)
+          valueType: getDefaultValueType(selectedParameter || input),
+          enumsText: formatWorkflowEnumsInput(selectedParameter?.enums)
         }
       ]
     })
@@ -127,7 +134,8 @@ function selectWorkflowItem(setter, key, name, valueType) {
     [key]: {
       selected: true,
       name: prev[key]?.name || name,
-      valueType: prev[key]?.valueType || valueType
+      valueType: prev[key]?.valueType || valueType,
+      enumsText: prev[key]?.enumsText || ''
     }
   }))
 }
@@ -1104,11 +1112,17 @@ export default function AssetsPage() {
   const buildWorkflowPayload = () => {
     const parameters = (inspectedWorkflow?.inputs || [])
       .filter(input => selectedInputs[input.id]?.selected)
-      .map(input => ({
-        id: input.id,
-        name: selectedInputs[input.id]?.name || input.name,
-        valueType: selectedInputs[input.id]?.valueType || getDefaultValueType(input)
-      }))
+      .map(input => {
+        const valueType = selectedInputs[input.id]?.valueType || getDefaultValueType(input)
+
+        return {
+          id: input.id,
+          name: selectedInputs[input.id]?.name || input.name,
+          valueType,
+          // Always sent so emptying the field clears a previously saved list.
+          enums: parseWorkflowEnumsInput(selectedInputs[input.id]?.enumsText, valueType)
+        }
+      })
 
     const outputs = (inspectedWorkflow?.outputs || [])
       .filter(output => selectedOutputs[output.nodeId]?.selected)
@@ -1671,6 +1685,30 @@ export default function AssetsPage() {
                                   ))}
                                 </select>
                               </div>
+
+                              {/* JSON inputs resolve to the String value type but are parsed as
+                                  JSON at run time, so they never get an allowed-value list. */}
+                              {input.type !== 'json' && isEnumWorkflowValueType(selectedInputs[input.id]?.valueType || getDefaultValueType(input)) && (
+                                <div className="library-field">
+                                  <label className="library-label">Allowed Values (optional)</label>
+                                  <textarea
+                                    className="library-input library-textarea"
+                                    rows={3}
+                                    value={selectedInputs[input.id]?.enumsText || ''}
+                                    onChange={event => setSelectedInputs(prev => ({
+                                      ...prev,
+                                      [input.id]: {
+                                        ...prev[input.id],
+                                        enumsText: event.target.value
+                                      }
+                                    }))}
+                                    placeholder={'1024\n1536'}
+                                  />
+                                  <span className="library-hint">
+                                    One value per line. Leave empty for a free-form field; two or more values turn it into a dropdown everywhere the workflow is used.
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>

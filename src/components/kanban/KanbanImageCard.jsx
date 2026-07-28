@@ -11,6 +11,7 @@ import {
   isTencentMeshGenerationApi,
   isTripoMeshGenerationApi
 } from '../../utils/kanbanHelpers'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 
 // A single Kanban board card (image / image-edit / mesh-gen / mesh-edit / texturing).
 // Presentational: all board state, derived selectors, and handlers are passed in
@@ -603,6 +604,12 @@ export default function KanbanImageCard({
                           }
 
                           const sourceOptions = getAttributeOptionsForCard(card.id, valueType === 'number' ? 'Number' : 'Text')
+                          // An attribute-bound value is shown read-only, so the dropdown
+                          // reflects whichever value is actually in play.
+                          const enumSelectValue = binding.source === 'custom'
+                            ? (binding.customValue == null ? '' : String(binding.customValue))
+                            : String(resolvedValue ?? '')
+                          const enumOptions = getWorkflowEnumOptions(parameter, enumSelectValue)
 
                           return (
                             <div key={parameter.id} className="params-card__field">
@@ -616,7 +623,18 @@ export default function KanbanImageCard({
                                   <option key={option.id} value={option.id}>{option.label}</option>
                                 ))}
                               </select>
-                              {valueType === 'string' ? (
+                              {enumOptions ? (
+                                <select
+                                  className="image-card__attribute-select"
+                                  value={enumSelectValue}
+                                  onChange={event => handleImageEditParameterValueChange(card, parameter, resolveWorkflowEnumValue(parameter, event.target.value))}
+                                  disabled={binding.source !== 'custom'}
+                                >
+                                  {enumOptions.map(option => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                  ))}
+                                </select>
+                              ) : valueType === 'string' ? (
                                 <div className="comfy-textfield-wrap">
                                   <textarea
                                     className="gen-prompt-input image-card__param-textarea"

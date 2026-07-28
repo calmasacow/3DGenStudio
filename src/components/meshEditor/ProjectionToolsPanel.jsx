@@ -1,4 +1,5 @@
 import { getWorkflowValueType } from '../../utils/meshTexturing'
+import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 
 // Projection-mode left panel (projection setup, AI workflow + image-input
@@ -189,11 +190,26 @@ export default function ProjectionToolsPanel({
         {projectionWorkflowParameters.map(parameter => {
           const valueType = getWorkflowValueType(parameter)
           const currentValue = projectionWorkflowInputs?.[parameter.id]
+          const enumOptions = getWorkflowEnumOptions(parameter, currentValue)
 
           return (
             <label key={parameter.id} className="mesh-editor-workflow-field">
               <span>{parameter.name}</span>
-              {valueType === 'boolean' ? (
+              {enumOptions ? (
+                <select
+                  className="mesh-editor-panel__input"
+                  value={currentValue == null ? '' : String(currentValue)}
+                  onChange={event => setProjectionWorkflowInputs(current => ({
+                    ...current,
+                    [parameter.id]: resolveWorkflowEnumValue(parameter, event.target.value)
+                  }))}
+                  disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                >
+                  {enumOptions.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              ) : valueType === 'boolean' ? (
                 <button
                   type="button"
                   className={`mesh-editor-toggle ${currentValue ? 'mesh-editor-toggle--active' : ''}`}

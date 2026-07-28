@@ -374,10 +374,13 @@ app.post('/api/library/comfy-workflows', async (req, res) => {
         throw new Error(`Unknown workflow parameter: ${parameter.id}`);
       }
 
+      const valueType = normalizeComfyValueType(parameter.valueType, getDefaultComfyValueType(sourceParameter));
+
       return {
         ...sourceParameter,
         name: sanitizeDisplayName(parameter.name || sourceParameter.name, sourceParameter.name),
-        valueType: normalizeComfyValueType(parameter.valueType, getDefaultComfyValueType(sourceParameter))
+        valueType,
+        enums: normalizeComfyEnums(parameter.enums, valueType)
       };
     });
 
@@ -455,10 +458,20 @@ app.put('/api/library/comfy-workflows/:id', async (req, res) => {
         defaultValue = cloneSerializable(sourceParameter.defaultValue);
       }
 
+      const valueType = normalizeComfyValueType(parameter.valueType, getDefaultComfyValueType(sourceParameter));
+
+      // Same rule as defaultValue: an incoming list wins (including an empty one,
+      // which clears the enums), otherwise keep whatever was stored — callers such
+      // as "Set as default" send a minimal parameter list and must not wipe it.
+      const enums = Object.prototype.hasOwnProperty.call(parameter, 'enums')
+        ? normalizeComfyEnums(parameter.enums, valueType)
+        : normalizeComfyEnums(storedParameter?.enums, valueType);
+
       return {
         ...sourceParameter,
         name: sanitizeDisplayName(parameter.name || sourceParameter.name, sourceParameter.name),
-        valueType: normalizeComfyValueType(parameter.valueType, getDefaultComfyValueType(sourceParameter)),
+        valueType,
+        enums,
         defaultValue
       };
     });
@@ -863,6 +876,33 @@ function getDefaultComfyValueType(item, isOutput = false) {
 
 function normalizeComfyValueType(value, fallback = 'string') {
   return ['string', 'number', 'boolean', 'image', 'video', 'mesh'].includes(value) ? value : fallback;
+}
+
+// Enums restrict a String / Number parameter to a fixed list of allowed values,
+// which the UI renders as a dropdown. Entries are coerced to the parameter's value
+// type and de-duplicated; a non-String/Number parameter never keeps a list.
+// Returns undefined when there is nothing to store (JSON.stringify drops the key).
+function normalizeComfyEnums(rawEnums, valueType) {
+  if (!Array.isArray(rawEnums) || !['string', 'number'].includes(valueType)) return undefined;
+
+  const values = [];
+
+  for (const entry of rawEnums) {
+    if (entry === null || entry === undefined || typeof entry === 'boolean' || typeof entry === 'object') continue;
+
+    if (valueType === 'number') {
+      const numericValue = Number(entry);
+      if (!Number.isFinite(numericValue) || values.includes(numericValue)) continue;
+      values.push(numericValue);
+      continue;
+    }
+
+    const textValue = String(entry).trim();
+    if (!textValue || values.includes(textValue)) continue;
+    values.push(textValue);
+  }
+
+  return values.length > 0 ? values : undefined;
 }
 
 function getComfyNodeLabel(nodeId, node = {}) {
@@ -7863,10 +7903,13 @@ async function installSetupWorkflow(workflowConfig, diffusionModelFileName = '')
     if (!sourceParameter) {
       throw new Error(`Workflow "${workflowConfig.Name}": input ${parameterId} not found`);
     }
+    const valueType = normalizeComfyValueType(SETUP_TYPE_TO_VALUE_TYPE[inputCfg.Type], getDefaultComfyValueType(sourceParameter));
     parameters.push({
       ...sourceParameter,
       name: sanitizeDisplayName(inputCfg.Name || sourceParameter.name, sourceParameter.name),
-      valueType: normalizeComfyValueType(SETUP_TYPE_TO_VALUE_TYPE[inputCfg.Type], getDefaultComfyValueType(sourceParameter))
+      valueType,
+      // Optional "Enums": [...] in setup.json turns the field into a dropdown.
+      enums: normalizeComfyEnums(inputCfg.Enums, valueType)
     });
   }
 

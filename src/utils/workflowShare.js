@@ -26,7 +26,12 @@ export function buildShareableWorkflow(workflow) {
     parameters: (workflow?.parameters || []).map(parameter => ({
       id: parameter.id,
       name: parameter.name,
-      valueType: parameter.valueType
+      valueType: parameter.valueType,
+      // Only String/Number parameters carry an allowed-value list; omit the key
+      // entirely for the rest so bundles stay as small as they were.
+      ...(Array.isArray(parameter.enums) && parameter.enums.length > 0
+        ? { enums: [...parameter.enums] }
+        : {})
     })),
     outputs: (workflow?.outputs || []).map(output => ({
       nodeId: output.nodeId,
