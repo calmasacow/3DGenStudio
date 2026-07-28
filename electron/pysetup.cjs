@@ -10,7 +10,10 @@
 //   - Mesh Tools (python-server): always provisioned. CPU only.
 //   - Rigging (skintokens): opt-in. Heavy (torch + flash-attn + model) and needs
 //     an NVIDIA GPU; the setup reuses the service's own Python helpers
-//     (select_flash_attn.py / download_wheel.py / download.py).
+//     (select_flash_attn.py / download_wheel.py / download.py). Windows and Linux
+//     only — flash-attn comes from a prebuilt wheel curated PER PLATFORM
+//     (flash_attention_windows.txt / flash_attention_linux.txt) because building
+//     it from source takes ~an hour either way. macOS has no CUDA and is refused.
 //
 // Everything is async and streams output to an onProgress callback; nothing
 // blocks the Electron main-process event loop.
@@ -21,6 +24,7 @@ const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 
 const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
 const PYVER = '3.13';
 const UV_EXE = IS_WIN ? 'uv.exe' : 'uv';
 
@@ -192,6 +196,11 @@ async function setupPythonServer({ uv, serviceDir, venvDir, onProgress }) {
 // downloaded there; rig_server.py chdirs to this same dir at launch (via
 // RIGTOOLS_DATA_DIR) so its relative weight lookups resolve here.
 async function setupSkintokens({ uv, serviceDir, venvDir, dataDir, onProgress }) {
+  // Rigging needs an NVIDIA GPU. Say so up front rather than failing several GB
+  // into a torch install that has no macOS CUDA build to find.
+  if (IS_MAC) {
+    throw new Error('Rigging (Auto Rig) needs an NVIDIA GPU (CUDA), which macOS does not provide. The rest of the app works normally.');
+  }
   const vp = venvPython(venvDir);
   const env = process.env;
   const modelDir = dataDir || serviceDir;
@@ -214,6 +223,9 @@ async function setupSkintokens({ uv, serviceDir, venvDir, dataDir, onProgress })
   ], (e) => onProgress(scaled(e, 0, 0.4)));
 
   // Select the flash-attn wheel + matching torch for this machine's CUDA.
+  // select_flash_attn.py picks the table for THIS platform (win_amd64 wheels from
+  // flash_attention_windows.txt, linux_x86_64 from flash_attention_linux.txt) —
+  // a wheel from the wrong table is rejected outright by uv at install time.
   onProgress({ kind: 'phase', phase: 'Selecting CUDA build', pct: 0.4 });
   const sel = await runStream(vp, ['select_flash_attn.py'], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
   let wheel = null, torchArgs = null;
@@ -222,29 +234,39 @@ async function setupSkintokens({ uv, serviceDir, venvDir, dataDir, onProgress })
     else if (line.startsWith('TORCHARGS=')) torchArgs = line.slice(10).trim();
   }
 
-  // Install torch (curated per-wheel command, or a sane default).
+  // No match -> no rigging. Bail BEFORE the torch download: flash-attn is a hard
+  // requirement (src/model/tokenrig.py imports it unguarded, so the service cannot
+  // even load without it), and building it from source takes ~an hour on every
+  // platform. Pulling multi-GB of torch on the way to a certain failure is waste.
+  if (!wheel || !torchArgs) {
+    throw new Error('No prebuilt flash-attn wheel matched this GPU/CUDA (see details). Rigging is unavailable on this machine.');
+  }
+
+  // Install torch with the curated per-wheel command, ABI-matched to the wheel.
   onProgress({ kind: 'phase', phase: 'Installing PyTorch', pct: 0.45 });
-  const torchInstall = torchArgs
-    ? torchArgs.split(/\s+/)
-    : ['torch==2.7.0', 'torchvision==0.22.0', 'torchaudio==2.7.0', '--index-url', 'https://download.pytorch.org/whl/cu128'];
   {
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, ...torchInstall], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, ...torchArgs.split(/\s+/)], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
     if (r.code !== 0) throw new Error(`PyTorch install failed (exit ${r.code}).`);
   }
 
-  // flash-attn — download the prebuilt wheel via the HF client, then install it.
-  if (wheel) {
-    onProgress({ kind: 'phase', phase: 'Installing flash-attn', pct: 0.65 });
+  // flash-attn — download the prebuilt wheel first (Hugging Face Xet URLs 403 for
+  // pip and need the HF client; GitHub release assets are plain URLs), install it,
+  // then PROVE it loads: a wheel built against a different torch ABI installs
+  // cleanly and only dies at `import flash_attn` with `undefined symbol: _ZN3c10…`.
+  // Catching that here beats surfacing it after the multi-GB checkpoint download.
+  onProgress({ kind: 'phase', phase: 'Installing flash-attn', pct: 0.6 });
+  {
     const dl = await runStream(vp, ['download_wheel.py', wheel], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
     const localWheel = dl.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop();
-    if (dl.code === 0 && localWheel) {
-      const r = await runStream(uv, ['pip', 'install', '--python', vp, localWheel], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
-      if (r.code !== 0) throw new Error('flash-attn install failed. Rigging cannot start without it.');
-    } else {
-      throw new Error('flash-attn download failed. Rigging cannot start without it.');
-    }
-  } else {
-    throw new Error('No prebuilt flash-attn wheel matched this GPU/CUDA. Rigging is unavailable.');
+    if (dl.code !== 0 || !localWheel) throw new Error('flash-attn download failed. Rigging cannot start without it.');
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, localWheel], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) throw new Error('flash-attn install failed. Rigging cannot start without it.');
+  }
+  onProgress({ kind: 'phase', phase: 'Verifying flash-attn', pct: 0.72 });
+  {
+    const probe = 'import torch, flash_attn; print("flash_attn", flash_attn.__version__, "/ torch", torch.__version__)';
+    const r = await runStream(vp, ['-c', probe], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) throw new Error('flash-attn installed but will not import — most likely a torch ABI mismatch with the selected wheel (see details). Rigging cannot start.');
   }
 
   // Model checkpoints (large; downloaded into the WRITABLE data dir).

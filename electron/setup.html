@@ -83,7 +83,7 @@
         <span class="svc__name">Rigging (Auto Rig)</span>
         <span class="svc__tag">optional · NVIDIA GPU, large download</span>
       </div>
-      <label class="opt"><input type="checkbox" id="opt-rigging" /> Install the AI rigging service (needs an NVIDIA GPU ≥14 GB; downloads several GB)</label>
+      <label class="opt"><input type="checkbox" id="opt-rigging" /> Install the AI rigging service (needs an NVIDIA GPU ≥14 GB with a recent driver — CUDA 12.8+; downloads several GB)</label>
       <div class="svc__phase" style="display:none"></div>
       <div class="bar" style="display:none"><i></i></div>
     </div>
@@ -108,6 +108,13 @@
   };
   const logEl = $('#log');
   const errEl = $('#err');
+
+  // Rigging needs CUDA, so it exists on Windows and Linux only. Hide the option on
+  // macOS rather than offering an install that cannot succeed. (An unchecked box
+  // reads as false in runInstall, so nothing else needs to know.)
+  if ((window.genStudioDesktop && window.genStudioDesktop.platform) === 'darwin') {
+    $('#svc-rigging').style.display = 'none';
+  }
 
   function setRow(service, { state, phase, pct }) {
     const row = rows[service];
