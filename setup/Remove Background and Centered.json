@@ -3,7 +3,7 @@
     "inputs": {
       "padding": 0,
       "remove_background": true,
-      "max_size": 2048,
+      "max_size": 4096,
       "image": [
         "3",
         0
@@ -39,7 +39,7 @@
     "inputs": {
       "filename_prefix": "3DGenStudioCentered",
       "images": [
-        "2",
+        "6",
         0
       ]
     },
@@ -55,6 +55,27 @@
     "class_type": "LoadImage",
     "_meta": {
       "title": "Load Image"
+    }
+  },
+  "6": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#222222",
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
     }
   }
 }
