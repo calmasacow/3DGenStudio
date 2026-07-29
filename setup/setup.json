@@ -611,7 +611,8 @@
 				{ "Node": "2", "Input": "image",  "Name": "Source Image", "Type": "Image" },
 				{ "Node": "1",  "Input": "max_tokens",  "Name": "Max Tokens",   "Type": "Number" },
 				{ "Node": "1",  "Input": "custom_prompt", "Name": "Custom Prompt", "Type": "String" },
-				{ "Node": "1",  "Input": "keep_model_loaded", "Name": "Keep Model Loaded", "Type": "Boolean" }
+				{ "Node": "1",  "Input": "keep_model_loaded", "Name": "Keep Model Loaded", "Type": "Boolean" },
+				{ "Node": "1",  "Input": "model_name", "Name": "Model", "Type": "String", "Enums":["Qwen3-VL-2B-Instruct","Qwen3-VL-4B-Instruct","Qwen3-VL-8B-Instruct"] }
 			],
 			"Outputs": [
 				{ "Node": "3", "Name": "Output Text", "Type": "String" }
@@ -661,7 +662,7 @@
 			"Inputs": [
 				{ "Node": "40", "Input": "image",  "Name": "Source Image", "Type": "Image" },
 				{ "Node": "19",  "Input": "max_facenum",  "Name": "Target Face Number",   "Type": "Number" },
-				{ "Node": "38",  "Input": "seed",  "Name": "Seed",   "Type": "Number" }
+				{ "Node": "43",  "Input": "seed",  "Name": "Seed",   "Type": "Number" }
 			],
 			"Outputs": [
 				{ "Node": "11", "Name": "Save Mesh", "Type": "Mesh" }
@@ -697,10 +698,24 @@
 				{ "Node": "1", "Input": "prompt_text",  "Name": "Source Prompt", "Type": "String" },
 				{ "Node": "1",  "Input": "max_tokens",  "Name": "Max Tokens",   "Type": "Number" },
 				{ "Node": "1",  "Input": "keep_model_loaded",  "Name": "Keep Model Loaded",   "Type": "Boolean" },
-				{ "Node": "1",  "Input": "seed",  "Name": "Seed",   "Type": "Number" }
+				{ "Node": "1",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
+				{ "Node": "1", "Input": "model_name",  "Name": "Mode", "Type": "String", "Enums":["Qwen3-VL-2B-Instruct","Qwen3-VL-4B-Instruct","Qwen3-VL-8B-Instruct"] }
 			],
 			"Outputs": [
 				{ "Node": "2", "Name": "Enhanced Prompt", "Type": "String" }
+			]
+		},
+		{
+			"Name": "Remove Background with BiRefNet",
+			"File": "setup/Remove Background with BiRefNet.json",
+			"Inputs": [
+				{ "Node": "1", "Input": "image",  "Name": "Source Image", "Type": "Image" },
+				{ "Node": "23",  "Input": "model",  "Name": "Model",   "Type": "String", "Enums":["BiRefNet-general","BiRefNet_512x512","BiRefNet-HR","BiRefNet-portrait","BiRefNet-matting","BiRefNet-HR-matting","BiRefNet_lite","BiRefNet_lite-2K","BiRefNet_dynamic","BiRefNet_lite-matting","BiRefNet_toonout","Lucida"] },
+				{ "Node": "23",  "Input": "mask_offset",  "Name": "Mask Offset",   "Type": "Number" },
+				{ "Node": "23",  "Input": "mask_blur",  "Name": "Mask Blur",   "Type": "Number" }				
+			],
+			"Outputs": [
+				{ "Node": "24", "Name": "Save Image", "Type": "Image" }
 			]
 		}		
 	]

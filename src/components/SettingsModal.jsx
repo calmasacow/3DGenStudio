@@ -16,6 +16,67 @@ function getCustomApiTypeLabel(type) {
   return CUSTOM_API_TYPE_OPTIONS.find(option => option.value === type)?.label || 'Image Generation'
 }
 
+const MANAGED_FIELD_HINT = 'Set automatically for the ComfyUI that 3D Gen Studio manages. Switch to your own ComfyUI to edit it.'
+
+// Desktop-only: the managed ComfyUI owns apis.comfyui.path/modelsPath/port, and the
+// installer only writes them when it actually installs. If those settings later
+// drift to an external instance there is no way back — the installer short-circuits
+// because the install already exists — so offer an explicit re-point action, plus
+// the reverse (hand control back to a user-supplied ComfyUI).
+function ManagedComfyControls({ managed, onChanged }) {
+  const bridge = typeof window !== 'undefined' ? window.genStudioServices : null
+  const isDesktop = !!bridge?.isDesktop
+  const [installed, setInstalled] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!isDesktop) return undefined
+    let alive = true
+    bridge.status().then(s => { if (alive) setInstalled(!!s?.comfyui?.installed) }).catch(() => {})
+    return () => { alive = false }
+  }, [isDesktop, bridge])
+
+  if (!isDesktop || !installed || managed) return null
+
+  const handleUseManaged = async () => {
+    setError(''); setBusy(true)
+    try {
+      const res = await bridge.useManagedComfy()
+      if (res?.ok) await onChanged()
+      else setError(res?.error || 'Could not switch to the managed ComfyUI.')
+    } catch (e) {
+      setError(e?.message || 'Could not switch to the managed ComfyUI.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={{ marginTop: '8px' }}>
+      <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#e0a030' }}>
+        <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>warning</span>
+        A managed ComfyUI is installed, but these settings point at a different one — so
+        3D Gen Studio can&apos;t start or stop it, and &quot;start automatically&quot; is ignored.
+      </p>
+      <button
+        type="button"
+        onClick={handleUseManaged}
+        disabled={busy}
+        style={{
+          fontFamily: 'inherit', fontSize: '13px', fontWeight: 600,
+          cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
+          border: 'none', borderRadius: '8px', padding: '9px 16px', color: '#0b0e14',
+          background: 'linear-gradient(90deg, #7c5cff, #22d3ee)',
+        }}
+      >
+        {busy ? 'Switching…' : 'Use the managed ComfyUI'}
+      </button>
+      {error && <p className="settings-helper-text" style={{ color: '#f87171' }}>{error}</p>}
+    </div>
+  )
+}
+
 // Desktop-only: start/stop a Python service on demand and show its status. The
 // services aren't started at app launch — they spin up when a tool needs them,
 // and can be stopped here (stopping Rigging frees its GPU memory). Renders
@@ -105,11 +166,19 @@ function AutoStartToggle({ checked, onChange, warning }) {
   )
 }
 
-// Desktop-only: install the (opt-in) rigging service after first run — for users
+// Desktop-only: install one of the opt-in services after first run — for users
 // who upgraded, skipped it on the setup screen, or later added a GPU. Drives the
 // same uv provisioning as the first-run window via the genStudioSetup bridge and
 // shows live progress. Renders nothing outside the desktop app.
-function RiggingInstaller() {
+//
+// `service` is the key both setup:run and setup:status use ('rigging' | 'comfyui').
+// `availableKey` (optional) names a setup:status flag that must be true for the
+// install to be possible at all on this platform — when it's false we say so
+// instead of offering a button that is guaranteed to fail.
+// `onInstalled` lets the parent re-read the settings the main process wrote during
+// the install (the managed ComfyUI sets path/modelsPath/port/managed), so the open
+// form doesn't keep — and later save — its pre-install copy.
+function ServiceInstaller({ service, buttonLabel, readyText, note, availableKey, unavailableText, onInstalled }) {
   const bridge = typeof window !== 'undefined' ? window.genStudioSetup : null
   const isDesktop = typeof window !== 'undefined' && window.genStudioDesktop?.isDesktop && bridge
   const [status, setStatus] = useState(null)
@@ -124,20 +193,25 @@ function RiggingInstaller() {
     bridge.status().then(s => { if (alive) setStatus(s) }).catch(() => {})
     const off = bridge.onProgress(evt => {
       if (!alive) return
+      // Progress events carry a `service` tag; ignore another service's install
+      // so two installer cards on screen don't cross-report each other.
+      if (evt.service && evt.service !== service) return
       if (evt.kind === 'phase') { setPhase(evt.phase || ''); if (typeof evt.pct === 'number') setPct(evt.pct) }
       else if (evt.kind === 'error') setError(evt.text || 'Setup failed.')
     })
     return () => { alive = false; if (typeof off === 'function') off() }
-  }, [isDesktop, bridge])
+  }, [isDesktop, bridge, service])
 
   if (!isDesktop) return null
 
   const handleInstall = async () => {
     setError(''); setRunning(true); setPhase('Starting…'); setPct(0)
     try {
-      const res = await bridge.run({ rigging: true })
-      if (res?.ok) setStatus(await bridge.status())
-      else setError(res?.error || 'Installation failed. See details in the setup logs.')
+      const res = await bridge.run({ [service]: true })
+      if (res?.ok) {
+        setStatus(await bridge.status())
+        if (typeof onInstalled === 'function') await onInstalled()
+      } else setError(res?.error || 'Installation failed. See details in the setup logs.')
     } catch (e) {
       setError(e?.message || 'Installation failed.')
     } finally {
@@ -145,11 +219,23 @@ function RiggingInstaller() {
     }
   }
 
-  if (status?.rigging) {
+  if (status?.[service]) {
     return (
       <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#4caf50' }}>
         <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>check_circle</span>
-        Rigging service is installed and ready.
+        {readyText}
+      </p>
+    )
+  }
+
+  // Wait for status before deciding: rendering the button and then swapping it for
+  // "unavailable" reads as a bug.
+  if (availableKey && !status) return null
+  if (availableKey && !status[availableKey]) {
+    return (
+      <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em' }}>
+        <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>info</span>
+        {unavailableText}
       </p>
     )
   }
@@ -167,7 +253,7 @@ function RiggingInstaller() {
           background: 'linear-gradient(90deg, #7c5cff, #22d3ee)',
         }}
       >
-        {running ? `Installing… ${Math.round(pct * 100)}%` : 'Install rigging service'}
+        {running ? `Installing… ${Math.round(pct * 100)}%` : buttonLabel}
       </button>
       {running && (
         <>
@@ -178,7 +264,7 @@ function RiggingInstaller() {
         </>
       )}
       {error && <p className="settings-helper-text" style={{ color: '#f87171' }}>{error}</p>}
-      <p className="settings-helper-text">One-time install; downloads several GB and needs an NVIDIA GPU (≥14 GB).</p>
+      <p className="settings-helper-text">{note}</p>
     </div>
   )
 }
@@ -226,7 +312,7 @@ function BrowseFolderButton({ description, initialPath, onPick }) {
 }
 
 export default function SettingsModal({ onClose }) {
-  const { settings, updateSettings, addCustomApi } = useSettings()
+  const { settings, updateSettings, addCustomApi, refreshSettings } = useSettings()
   const [localSettings, setLocalSettings] = useState(settings)
   const [activeTab, setActiveTab] = useState('apis')
   const [showAddCustom, setShowAddCustom] = useState(false)
@@ -237,8 +323,25 @@ export default function SettingsModal({ onClose }) {
     setLocalSettings(settings)
   }, [settings])
 
+  // Server-side truth, not the form copy: the managed flag is written by the main
+  // process, and gating the inputs on the local copy would let a stale form make
+  // them editable again.
+  const comfyManaged = !!settings?.apis?.comfyui?.managed
+
   const handleSave = async () => {
-    await updateSettings(localSettings)
+    // `apis.comfyui.managed` and the paths/port that go with it are owned by the
+    // main process, not this form: it writes them when the managed ComfyUI is
+    // installed. The modal loads its copy of the settings once, so saving a
+    // form that was opened BEFORE an install would write the stale values back
+    // and silently un-manage the install (which is exactly what stops
+    // "start automatically" from working). The backend merges what we POST, so
+    // simply omitting these keys preserves whatever the main process set.
+    let payload = localSettings
+    if (settings?.apis?.comfyui?.managed) {
+      const { managed: _mg, path: _p, modelsPath: _m, port: _pt, ...userOwned } = localSettings?.apis?.comfyui || {}
+      payload = { ...localSettings, apis: { ...localSettings.apis, comfyui: userOwned } }
+    }
+    await updateSettings(payload)
     onClose()
   }
 
@@ -583,6 +686,8 @@ export default function SettingsModal({ onClose }) {
                     <input
                       className="settings-input"
                       style={{ flex: 1 }}
+                      disabled={comfyManaged}
+                      title={comfyManaged ? MANAGED_FIELD_HINT : undefined}
                       placeholder="C:\\ComfyUI"
                       value={localSettings?.apis?.comfyui?.path || ''}
                       onChange={e => setLocalSettings(prev => ({
@@ -596,14 +701,16 @@ export default function SettingsModal({ onClose }) {
                         }
                       }))}
                     />
-                    <BrowseFolderButton
-                      description="Select your ComfyUI folder"
-                      initialPath={localSettings?.apis?.comfyui?.path || ''}
-                      onPick={picked => setLocalSettings(prev => ({
-                        ...prev,
-                        apis: { ...prev?.apis, comfyui: { ...prev?.apis?.comfyui, path: picked } }
-                      }))}
-                    />
+                    {!comfyManaged && (
+                      <BrowseFolderButton
+                        description="Select your ComfyUI folder"
+                        initialPath={localSettings?.apis?.comfyui?.path || ''}
+                        onPick={picked => setLocalSettings(prev => ({
+                          ...prev,
+                          apis: { ...prev?.apis, comfyui: { ...prev?.apis?.comfyui, path: picked } }
+                        }))}
+                      />
+                    )}
                   </div>
                 </div>
 
@@ -613,6 +720,8 @@ export default function SettingsModal({ onClose }) {
                     <input
                       className="settings-input"
                       style={{ flex: 1 }}
+                      disabled={comfyManaged}
+                      title={comfyManaged ? MANAGED_FIELD_HINT : undefined}
                       placeholder="Defaults to {ComfyUI path}\models"
                       value={localSettings?.apis?.comfyui?.modelsPath || ''}
                       onChange={e => setLocalSettings(prev => ({
@@ -626,17 +735,21 @@ export default function SettingsModal({ onClose }) {
                         }
                       }))}
                     />
-                    <BrowseFolderButton
-                      description="Select your ComfyUI models folder"
-                      initialPath={localSettings?.apis?.comfyui?.modelsPath || localSettings?.apis?.comfyui?.path || ''}
-                      onPick={picked => setLocalSettings(prev => ({
-                        ...prev,
-                        apis: { ...prev?.apis, comfyui: { ...prev?.apis?.comfyui, modelsPath: picked } }
-                      }))}
-                    />
+                    {!comfyManaged && (
+                      <BrowseFolderButton
+                        description="Select your ComfyUI models folder"
+                        initialPath={localSettings?.apis?.comfyui?.modelsPath || localSettings?.apis?.comfyui?.path || ''}
+                        onPick={picked => setLocalSettings(prev => ({
+                          ...prev,
+                          apis: { ...prev?.apis, comfyui: { ...prev?.apis?.comfyui, modelsPath: picked } }
+                        }))}
+                      />
+                    )}
                   </div>
                   <p className="settings-helper-text">
-                    Set this only if your models live somewhere other than <code>{'{ComfyUI path}'}\models</code> (e.g. shared across multiple ComfyUI installs).
+                    {comfyManaged
+                      ? 'Managed by 3D Gen Studio. The Setup Wizard downloads models here, and this folder survives a ComfyUI reinstall.'
+                      : <>Set this only if your models live somewhere other than <code>{'{ComfyUI path}'}\models</code> (e.g. shared across multiple ComfyUI installs).</>}
                   </p>
                 </div>
 
@@ -664,6 +777,8 @@ export default function SettingsModal({ onClose }) {
                     <label className="settings-label">Port</label>
                     <input
                       className="settings-input"
+                      disabled={comfyManaged}
+                      title={comfyManaged ? MANAGED_FIELD_HINT : undefined}
                       placeholder="8188"
                       value={localSettings?.apis?.comfyui?.port || ''}
                       onChange={e => setLocalSettings(prev => ({
@@ -683,6 +798,36 @@ export default function SettingsModal({ onClose }) {
                 <p className="settings-helper-text">
                   The Kanban page will use this connection to queue workflows, poll every second, and download generated images.
                 </p>
+
+                {comfyManaged && (
+                  <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#22d3ee' }}>
+                    <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>verified</span>
+                    This ComfyUI is managed by 3D Gen Studio, so the path, models path and port
+                    above are set for you and can&apos;t be edited. It starts and stops below.
+                  </p>
+                )}
+
+                <ManagedComfyControls managed={comfyManaged} onChanged={refreshSettings} />
+
+                {/* Desktop only: install a ComfyUI the app manages itself, for users
+                    who don't already run one. Skipped silently in the browser. */}
+                <ServiceInstaller
+                  service="comfyui"
+                  onInstalled={refreshSettings}
+                  availableKey="comfyuiAvailable"
+                  unavailableText="Installing ComfyUI automatically isn't supported on this platform yet — install it yourself and set the path and port above."
+                  buttonLabel="Install ComfyUI for me"
+                  readyText="A managed ComfyUI is installed and ready."
+                  note="One-time install; downloads several GB (ComfyUI, the custom nodes the bundled workflows need, and PyTorch) and needs an NVIDIA GPU. Models are downloaded separately from the Setup Wizard."
+                />
+                <ServiceControl name="comfyui" />
+                <AutoStartToggle
+                  checked={localSettings?.apis?.comfyui?.autoStart}
+                  onChange={v => setLocalSettings(prev => ({
+                    ...prev,
+                    apis: { ...prev?.apis, comfyui: { ...prev?.apis?.comfyui, autoStart: v } }
+                  }))}
+                />
               </div>
             </section>
           )}
@@ -807,7 +952,12 @@ export default function SettingsModal({ onClose }) {
                   In the desktop app it starts on demand; Stop it here to free GPU memory.
                   Outside the desktop app, start it from thirdparty/skintokens/run_server.
                 </p>
-                <RiggingInstaller />
+                <ServiceInstaller
+                  service="rigging"
+                  buttonLabel="Install rigging service"
+                  readyText="Rigging service is installed and ready."
+                  note="One-time install; downloads several GB and needs an NVIDIA GPU (≥14 GB)."
+                />
                 <ServiceControl name="rigging" />
                 <AutoStartToggle
                   warning

@@ -14,6 +14,12 @@ release/
 # not import rig.py at all ("No module named 'src.data'").
 /data/
 
+# Local reference ComfyUI install used to generate the managed-install artifacts
+# (tools/gen-comfy-lock.mjs reads it; setup/comfyui.json + the lock are the only
+# things that get committed). Multi-GB — code, a venv and models. Anchored to the
+# repo root so it can't match anything nested.
+/comfyui/
+
 # Wiki author mode — presence of this file unlocks editing the Wiki.
 # Kept local (never synced) so the published docs are read-only for end users.
 .wiki-author

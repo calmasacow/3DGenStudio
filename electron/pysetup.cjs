@@ -80,13 +80,17 @@ function isReady(venvDir, requiredTag) {
 // Create the venv with uv, rebuilding from scratch if the existing one is broken
 // (e.g. a legacy python -m venv whose base interpreter is gone). A healthy venv
 // is left untouched. Returns an exit code (0 = ok).
-async function ensureVenv({ uv, serviceDir, venvDir, onLine }) {
+//
+// `pythonVersion` defaults to PYVER; the managed ComfyUI install passes its own
+// (its prebuilt CUDA wheels are tagged for a specific interpreter, which need not
+// be the one the other services use).
+async function ensureVenv({ uv, serviceDir, venvDir, onLine, pythonVersion }) {
   if (venvUsable(venvDir)) return 0;
   if (fs.existsSync(venvDir)) {
     if (onLine) onLine(`Existing virtual environment is unusable — rebuilding it.\n`);
     try { fs.rmSync(venvDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  const r = await runStream(uv, ['venv', venvDir, '--python', PYVER], { cwd: serviceDir, env: process.env, onLine });
+  const r = await runStream(uv, ['venv', venvDir, '--python', pythonVersion || PYVER], { cwd: serviceDir, env: process.env, onLine });
   return r.code;
 }
 
@@ -329,21 +333,41 @@ function startService({ name, serviceDir, venvDir, script, env, logStream, log }
     return { stop() {} };
   }
   let proc = null;
+  // Keep the last chunk of output so a launch failure can be reported with its
+  // real cause rather than as a health-check timeout.
+  let tail = '';
+  const keepTail = (s) => { tail = (tail + s).slice(-4000); };
+  let settleExit;
+  const exited = new Promise((resolve) => { settleExit = resolve; });
+
   try {
     log && log(`Starting ${name} service…`);
     proc = spawn(vp, [script], {
       cwd: serviceDir,
-      env: { ...process.env, ...env },
+      // PYTHONIOENCODING/PYTHONUTF8: output goes through a pipe, and for pipes
+      // Python defaults to the ANSI codepage on Windows (cp1252) — any non-ASCII
+      // log line then raises UnicodeEncodeError inside logging and can kill the
+      // service mid-startup. Caller env still wins.
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    proc.stdout.on('data', (d) => write(d.toString()));
-    proc.stderr.on('data', (d) => write(d.toString()));
-    proc.on('exit', (code, signal) => { log && log(`${name} service exited (code=${code} signal=${signal})`); });
+    proc.stdout.on('data', (d) => { const s = d.toString(); write(s); keepTail(s); });
+    proc.stderr.on('data', (d) => { const s = d.toString(); write(s); keepTail(s); });
+    proc.on('exit', (code, signal) => {
+      log && log(`${name} service exited (code=${code} signal=${signal})`);
+      settleExit({ code, signal, tail });
+    });
+    proc.on('error', (err) => {
+      log && log(`${name} service failed to start: ${err.message}`);
+      settleExit({ code: -1, signal: null, tail: err.message });
+    });
   } catch (err) {
     log && log(`${name} service failed to start: ${err.message}`);
+    settleExit({ code: -1, signal: null, tail: err.message });
   }
   let stopped = false;
   return {
+    exited,
     stop() {
       if (stopped) return;
       stopped = true;
@@ -363,4 +387,9 @@ module.exports = {
   startPythonServer,
   startSkintokens,
   killTree,
+  // Shared with comfysetup.cjs, which provisions a third service the same way.
+  runStream,
+  ensureVenv,
+  depsMarker,
+  venvUsable,
 };

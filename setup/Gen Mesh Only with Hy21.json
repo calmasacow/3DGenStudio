@@ -1,28 +1,19 @@
 {
-  "4": {
-    "inputs": {
-      "model_name": "Hunyuan3D-vae-v2-1-fp16.ckpt"
-    },
-    "class_type": "Hy3D21VAELoader",
-    "_meta": {
-      "title": "Hunyuan 3D 2.1 VAE Loader"
-    }
-  },
   "9": {
     "inputs": {
       "box_v": 1.01,
       "octree_resolution": 384,
       "num_chunks": 128000,
       "mc_level": 0,
-      "mc_algo": "dmc",
+      "mc_algo": "mc",
       "enable_flash_vdm": true,
       "force_offload": false,
       "vae": [
-        "4",
-        0
+        "42",
+        1
       ],
       "latents": [
-        "38",
+        "43",
         0
       ]
     },
@@ -49,7 +40,7 @@
       "remove_floaters": true,
       "remove_degenerate_faces": true,
       "reduce_faces": true,
-      "max_facenum": 2000000,
+      "max_facenum": 500000,
       "smooth_normals": false,
       "trimesh": [
         "9",
@@ -76,23 +67,6 @@
       "title": "Hunyuan 3D 2.1 Export Mesh"
     }
   },
-  "38": {
-    "inputs": {
-      "model": "hunyuan3d-dit-v2-1-fp16.ckpt",
-      "steps": 25,
-      "guidance_scale": 7.5,
-      "seed": 12345,
-      "attention_mode": "sdpa",
-      "image": [
-        "40",
-        0
-      ]
-    },
-    "class_type": "Hy3D21MeshGenerator",
-    "_meta": {
-      "title": "Hunyuan 3D 2.1 Mesh Generator"
-    }
-  },
   "40": {
     "inputs": {
       "image": ""
@@ -100,6 +74,109 @@
     "class_type": "LoadImage",
     "_meta": {
       "title": "Load Image"
+    }
+  },
+  "42": {
+    "inputs": {},
+    "class_type": "Hy3D21ModelLoader",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 - Model Loader"
+    }
+  },
+  "43": {
+    "inputs": {
+      "model_path": [
+        "42",
+        0
+      ],
+      "steps": 25,
+      "guidance_scale": 7.5,
+      "seed": 12345,
+      "attention_mode": "sdpa",
+      "image": [
+        "48",
+        0
+      ]
+    },
+    "class_type": "Hy3D21MeshGenerator2",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 Mesh Generator2"
+    }
+  },
+  "44": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "47",
+        0
+      ],
+      "height": [
+        "47",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "45": {
+    "inputs": {
+      "mask": [
+        "40",
+        1
+      ]
+    },
+    "class_type": "InvertMask",
+    "_meta": {
+      "title": "InvertMask"
+    }
+  },
+  "46": {
+    "inputs": {
+      "mask": [
+        "44",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Convert Mask to Image"
+    }
+  },
+  "47": {
+    "inputs": {
+      "image": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "48": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "destination": [
+        "46",
+        0
+      ],
+      "source": [
+        "40",
+        0
+      ],
+      "mask": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "ImageCompositeMasked"
     }
   }
 }

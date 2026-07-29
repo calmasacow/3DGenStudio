@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('genStudioServices', {
   start: (name) => ipcRenderer.invoke('services:start', { name }),
   stop: (name) => ipcRenderer.invoke('services:stop', { name }),
   status: () => ipcRenderer.invoke('services:status'),
+  // Re-point apis.comfyui.* at the managed install. Resolves { ok, port, path,
+  // modelsPath } or { ok: false, error }.
+  useManagedComfy: () => ipcRenderer.invoke('comfyui:use-managed'),
 });
 
 contextBridge.exposeInMainWorld('genStudioSetup', {

@@ -10,13 +10,13 @@
   },
   "5": {
     "inputs": {
-      "guidance_scale": 7.500000000000002,
+      "guidance_scale": 7.5,
       "steps": 30,
       "seed": 12345,
       "scheduler": "ConsistencyFlowMatchEulerDiscreteScheduler",
       "force_offload": false,
       "pipeline": [
-        "78",
+        "86",
         0
       ],
       "image": [
@@ -35,16 +35,16 @@
   },
   "6": {
     "inputs": {
-      "box_v": 1.0100000000000002,
+      "box_v": 1.01,
       "octree_resolution": 384,
       "num_chunks": 128000,
       "mc_level": 0,
-      "mc_algo": "dmc",
+      "mc_algo": "mc",
       "enable_flash_vdm": true,
       "force_offload": false,
       "vae": [
-        "85",
-        0
+        "86",
+        1
       ],
       "latents": [
         "5",
@@ -136,25 +136,11 @@
       "title": "Invert Mask"
     }
   },
-  "78": {
-    "inputs": {
-      "model": "hunyuan3d-dit-v2-mini-turbo-fp16.safetensors",
-      "is_mini_turbo": true,
-      "attention_mode": "sdpa",
-      "cublas_ops": false
-    },
-    "class_type": "Hy3DModelLoader",
+  "86": {
+    "inputs": {},
+    "class_type": "Hy3DMiniTurboModelLoader",
     "_meta": {
-      "title": "Hy3DModelLoader"
-    }
-  },
-  "85": {
-    "inputs": {
-      "model_name": "hunyuan3d-vae-v2-mini-fp16.safetensors"
-    },
-    "class_type": "Hy3DVAELoader",
-    "_meta": {
-      "title": "Hy3DVAELoader"
+      "title": "Hy3D - Mini Turbo Model Loader"
     }
   }
 }
