@@ -24,6 +24,14 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.2.0',
+    date: '2026-07-30',
+    items: [
+			'Desktop App: Install ComfyUI',
+			'ImageEditor: Fixed alpha transparency'
+    ],
+  },
+  {
     version: 'v2.1.2',
     date: '2026-07-28',
     items: [

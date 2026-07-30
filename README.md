@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-07-30** | Desktop App: Install ComfyUI<br>ImageEditor: Fixed alpha transparency |
 | **2026-07-28** | Fixed Desktop App on Linux<br>ComfyUI: Added Enums<br>Wireframe mode in Mesh Previewer |
 | **2026-07-27** | ComfyUI: Custom models folder<br>Mesh Export: Save last output folder<br>DB: Fixed assets linked to a project<br>Kanban: Can add more meshes and images from any column<br>Desktop App: Fixed Graph page slowness |
 | **2026-07-23** | Added Brainstorming Boards |
