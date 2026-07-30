@@ -36,6 +36,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const IS_WIN = process.platform === 'win32';
@@ -276,8 +277,19 @@ const hostWheels = [];   // hand-built wheels with no home  -> ${WHEEL_HOST}
 const tarballs = [];     // git+ deps rewritten to archive tarballs
 
 // A file:// URL in a freeze is percent-encoded; decode before matching paths.
+// fileURLToPath rather than a hand-rolled strip: the two platforms disagree about
+// the third slash. "file:///C:/x" -> "C:/x" (drop it) but "file:///home/x" ->
+// "/home/x" (KEEP it — it's the root). Dropping it on Linux yields a RELATIVE
+// path, which then resolves against this script's cwd, so every node-local wheel
+// looks like it lives outside custom_nodes and gets misrouted to ${WHEEL_HOST}.
 function decodeFileUrl(url) {
-  return decodeURIComponent(url.replace(/^file:\/\/\/?/, '')).replace(/\\/g, '/');
+  try {
+    return fileURLToPath(url).replace(/\\/g, '/');
+  } catch {
+    // Not a well-formed file URL (a bare path, a UNC oddity) — fall back to the
+    // literal text so the caller still gets something to match on.
+    return decodeURIComponent(url.replace(/^file:\/\//, '')).replace(/\\/g, '/');
+  }
 }
 
 function rewriteLine(line) {

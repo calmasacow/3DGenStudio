@@ -184,6 +184,19 @@ hand-maintained fields (`wheelHost`, `launchArgs`, `verifyImports`). The lock is
 platform-specific, so run it once per platform you ship; each run merges its
 build into the manifest rather than replacing the others.
 
+> [!WARNING]
+> **Only `builds[]` is per-platform.** `comfyui.repo`, `comfyui.ref`,
+> `pythonVersion` and the entire `customNodes` array are GLOBAL, and every run
+> overwrites them from whatever the machine it ran on happens to have checked out.
+> So a generator run on platform B silently re-pins the code that platform A's lock
+> was frozen against — and a pack missing from B's `custom_nodes` is dropped from
+> the manifest entirely, breaking A.
+>
+> Before regenerating on a second platform, make its reference env match the
+> committed pins (or accept that the other platform's lock now needs regenerating
+> too). Diff `customNodes` and `comfyui.ref` against `git diff setup/comfyui.json`
+> afterwards — the change is easy to miss because the lock itself looks fine.
+
 The script reports three things you should read every time:
 
 - **git dependencies rewritten to tarballs** — informational.
@@ -243,9 +256,17 @@ Currently classified optional, with the evidence:
 Dropped entirely (not even probed — nothing in the tree references them):
 `autoretopo`, `drtk`.
 
-**Net result: the Windows build needs no hosted wheels at all.** `wheelHost` can
+**Net result: neither shipped build needs hosted wheels at all.** `wheelHost` can
 stay empty; every binary dependency either comes from PyPI, from the CUDA torch
 index, from inside the ComfyUI-Trellis2 repo, or from the flash-attn table.
+
+> [!TIP]
+> If a regeneration reports `ACTION REQUIRED` for wheels you know live inside
+> `custom_nodes/`, suspect the `file://` decoding before you start publishing
+> anything. Windows and Linux disagree about the third slash — `file:///C:/x` drops
+> it, `file:///home/x` must keep it — and dropping it on Linux yields a relative
+> path that no longer looks like it's under `custom_nodes`, so every node-local
+> wheel gets misrouted to `${WHEEL_HOST}`.
 
 ### flash-attn comes from the shared wheel table
 
@@ -269,8 +290,8 @@ redirect-following GET fetches them fine.
 
 > [!IMPORTANT]
 > If a build's torch version has no row in the table, the install fails with a
-> message naming the version and what the table does offer. This is the situation
-> a Linux build will hit — see below.
+> message naming the version and what the table does offer. The Linux build (torch
+> 2.11.0) needed a row added for exactly this reason; see Platform support below.
 
 > [!NOTE]
 > Hunyuan3DWrapper's own `mesh_processor` needs no wheel either: it ships a pure
@@ -357,37 +378,67 @@ const lock = cs.materializeLock({ appRoot: '.', build, manifest: m,
 | Platform | Status |
 | :--- | :--- |
 | Windows x64 | Build shipped (Python 3.13, torch 2.10.0+cu130) |
-| Linux x64 | **No build yet** — needs a generator run on Linux |
+| Linux x64 | Build shipped (Python 3.13, torch 2.11.0+cu128) — generated on WSL2, not yet validated on bare metal |
 | macOS | Not possible (no CUDA) |
 
 The install option is **hidden** on any platform without a shipped build:
 `setup:status` reports `comfyuiAvailable`, and both the first-run screen and the
 Settings card gate on it. A user on an unsupported platform is told to install
 ComfyUI themselves and set the path/port, rather than being offered an install
-that fails.
+that fails. Nothing in that gate is hard-coded per platform — it is
+`builds.some(b => b.platform === here)`, so a platform switches on the moment its
+generator run lands.
 
-### Adding Linux
+### The Linux build
 
-A Linux build is a separate generator run on a Linux machine with a working
-ComfyUI — the lock can't be synthesised from the Windows one, because wheels are
-platform-tagged (`win_amd64` vs `linux_x86_64`) and **the torch version differs**.
-Each run merges into `builds`, so adding Linux doesn't disturb Windows.
+Generated on WSL2 (Ubuntu, driver CUDA 13.3, RTX-class GPU) against a reference
+ComfyUI at the same pins the manifest ships. It differs from Windows in three ways
+that are all deliberate:
 
-Two things to know before starting:
+- **torch 2.11.0+cu128, not 2.10.0+cu130.** ComfyUI-Trellis2's Linux cp313 wheels
+  are built for torch 2.11 (`wheels/Linux/Torch2110/`), and the lock has to agree
+  with the wheels rather than with the other platform.
+- **`triton` instead of `triton-windows`.** This matters more than the name
+  suggests — see the toolchain note below.
+- **`custom_rasterizer` and `natten` are absent.** Both are classified optional, so
+  the install still succeeds; nothing needs building for cp313/torch-2.11.
 
-- **ComfyUI-Trellis2's Linux cp313 wheels are built for torch 2.11.0**, not the
-  2.10.0 the Windows build pins (`wheels/Linux/Torch2110/`). The Linux build will
-  therefore be a different torch version — that's fine, the lock and the wheels
-  just have to agree with each other.
-- Those Linux cp313 wheels are missing `custom_rasterizer` and `natten` — but
-  **neither is a blocker**: both are classified optional (see above), so a Linux
-  build simply won't have them and the install still succeeds. Nothing needs
-  building for cp313/torch-2.11 on their account.
+`flash_attention_linux.txt` carries the matching
+`2.11.0;12.8.0;…flash_attn-2.8.3+cu128torch2.11-cp313…` row. That table is shared
+with the rigging service, so keep existing rows intact when adding to it.
 
-- **`flash_attention_linux.txt` currently lists torch 2.13.0 only**, so a Linux
-  build pinned to torch 2.11 will fail flash-attn selection with a clear message.
-  Add a `2.11.0;<cuda>;<wheel url>;<torch install cmd>` row to that table (it is
-  shared with the rigging service, so keep the existing rows intact).
+#### Linux needs a C toolchain at *generation* time, not just install time
+
+`triton-windows` ships a prebuilt driver shim; plain `triton` does not. On Linux it
+compiles `cuda_utils.c` with the system compiler **the first time a kernel
+launches** — which is during a user's first mesh generation, minutes after the
+install reported success. Miss either piece and the failure is far from its cause:
+
+```
+/tmp/tmpXXXX/cuda_utils.c:9:10: fatal error: Python.h: No such file or directory
+```
+
+...raised from inside a Trellis2 node, after the sparse-structure and SLat sampling
+stages have already run. So `setupComfyUI` checks for both **before** any download
+(`checkNativeToolchain`, at 10%) and then exercises the real compile path in the
+verify phase (`probeTritonCompile`):
+
+- A missing compiler aborts with `sudo apt install build-essential`.
+- Missing headers abort with `sudo apt install python3.13-dev`.
+- A compile-shaped failure in the probe (`Python.h`, `gcc`, `cc1`, `compil`,
+  `CalledProcessError`) fails the install; anything else is logged and allowed
+  through, since it may not reproduce at generation time.
+
+In practice the header check should never fire: `uv venv --python 3.13` builds the
+venv from uv's managed CPython (python-build-standalone), which carries its own
+`include/python3.13/Python.h`. The compiler check is the one that earns its keep on
+a bare server. Both are no-ops on Windows.
+
+> [!WARNING]
+> `probeTritonCompile` reporting `triton compile not exercised: RuntimeError: 0
+> active drivers` is not a toolchain problem — triton's NVIDIA backend needs torch
+> to register itself, so this means torch was absent or the GPU wasn't visible to
+> that process. It never reached the compiler.
 
 ## Gotchas found the hard way
 

@@ -353,6 +353,94 @@ function selectFlashAttn({ appRoot, build, onLine }) {
   return pick.url;
 }
 
+// ---- native toolchain (Linux) -----------------------------------------------
+// Triton does NOT ship a prebuilt driver shim on Linux: it compiles cuda_utils.c
+// with the system C compiler the first time a kernel launches, which is long
+// after this install finishes. Miss either piece — a compiler or CPython's dev
+// headers — and the install completes perfectly, then a Trellis2 generation dies
+// two minutes in with "fatal error: Python.h: No such file or directory".
+//
+// So check it here, BEFORE the multi-GB torch download, and name the exact
+// package to install. Windows is exempt: it installs triton-windows, which
+// bundles its own toolchain.
+function checkNativeToolchain({ venvDir, pythonVersion, onLine }) {
+  if (IS_WIN) return;
+  const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
+
+  const cc = [process.env.CC, 'cc', 'gcc'].filter(Boolean).find((bin) => {
+    try {
+      return spawnSync(bin, ['--version'], { stdio: 'ignore', timeout: 20000 }).status === 0;
+    } catch {
+      return false;
+    }
+  });
+  if (!cc) {
+    throw new Error(
+      'No C compiler found (looked for cc and gcc). ComfyUI\'s GPU kernels are compiled '
+      + 'on demand at generation time, so one is required. Install it with:\n'
+      + '    sudo apt install build-essential\n'
+      + '(or the equivalent for your distribution), then run the install again.'
+    );
+  }
+  emit(`C compiler: ${cc}\n`);
+
+  // Ask the venv's own interpreter, not this process: which headers are needed
+  // depends on whether uv built the venv from its managed CPython or a system one.
+  const vp = venvPython(venvDir);
+  const r = spawnSync(vp, ['-c', "import sysconfig;print(sysconfig.get_paths()['include'])"], {
+    encoding: 'utf8', timeout: 30000,
+  });
+  const incDir = (r.stdout || '').trim();
+  if (r.status !== 0 || !incDir) {
+    throw new Error('Could not determine the Python include directory of the new virtual environment.');
+  }
+  const header = path.join(incDir, 'Python.h');
+  if (!fs.existsSync(header)) {
+    throw new Error(
+      `Missing CPython development headers — ${header} does not exist. ComfyUI's GPU `
+      + 'kernels are compiled on demand at generation time and cannot build without them. '
+      + `Install them with:\n    sudo apt install python${pythonVersion || '3.13'}-dev\n`
+      + '(or the equivalent for your distribution), then run the install again.'
+    );
+  }
+  emit(`Python headers: ${header}\n`);
+}
+
+// The runtime compile path above, exercised at install time instead of during the
+// user's first generation. Returns { ok, fatal, text }: a compile failure is
+// fatal (it WILL break every Trellis2 run and the fix is a package install),
+// while anything else — no GPU visible to this process, a driver quirk — is
+// reported and allowed through, since it may not reproduce at generation time.
+async function probeTritonCompile({ venvDir, onLine }) {
+  if (IS_WIN) return { ok: true, fatal: false, text: '' };
+  const probe = [
+    'import sys',
+    'try:',
+    '    from triton.runtime import driver',
+    'except Exception as e:',
+    '    print("optional  triton is not installed:", e); sys.exit(0)',
+    'try:',
+    // triton.runtime exports the singleton; fall back to the module attribute if
+    // a future layout hands back the module instead.
+    '    d = getattr(driver, "driver", driver)',
+    '    d.active.utils',   // forces CudaUtils() -> compiles cuda_utils.c with cc
+    '    print("ok        triton runtime compile")',
+    'except Exception as e:',
+    '    msg = "%s: %s" % (type(e).__name__, e)',
+    '    low = msg.lower()',
+    // No registered backend means the compile was never even attempted (triton's
+    // nvidia backend needs torch to report itself active). Nothing to conclude —
+    // don't cry FAIL over it.
+    '    if "active driver" in low:',
+    '        print("optional  triton compile not exercised:", msg); sys.exit(0)',
+    '    print("FAIL      triton runtime compile ->", msg)',
+    '    keys = ("python.h", "gcc", "cc1", "compil", "calledprocess")',
+    '    sys.exit(2 if any(k in low for k in keys) else 3)',
+  ].join('\n');
+  const r = await runStream(venvPython(venvDir), ['-c', probe], { onLine });
+  return { ok: r.code === 0, fatal: r.code === 2, text: r.stdout };
+}
+
 // ---- lock file --------------------------------------------------------------
 // The lock ships with placeholders because neither path is known until install
 // time. ${NODE_DIR} resolves to this install's custom_nodes (wheels that ride
@@ -439,6 +527,11 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
     if (code !== 0) throw new Error(`Could not create the ComfyUI virtual environment (exit ${code}).`);
   }
 
+  // Cheap, and deliberately ahead of every download: a missing compiler or header
+  // set costs seconds to report here and a mid-generation crash to discover later.
+  phase('Checking the build toolchain', 0.1);
+  checkNativeToolchain({ venvDir, pythonVersion: pyVer, onLine: log });
+
   // ComfyUI itself, then the node packs, BEFORE the lock install — the lock
   // references wheels that live inside ComfyUI-Trellis2/wheels/**, so those files
   // have to be on disk first.
@@ -523,6 +616,20 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
     const r = await runStream(vp, ['-c', probe], { cwd: installDir, onLine: log });
     if (r.code !== 0) {
       throw new Error('ComfyUI installed but some GPU modules will not import — most likely a torch ABI mismatch with a prebuilt wheel (see details).');
+    }
+
+    // Importing triton proves nothing — it only compiles on first kernel launch.
+    const triton = await probeTritonCompile({ venvDir, onLine: log });
+    if (triton.fatal) {
+      throw new Error(
+        'ComfyUI installed but Triton cannot compile its CUDA helper on this machine, so mesh '
+        + 'generation would fail on every run. This is a missing build dependency — install the '
+        + `C compiler and CPython headers (sudo apt install build-essential python${pyVer}-dev), `
+        + 'then run the install again.'
+      );
+    }
+    if (!triton.ok) {
+      log('Note: the Triton compile check did not pass here. If mesh generation fails, see the log above.\n');
     }
   }
 
