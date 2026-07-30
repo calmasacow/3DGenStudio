@@ -1,0 +1,121 @@
+name: Desktop build (single platform)
+
+# Reusable build recipe — not runnable on its own. Every desktop-build workflow
+# calls this one:
+#   - desktop-build-windows.yml  (manual)
+#   - desktop-build-macos.yml    (manual)
+#   - desktop-build-linux.yml    (manual)
+#   - desktop-build.yml          (all three, on a v* tag or manually)
+#
+# Keeping the steps here means the recipe exists once: change it and all four
+# callers change with it.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'GitHub-hosted runner label: windows-latest | macos-latest | ubuntu-latest'
+        required: true
+        type: string
+      build-script:
+        description: 'npm script that packages this platform: dist:win | dist:mac | dist:linux'
+        required: true
+        type: string
+      artifact-suffix:
+        description: 'Suffix for the uploaded artifact name (3dgenstudio-<suffix>)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # electron-builder rebuilds native modules (sqlite3) for Electron's ABI.
+      # The hosted runners already include the required build toolchains.
+      #
+      # No GH_TOKEN here on purpose: with a token present, electron-builder
+      # auto-publishes on any tag push and tries to POST a GitHub Release,
+      # which fails 403 because GITHUB_TOKEN is read-only by default. The dist
+      # scripts also pass --publish never. Installers are collected by the
+      # Upload installers step below instead. To publish Releases later: add
+      # `permissions: contents: write` to this job, uncomment the `publish:`
+      # block in electron-builder.yml, drop --publish never, and remember the
+      # tag must be v<package.json version> — electron-builder derives it from
+      # package.json, not from the pushed tag.
+      - name: Build installers
+        run: npm run ${{ inputs.build-script }}
+        # macOS signing/notarization (optional): uncomment the env block to
+        # produce a signed, notarized .dmg. The callers already pass
+        # `secrets: inherit`, so the repo secrets reach this job. Without them
+        # the build still succeeds and build/adhoc-sign.cjs ad-hoc signs the
+        # bundle (bypassable Gatekeeper warning instead of "damaged").
+        # env:
+        #   CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+        #   CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        #   APPLE_ID: ${{ secrets.APPLE_ID }}
+        #   APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # Reads back exactly what a Mac sees when it opens the app we just built:
+      # signature state, quarantine handling and the Gatekeeper verdict. The
+      # runner is Apple Silicon, so this covers the arm64 build most users get.
+      # This is how the «"3D Gen Studio" is damaged and can't be opened» class of
+      # report gets diagnosed without owning a Mac — download the log artifact.
+      - name: Diagnose macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          for app in release/mac/*.app release/mac-arm64/*.app; do
+            [ -d "$app" ] || continue
+            slug=$(basename "$(dirname "$app")")
+            echo "::group::$app"
+            bash tools/mac-diagnose.sh \
+              --app "$app" \
+              --quarantine \
+              --try-launch \
+              --out "mac-diagnostics-$slug.txt" || true
+            echo "::endgroup::"
+          done
+          for dmg in release/*.dmg; do
+            [ -f "$dmg" ] || continue
+            echo "::group::$dmg"
+            shasum -a 256 "$dmg"
+            hdiutil verify "$dmg" || true
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" || true
+            echo "::endgroup::"
+          done
+
+      - name: Upload macOS diagnostics
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v5
+        with:
+          name: mac-diagnostics
+          path: mac-diagnostics-*.txt
+          if-no-files-found: warn
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v5
+        with:
+          name: 3dgenstudio-${{ inputs.artifact-suffix }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: warn

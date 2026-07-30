@@ -1,0 +1,24 @@
+name: Desktop build · Linux
+
+# Manual-only Linux build: Actions tab → "Desktop build · Linux" → Run workflow
+# → pick a branch. Produces the .AppImage + .deb as the `3dgenstudio-linux`
+# artifact.
+#
+# The Run workflow button only appears once this file is on the DEFAULT branch
+# (main) — that is a GitHub rule, not a config option. Until then, merge it or
+# use the all-platforms desktop-build.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    uses: ./.github/workflows/desktop-build-platform.yml
+    secrets: inherit
+    with:
+      runner: ubuntu-latest
+      build-script: dist:linux
+      artifact-suffix: linux
