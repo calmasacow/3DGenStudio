@@ -161,6 +161,9 @@ licence terms.
 
 ### What the log tells you
 
+The script ends with a **Verdict** section that reads the evidence back and
+states which dialog a user will actually get. The raw signals behind it:
+
 | Output | Meaning |
 | --- | --- |
 | `code object is not signed at all` | unsigned build → "damaged" on download |
@@ -170,6 +173,24 @@ licence terms.
 | `codesign --verify` fails | bundle modified after signing |
 | `lipo -archs` mismatch vs the Mac's chip | wrong download (x64 vs arm64) |
 | dmg `shasum` differs from the release | genuinely truncated download |
+
+Two outputs look alarming but are expected on an unnotarized build, and
+**neither** causes the "damaged" dead end:
+
+- `spctl --assess: rejected` — spctl rejects anything not notarized. It gives
+  the same answer for a valid ad-hoc signature and a broken one, so it can't
+  distinguish the two on its own; `codesign --verify` is what does.
+- `syspolicy_check`'s *Notary Ticket Missing* (Fatal) and *Adhoc Signed App*
+  (Warning) — the same statement in stronger words. Its *Internal Xprotect
+  Error* is Apple's own scanner failing on a 21,000-file bundle and is not
+  actionable.
+
+The exec test (`--try-launch`) is the one that separates "the kernel refuses
+this binary" from "Gatekeeper refuses this app": it runs the app's own Mach-O
+via `ELECTRON_RUN_AS_NODE` with `process.exit(0)`, so it exercises the same
+signature check and returns immediately. It never launches the GUI — doing that
+wedged a CI job for 81 minutes. Every check is time-bounded and the CI step
+carries `timeout-minutes: 15` on top.
 
 ## Auto-update (optional, later)
 
