@@ -80,7 +80,78 @@ Unsigned builds work but show "unknown developer" warnings.
 - **macOS**: enroll in the Apple Developer Program ($99/yr), then set
   `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
   `APPLE_TEAM_ID` (uncomment them in the workflow) to sign + notarize.
+  Hardened runtime is already configured with `build/entitlements.mac.plist`
+  (JIT + library validation off — required, or the signed app cannot load
+  sqlite3 or spawn the Python services).
 - **Windows**: an Authenticode certificate avoids SmartScreen warnings.
+
+Without a certificate, `build/adhoc-sign.cjs` (an `afterPack` hook) ad-hoc signs
+the macOS bundle. See below for why that matters.
+
+## macOS: «"3D Gen Studio" is damaged and can't be opened»
+
+This is **Gatekeeper**, not a corrupt download. It appears when a downloaded
+(= quarantined) app has a signature that is missing or does not match its
+contents. Note that it is a *hard* refusal — unlike the "unidentified developer"
+warning, it offers no way through.
+
+Cause in this project: electron-builder edits `Info.plist` and renames the main
+executable, which invalidates the ad-hoc signature the prebuilt Electron
+binaries ship with. With no Developer ID present it then skips signing, so the
+bundle goes out with a signature that no longer matches. The `afterPack` hook
+re-signs ad-hoc to fix exactly that, downgrading the failure to the ordinary
+bypassable warning. Notarization is still what removes the warning entirely.
+
+### Telling a user how to get in right now
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/3D Gen Studio.app"
+open "/Applications/3D Gen Studio.app"
+```
+
+If it then crashes or reports "killed", the signature itself is broken and it
+needs a local re-sign (requires Xcode Command Line Tools):
+
+```sh
+codesign --force --deep --sign - "/Applications/3D Gen Studio.app"
+```
+
+### Collecting logs from a Mac you don't have
+
+`tools/mac-diagnose.sh` gathers the whole picture — quarantine attributes,
+`codesign` verification, notarization state, the Gatekeeper verdict, arch
+slices, syspolicy log and crash reports — into one file to send back:
+
+```sh
+bash mac-diagnose.sh --dmg ~/Downloads/3DGenStudio-2.2.0-mac-arm64.dmg
+# writes ~/Desktop/3dgenstudio-mac-diagnostics.txt
+```
+
+### Reproducing it without any Mac
+
+The `macos-latest` CI runner *is* an Apple Silicon Mac. The **Diagnose macOS
+bundle** step in `desktop-build.yml` runs the same script against the freshly
+packaged bundle, including `--quarantine`, which stamps a copy with the
+`com.apple.quarantine` attribute a browser download adds and re-runs the
+assessment. That reproduces the user-visible verdict (a locally built app is
+never quarantined, so it always passes without this). Results are uploaded as
+the `mac-diagnostics` artifact.
+
+A macOS VM is the weaker option: it cannot test Apple Silicon builds (the slice
+most users need), and running macOS on non-Apple hardware is outside Apple's
+licence terms.
+
+### What the log tells you
+
+| Output | Meaning |
+| --- | --- |
+| `code object is not signed at all` | unsigned build → "damaged" on download |
+| `Signature=adhoc` | ad-hoc signed → bypassable warning, no notarization |
+| `Authority=Developer ID Application: …` | properly signed |
+| `stapler validate` succeeds | notarized → installs with no warning |
+| `codesign --verify` fails | bundle modified after signing |
+| `lipo -archs` mismatch vs the Mac's chip | wrong download (x64 vs arm64) |
+| dmg `shasum` differs from the release | genuinely truncated download |
 
 ## Auto-update (optional, later)
 

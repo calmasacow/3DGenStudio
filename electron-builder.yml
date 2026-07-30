@@ -24,6 +24,13 @@ directories:
   output: release
   buildResources: build
 
+# Ad-hoc signs the macOS bundle when no Developer ID is available. Without it
+# electron-builder ships a bundle whose Electron-provided signature no longer
+# matches its (modified) contents, and macOS refuses it as
+# "…is damaged and can't be opened" instead of showing a bypassable warning.
+# No-op on Windows/Linux and when a real certificate is present.
+afterPack: build/adhoc-sign.cjs
+
 # asar:false keeps files on disk unpacked so the Express backend can require
 # its modules and serve dist/ with plain fs paths (no asar path shims).
 asar: false
@@ -100,8 +107,14 @@ mac:
       arch: [x64, arm64]
   # Signing/notarization: set CSC_LINK + CSC_KEY_PASSWORD (Developer ID cert)
   # and APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars in CI.
-  # Without them the .dmg is unsigned and macOS shows a Gatekeeper warning.
+  # Without them the build falls back to ad-hoc signing (see afterPack above),
+  # which still shows a Gatekeeper warning — but a bypassable one.
+  #
+  # hardenedRuntime only applies to the real-certificate path; it requires the
+  # entitlements below (JIT + library validation off) or the app cannot load
+  # sqlite3 / spawn the Python services.
   hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
   gatekeeperAssess: false
 
 linux:

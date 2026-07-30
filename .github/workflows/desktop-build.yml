@@ -66,6 +66,42 @@ jobs:
         #   APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # Reads back exactly what a Mac sees when it opens the app we just built:
+      # signature state, quarantine handling and the Gatekeeper verdict. The
+      # runner is Apple Silicon, so this covers the arm64 build most users get.
+      # This is how the «"3D Gen Studio" is damaged and can't be opened» class of
+      # report gets diagnosed without owning a Mac — download the log artifact.
+      - name: Diagnose macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          for app in release/mac/*.app release/mac-arm64/*.app; do
+            [ -d "$app" ] || continue
+            slug=$(basename "$(dirname "$app")")
+            echo "::group::$app"
+            bash tools/mac-diagnose.sh \
+              --app "$app" \
+              --quarantine \
+              --try-launch \
+              --out "mac-diagnostics-$slug.txt" || true
+            echo "::endgroup::"
+          done
+          for dmg in release/*.dmg; do
+            [ -f "$dmg" ] || continue
+            echo "::group::$dmg"
+            shasum -a 256 "$dmg"
+            hdiutil verify "$dmg" || true
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" || true
+            echo "::endgroup::"
+          done
+
+      - name: Upload macOS diagnostics
+        if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: mac-diagnostics
+          path: mac-diagnostics-*.txt
+          if-no-files-found: warn
+
       - name: Upload installers
         uses: actions/upload-artifact@v5
         with:

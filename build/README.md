@@ -1,5 +1,15 @@
 # Desktop build resources
 
+Non-icon files here:
+
+- `adhoc-sign.cjs` — `afterPack` hook. Ad-hoc signs the macOS bundle when no
+  Developer ID certificate is available, so macOS shows a bypassable warning
+  instead of refusing the app as "damaged". No-op on Windows/Linux and when a
+  real certificate is present. See `docs/DESKTOP_BUILD.md`.
+- `entitlements.mac.plist` — hardened-runtime entitlements for the *signed*
+  build (JIT + library validation off, needed for sqlite3 and the Python
+  services).
+
 electron-builder looks in this directory (`buildResources`) for platform icons.
 
 Currently:
