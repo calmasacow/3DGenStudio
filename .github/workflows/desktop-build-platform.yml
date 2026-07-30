@@ -32,6 +32,8 @@ permissions:
 jobs:
   build:
     runs-on: ${{ inputs.runner }}
+    # A packaging run is ~15 min; anything past 45 is stuck, not slow.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -79,6 +81,9 @@ jobs:
       # report gets diagnosed without owning a Mac — download the log artifact.
       - name: Diagnose macOS bundle
         if: runner.os == 'macOS'
+        # Backstop: every check inside the script is individually bounded, but a
+        # hung diagnostic must never cost a whole runner-hour again.
+        timeout-minutes: 15
         run: |
           for app in release/mac/*.app release/mac-arm64/*.app; do
             [ -d "$app" ] || continue
