@@ -1,8 +1,12 @@
 name: Desktop build
 
 # Builds downloadable installers for Windows, macOS and Linux.
-# - Push a tag like v1.3.3 to produce artifacts (and, if configured, a Release).
+# - Push a tag like v1.3.3 to produce artifacts.
 # - Or run manually from the Actions tab (workflow_dispatch).
+#
+# Artifacts only — nothing is published to GitHub Releases. Download the
+# installers from the workflow run's Artifacts section. See the Build
+# installers step for how to switch to publishing Releases.
 
 on:
   push:
@@ -40,18 +44,27 @@ jobs:
 
       # electron-builder rebuilds native modules (sqlite3) for Electron's ABI.
       # The hosted runners already include the required build toolchains.
+      #
+      # No GH_TOKEN here on purpose: with a token present, electron-builder
+      # auto-publishes on any tag push and tries to POST a GitHub Release,
+      # which fails 403 because GITHUB_TOKEN is read-only by default. The dist
+      # scripts also pass --publish never. Installers are collected by the
+      # Upload installers step below instead. To publish Releases later: add
+      # `permissions: contents: write` to this job, uncomment the `publish:`
+      # block in electron-builder.yml, drop --publish never, and remember the
+      # tag must be v<package.json version> — electron-builder derives it from
+      # package.json, not from the pushed tag.
       - name: Build installers
         run: npm run ${{ matrix.script }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing/notarization (optional): add these repo secrets to
-          # produce a signed, notarized .dmg. Without them the build still
-          # succeeds but the app is unsigned.
-          # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # macOS signing/notarization (optional): uncomment the env block and add
+        # these repo secrets to produce a signed, notarized .dmg. Without them
+        # the build still succeeds but the app is unsigned.
+        # env:
+        #   CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+        #   CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        #   APPLE_ID: ${{ secrets.APPLE_ID }}
+        #   APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload installers
         uses: actions/upload-artifact@v5
