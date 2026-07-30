@@ -192,6 +192,42 @@ python main.py
 > [!NOTE] 
 > This starts the backend server on `http://localhost:3001` and the Vite frontend development server.
 
+### First launch on macOS
+
+> [!IMPORTANT]
+> macOS builds are **Apple Silicon only** (M1 and later). Intel Macs are not
+> supported: the Mesh Tools service needs Blender's `bpy` module, which no longer
+> ships for macOS Intel.
+
+The desktop app is ad-hoc signed but not yet notarized by Apple, so macOS blocks
+the first launch with:
+
+> Apple could not verify "3D Gen Studio" is free of malware that may harm your
+> Mac or compromise your privacy.
+
+This is Gatekeeper's standard warning for an app from outside the App Store, not
+a problem with the download. To allow it:
+
+1. Click **Done** on the dialog.
+2. Open  **System Settings → Privacy & Security**.
+3. Scroll to the security section — *"3D Gen Studio was blocked to protect your
+   Mac"* — and click **Open Anyway**.
+4. Authenticate, then confirm **Open Anyway** once more.
+
+macOS remembers the decision; later launches open normally. On macOS 15 and
+later, **Control-click → Open no longer works** for this — System Settings is
+the only route.
+
+Equivalent one-liner, if you prefer the terminal:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/3D Gen Studio.app"
+```
+
+> [!NOTE]
+> If macOS instead says the app **"is damaged and can't be opened"**, that is a
+> different (and fixed) problem — see [docs/DESKTOP_BUILD.md](docs/DESKTOP_BUILD.md).
+
 ### Configuration
 Open the application and configure your services in the settings area:
 - `ComfyUI` path / host / port

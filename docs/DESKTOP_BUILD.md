@@ -58,13 +58,34 @@ useful for iterating on the shell.
 
 Outputs land in `release/`:
 - Windows: NSIS installer `.exe` + portable `.exe`
-- macOS: `.dmg` + `.zip` (x64 + arm64)
+- macOS: `.dmg` + `.zip` (**arm64 / Apple Silicon only** — see below)
 - Linux: `.AppImage` + `.deb`
 
 ### Cross-platform note
 
 Windows and Linux installers can be built from their respective OSes (or CI).
 **macOS `.dmg` must be built on macOS** (local Mac or a macOS CI runner).
+
+### macOS is Apple Silicon only
+
+The Intel (`x64`) macOS target was removed. The Mesh Tools service requires
+`bpy>=5.0` (`python-server/requirements.txt`) for the GLB→FBX engine export, and
+Blender 5.x dropped macOS Intel support — there is no `macosx … x86_64` wheel to
+install. An Intel build therefore installs and launches correctly, then crashes
+while provisioning its Python venv, which is a worse experience than not offering
+the download at all.
+
+Consequences to keep in mind:
+
+- **Intel Macs are unsupported**, including macOS VMs on Intel/AMD PC hardware —
+  an arm64 bundle cannot run there at all (Rosetta translates x86 → arm, not the
+  reverse). Testing the packaged app needs real Apple Silicon, or an
+  Apple-Silicon-hosted VM.
+- The `release/mac/` output directory no longer appears; only `release/mac-arm64/`.
+  The CI diagnose loop already globs both, so nothing there needs changing.
+
+Restoring Intel builds means putting `x64` back in `mac.target[].arch` in
+`electron-builder.yml` — worth doing only if `bpy` ships x86_64 wheels again.
 
 ## Building in CI
 
@@ -74,7 +95,7 @@ Four workflows, all sharing one build recipe:
 | --- | --- | --- |
 | `desktop-build.yml` — *Desktop build · all platforms* | `v*` tag push, or manual | all three |
 | `desktop-build-windows.yml` — *· Windows* | manual only | NSIS + portable `.exe` |
-| `desktop-build-macos.yml` — *· macOS* | manual only | `.dmg` + `.zip`, x64 + arm64 |
+| `desktop-build-macos.yml` — *· macOS* | manual only | `.dmg` + `.zip`, arm64 only |
 | `desktop-build-linux.yml` — *· Linux* | manual only | `.AppImage` + `.deb` |
 
 Run a single platform from the Actions tab → pick the workflow → **Run

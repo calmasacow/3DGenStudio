@@ -100,11 +100,16 @@ portable:
 mac:
   # TODO: add build/icon.icns for a branded icon (falls back to default now).
   category: public.app-category.graphics-design
+  # Apple Silicon only — NOT an arbitrary choice. The Mesh Tools service needs
+  # `bpy>=5.0` (requirements.txt) for the GLB→FBX engine export, and Blender 5.x
+  # dropped macOS Intel support, so no macosx x86_64 wheel exists. An Intel
+  # build installs fine and then fails provisioning its Python venv, which is
+  # worse than not shipping it. Revisit if bpy ever ships x86_64 wheels again.
   target:
     - target: dmg
-      arch: [x64, arm64]
+      arch: [arm64]
     - target: zip
-      arch: [x64, arm64]
+      arch: [arm64]
   # Signing/notarization: set CSC_LINK + CSC_KEY_PASSWORD (Developer ID cert)
   # and APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars in CI.
   # Without them the build falls back to ad-hoc signing (see afterPack above),
