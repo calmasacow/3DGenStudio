@@ -76,7 +76,8 @@ jobs:
 
       # Reads back exactly what a Mac sees when it opens the app we just built:
       # signature state, quarantine handling and the Gatekeeper verdict. The
-      # runner is Apple Silicon, so this covers the arm64 build most users get.
+      # runner is Apple Silicon and the build is arm64-only (see the mac section
+      # of electron-builder.yml), so the runner matches what users actually get.
       # This is how the «"3D Gen Studio" is damaged and can't be opened» class of
       # report gets diagnosed without owning a Mac — download the log artifact.
       - name: Diagnose macOS bundle
@@ -85,8 +86,12 @@ jobs:
         # hung diagnostic must never cost a whole runner-hour again.
         timeout-minutes: 15
         run: |
-          for app in release/mac/*.app release/mac-arm64/*.app; do
+          # One glob covers every arch electron-builder might emit: mac-arm64
+          # today, plus mac/ (x64) or mac-universal/ if those are ever restored.
+          found=0
+          for app in release/mac*/*.app; do
             [ -d "$app" ] || continue
+            found=$((found + 1))
             slug=$(basename "$(dirname "$app")")
             echo "::group::$app"
             bash tools/mac-diagnose.sh \
@@ -96,6 +101,14 @@ jobs:
               --out "mac-diagnostics-$slug.txt" || true
             echo "::endgroup::"
           done
+          # Silently diagnosing nothing would let a signing regression ship, so
+          # treat "no bundle found" as a build failure rather than a warning.
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No .app bundle found under release/mac*/ — nothing was diagnosed."
+            ls -la release/ || true
+            exit 1
+          fi
+          echo "Diagnosed $found bundle(s)."
           for dmg in release/*.dmg; do
             [ -f "$dmg" ] || continue
             echo "::group::$dmg"
