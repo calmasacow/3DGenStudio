@@ -1,12 +1,16 @@
-name: Desktop build
+name: Desktop build · all platforms
 
-# Builds downloadable installers for Windows, macOS and Linux.
+# Builds Windows, macOS and Linux installers in one run.
 # - Push a tag like v1.3.3 to produce artifacts.
 # - Or run manually from the Actions tab (workflow_dispatch).
 #
+# To build a single platform instead, run the per-platform workflow:
+# "Desktop build · Windows" / "· macOS" / "· Linux". All four share one build
+# recipe (desktop-build-platform.yml) — edit the steps there.
+#
 # Artifacts only — nothing is published to GitHub Releases. Download the
-# installers from the workflow run's Artifacts section. See the Build
-# installers step for how to switch to publishing Releases.
+# installers from the workflow run's Artifacts section. See
+# desktop-build-platform.yml for how to switch to publishing Releases.
 
 on:
   push:
@@ -14,102 +18,32 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# The three jobs are independent: one platform failing does not cancel the
+# others (this replaces the old matrix's fail-fast: false).
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            script: dist:win
-          - os: macos-latest
-            script: dist:mac
-          - os: ubuntu-latest
-            script: dist:linux
+  windows:
+    uses: ./.github/workflows/desktop-build-platform.yml
+    secrets: inherit
+    with:
+      runner: windows-latest
+      build-script: dist:win
+      artifact-suffix: windows
 
-    runs-on: ${{ matrix.os }}
+  macos:
+    uses: ./.github/workflows/desktop-build-platform.yml
+    secrets: inherit
+    with:
+      runner: macos-latest
+      build-script: dist:mac
+      artifact-suffix: macos
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      # electron-builder rebuilds native modules (sqlite3) for Electron's ABI.
-      # The hosted runners already include the required build toolchains.
-      #
-      # No GH_TOKEN here on purpose: with a token present, electron-builder
-      # auto-publishes on any tag push and tries to POST a GitHub Release,
-      # which fails 403 because GITHUB_TOKEN is read-only by default. The dist
-      # scripts also pass --publish never. Installers are collected by the
-      # Upload installers step below instead. To publish Releases later: add
-      # `permissions: contents: write` to this job, uncomment the `publish:`
-      # block in electron-builder.yml, drop --publish never, and remember the
-      # tag must be v<package.json version> — electron-builder derives it from
-      # package.json, not from the pushed tag.
-      - name: Build installers
-        run: npm run ${{ matrix.script }}
-        # macOS signing/notarization (optional): uncomment the env block and add
-        # these repo secrets to produce a signed, notarized .dmg. Without them
-        # the build still succeeds but the app is unsigned.
-        # env:
-        #   CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-        #   CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-        #   APPLE_ID: ${{ secrets.APPLE_ID }}
-        #   APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      # Reads back exactly what a Mac sees when it opens the app we just built:
-      # signature state, quarantine handling and the Gatekeeper verdict. The
-      # runner is Apple Silicon, so this covers the arm64 build most users get.
-      # This is how the «"3D Gen Studio" is damaged and can't be opened» class of
-      # report gets diagnosed without owning a Mac — download the log artifact.
-      - name: Diagnose macOS bundle
-        if: runner.os == 'macOS'
-        run: |
-          for app in release/mac/*.app release/mac-arm64/*.app; do
-            [ -d "$app" ] || continue
-            slug=$(basename "$(dirname "$app")")
-            echo "::group::$app"
-            bash tools/mac-diagnose.sh \
-              --app "$app" \
-              --quarantine \
-              --try-launch \
-              --out "mac-diagnostics-$slug.txt" || true
-            echo "::endgroup::"
-          done
-          for dmg in release/*.dmg; do
-            [ -f "$dmg" ] || continue
-            echo "::group::$dmg"
-            shasum -a 256 "$dmg"
-            hdiutil verify "$dmg" || true
-            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" || true
-            echo "::endgroup::"
-          done
-
-      - name: Upload macOS diagnostics
-        if: runner.os == 'macOS' && always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: mac-diagnostics
-          path: mac-diagnostics-*.txt
-          if-no-files-found: warn
-
-      - name: Upload installers
-        uses: actions/upload-artifact@v5
-        with:
-          name: 3dgenstudio-${{ matrix.os }}
-          path: |
-            release/*.exe
-            release/*.dmg
-            release/*.zip
-            release/*.AppImage
-            release/*.deb
-          if-no-files-found: warn
+  linux:
+    uses: ./.github/workflows/desktop-build-platform.yml
+    secrets: inherit
+    with:
+      runner: ubuntu-latest
+      build-script: dist:linux
+      artifact-suffix: linux

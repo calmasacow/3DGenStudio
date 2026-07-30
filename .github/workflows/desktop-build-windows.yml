@@ -1,0 +1,24 @@
+name: Desktop build · Windows
+
+# Manual-only Windows build: Actions tab → "Desktop build · Windows" → Run
+# workflow → pick a branch. Produces the NSIS installer + portable .exe as the
+# `3dgenstudio-windows` artifact.
+#
+# The Run workflow button only appears once this file is on the DEFAULT branch
+# (main) — that is a GitHub rule, not a config option. Until then, merge it or
+# use the all-platforms desktop-build.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    uses: ./.github/workflows/desktop-build-platform.yml
+    secrets: inherit
+    with:
+      runner: windows-latest
+      build-script: dist:win
+      artifact-suffix: windows

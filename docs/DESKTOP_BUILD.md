@@ -66,12 +66,29 @@ Outputs land in `release/`:
 Windows and Linux installers can be built from their respective OSes (or CI).
 **macOS `.dmg` must be built on macOS** (local Mac or a macOS CI runner).
 
-## Building all platforms in CI
+## Building in CI
 
-`.github/workflows/desktop-build.yml` runs a matrix across
-`windows-latest`, `macos-latest`, and `ubuntu-latest`. Trigger it by pushing a
-`v*` tag or running it manually from the Actions tab; installers are uploaded as
-build artifacts.
+Four workflows, all sharing one build recipe:
+
+| Workflow | Trigger | Builds |
+| --- | --- | --- |
+| `desktop-build.yml` — *Desktop build · all platforms* | `v*` tag push, or manual | all three |
+| `desktop-build-windows.yml` — *· Windows* | manual only | NSIS + portable `.exe` |
+| `desktop-build-macos.yml` — *· macOS* | manual only | `.dmg` + `.zip`, x64 + arm64 |
+| `desktop-build-linux.yml` — *· Linux* | manual only | `.AppImage` + `.deb` |
+
+Run a single platform from the Actions tab → pick the workflow → **Run
+workflow** → choose a branch. Installers are uploaded as build artifacts
+(`3dgenstudio-windows` / `-macos` / `-linux`); nothing is published to Releases.
+
+The build steps themselves live once, in `desktop-build-platform.yml` — a
+reusable workflow (`workflow_call`) that the other four call with a runner label
+and an npm script. **Edit the steps there**, not in the four callers.
+
+> The **Run workflow** button only appears for workflows present on the
+> **default branch** (`main`). New or renamed workflow files on `dev` stay
+> invisible in the Actions tab until merged — a GitHub rule, not a setting.
+> Once merged, the dispatch dialog can still target any branch.
 
 ## Code signing (recommended for a clean install)
 
@@ -129,9 +146,10 @@ bash mac-diagnose.sh --dmg ~/Downloads/3DGenStudio-2.2.0-mac-arm64.dmg
 
 ### Reproducing it without any Mac
 
-The `macos-latest` CI runner *is* an Apple Silicon Mac. The **Diagnose macOS
-bundle** step in `desktop-build.yml` runs the same script against the freshly
-packaged bundle, including `--quarantine`, which stamps a copy with the
+The `macos-latest` CI runner *is* an Apple Silicon Mac. Run the **Desktop build ·
+macOS** workflow: its **Diagnose macOS bundle** step (in
+`desktop-build-platform.yml`) runs the same script against the freshly packaged
+bundle, including `--quarantine`, which stamps a copy with the
 `com.apple.quarantine` attribute a browser download adds and re-runs the
 assessment. That reproduces the user-visible verdict (a locally built app is
 never quarantined, so it always passes without this). Results are uploaded as
