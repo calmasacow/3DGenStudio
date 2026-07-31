@@ -32,6 +32,8 @@ const {
   isAvailableHere: comfyAvailableHere,
   setupComfyUI,
   startComfyUI,
+  planComfyUpdate,
+  updateComfyUI,
 } = require('./comfysetup.cjs');
 
 // Force a stable, brandable name BEFORE any getPath('userData') call.
@@ -81,6 +83,10 @@ let shuttingDown = false;
 const handles = { meshtools: null, rigging: null, comfyui: null };
 const starting = { meshtools: null, rigging: null, comfyui: null };
 let SERVICES = null;
+// Set while a managed-ComfyUI update or reinstall is rewriting the install tree.
+// Both jobs delete files a running ComfyUI would have open, so starting the
+// service is refused for the duration (and a second job is refused outright).
+let comfyMaintenance = null;
 
 function log(line) {
   const stamped = `[main] ${line}`;
@@ -205,6 +211,10 @@ function portFree(port) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function pickFreePort(start, tries = 20) {
   for (let p = start; p < start + tries; p += 1) {
     if (await portFree(p)) return p;
@@ -322,6 +332,12 @@ function stopService(name) {
 function ensureService(name) {
   const svc = SERVICES[name];
   if (!svc) return Promise.reject(new Error(`Unknown service: ${name}`));
+  // Starting ComfyUI mid-update would load files the update is replacing (and on
+  // Windows lock them against deletion). Auto-start and on-demand callers land
+  // here too, so the guard belongs in ensureService, not just the buttons.
+  if (name === 'comfyui' && comfyMaintenance) {
+    return Promise.reject(new Error(`${comfyMaintenance} ComfyUI will be startable once it finishes.`));
+  }
   if (!serviceInstalled(svc)) {
     return Promise.reject(new Error(`${svc.label} is not installed yet. Install it in Settings.`));
   }
@@ -414,6 +430,98 @@ function registerServicesIpc() {
     log(`Re-pointed settings at the managed ComfyUI on port ${applied.port}.`);
     return { ok: true, port: applied.port, path: COMFY_DIR, modelsPath: path.join(COMFY_DATA, 'models') };
   });
+
+  // --- Managed ComfyUI upgrades ---------------------------------------------
+  // Updating the app does NOT update an existing managed ComfyUI: the installer
+  // short-circuits once the install exists, and the node packs are pinned
+  // tarballs. So a newer app version ships newer refs and a newer dependency lock
+  // that the user's install never sees. These two handlers close that gap: check
+  // what the shipped manifest wants vs what is installed, then apply it.
+
+  // Cheap and side-effect free (one metadata query, no network) so Settings can
+  // call it whenever the ComfyUI panel opens.
+  ipcMain.handle('comfyui:update-check', async () => {
+    if (!comfyReady()) return { ok: false, error: 'The managed ComfyUI is not installed yet.' };
+    if (comfyMaintenance) return { ok: false, error: comfyMaintenance, busy: true };
+    try {
+      const plan = await planComfyUpdate({ appRoot: APP_ROOT, installDir: COMFY_DIR, venvDir: COMFY_VENV });
+      return { ok: true, plan, version: app.getVersion() };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  });
+
+  ipcMain.handle('comfyui:update-run', async (event) => {
+    const send = (evt) => {
+      try { event.sender.send('setup:progress', { ...evt, service: 'comfyui-update' }); } catch { /* window gone */ }
+    };
+    if (!comfyReady()) return { ok: false, error: 'The managed ComfyUI is not installed yet.' };
+    if (comfyMaintenance) return { ok: false, error: comfyMaintenance, busy: true };
+    comfyMaintenance = 'A ComfyUI update is already running.';
+    try {
+      const uv = await ensureUv({ appRoot: APP_ROOT, onLine: (t) => send({ kind: 'log', text: t }) });
+      if (!uv) throw new Error('Could not find or install uv (the Python toolchain manager).');
+      // The update replaces files a running ComfyUI has open — and Windows will
+      // not delete a loaded .pyd at all — so stop it first and give the tree a
+      // moment to be released.
+      const wasRunning = !!handles.comfyui || !!starting.comfyui;
+      if (wasRunning) {
+        send({ kind: 'log', text: 'Stopping ComfyUI — the update replaces files it has open.\n' });
+        stopService('comfyui');
+        await sleep(2000);
+      }
+      const res = await updateComfyUI({
+        uv, appRoot: APP_ROOT, installDir: COMFY_DIR, dataDir: COMFY_DATA, venvDir: COMFY_VENV,
+        appVersion: app.getVersion(), onProgress: send,
+      });
+      log(`Managed ComfyUI update: ${res.summary}`);
+      return { ok: true, changed: res.changed, summary: res.summary, wasRunning };
+    } catch (err) {
+      const message = err?.message || String(err);
+      log(`Managed ComfyUI update failed: ${message}`);
+      send({ kind: 'error', text: message });
+      return { ok: false, error: message };
+    } finally {
+      comfyMaintenance = null;
+    }
+  });
+
+  // Full reinstall. Needed when an update cannot be incremental — a Python
+  // version bump invalidates every wheel in the lock — and useful as a repair for
+  // an environment that has been broken by hand.
+  ipcMain.handle('comfyui:reinstall', async (event) => {
+    const send = (evt) => {
+      try { event.sender.send('setup:progress', { ...evt, service: 'comfyui-update' }); } catch { /* window gone */ }
+    };
+    if (comfyMaintenance) return { ok: false, error: comfyMaintenance, busy: true };
+    comfyMaintenance = 'A ComfyUI install is already running.';
+    try {
+      stopService('comfyui');
+      await sleep(2000);
+      // Code and venv only — NEVER the data dir. Models, inputs, outputs and the
+      // ComfyUI database live there and are multi-GB to replace.
+      send({ kind: 'log', text: 'Removing the existing ComfyUI environment (models and outputs are kept)…\n' });
+      for (const dir of [COMFY_VENV, COMFY_DIR]) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch (err) {
+          throw new Error(`Could not remove ${dir}: ${err.message}. Close anything using that folder and try again.`);
+        }
+      }
+      // Only ComfyUI's own progress is interesting here — doSetup also reports on
+      // Mesh Tools, whose "done" would look like this job finishing.
+      await doSetup({ comfyui: true }, (evt) => { if (!evt.service || evt.service === 'comfyui') send(evt); });
+      log('Managed ComfyUI reinstalled.');
+      return { ok: true };
+    } catch (err) {
+      const message = err?.message || String(err);
+      log(`Managed ComfyUI reinstall failed: ${message}`);
+      send({ kind: 'error', text: message });
+      return { ok: false, error: message };
+    } finally {
+      comfyMaintenance = null;
+    }
+  });
 }
 
 // A managed ComfyUI counts as installed only if BOTH its venv is tagged/usable
@@ -460,6 +568,9 @@ async function doSetup(opts, send) {
   if (comfyui && !comfyReady()) {
     const result = await setupComfyUI({
       uv, appRoot: APP_ROOT, installDir: COMFY_DIR, dataDir: COMFY_DATA, venvDir: COMFY_VENV,
+      // Recorded in the install state, so a later update can report which app
+      // version provisioned what is on disk.
+      appVersion: app.getVersion(),
       onProgress: (e) => send({ service: 'comfyui', ...e }),
     });
 

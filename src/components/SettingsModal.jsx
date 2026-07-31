@@ -77,6 +77,227 @@ function ManagedComfyControls({ managed, onChanged }) {
   )
 }
 
+// Turn an update plan from the main process into the short list of lines a user
+// can actually act on. Deliberately concrete about names and counts: "an update is
+// available" tells nobody whether it's a 50 MB node pack or a 3 GB PyTorch swap.
+function describeComfyPlan(plan) {
+  const short = ref => (ref ? ref.slice(0, 8) : 'unknown')
+  const names = list => list.map(n => n.name).join(', ')
+  const out = []
+  if (plan.core.changed) {
+    out.push(`ComfyUI ${plan.core.fromTag || short(plan.core.fromRef)} → ${plan.core.toTag || short(plan.core.toRef)}`)
+  }
+  if (plan.nodes.update.length) out.push(`${plan.nodes.update.length} custom node pack(s) to update: ${names(plan.nodes.update)}`)
+  if (plan.nodes.add.length) out.push(`${plan.nodes.add.length} to install: ${names(plan.nodes.add)}`)
+  if (plan.nodes.remove.length) out.push(`${plan.nodes.remove.length} to remove: ${names(plan.nodes.remove)}`)
+  if (plan.torch.changed) out.push(`PyTorch ${plan.torch.from || 'missing'} → ${plan.torch.to}`)
+  if (plan.deps.changed) out.push('Python packages, from this version’s dependency lock')
+  if (plan.orphans.length) out.push(`${plan.orphans.length} package(s) to uninstall (no longer needed): ${plan.orphans.slice(0, 6).map(o => o.name).join(', ')}${plan.orphans.length > 6 ? ', …' : ''}`)
+  // Installs made before update tracking existed have no record of their refs, so
+  // this first update refreshes everything. Say so — otherwise the list above looks
+  // alarming for what is really a one-off.
+  if (plan.unknownState) out.push('This install predates update tracking, so ComfyUI and every node pack are refreshed once')
+  return out
+}
+
+// Desktop-only: bring an EXISTING managed ComfyUI up to what this app version
+// ships. Updating the app does not do this on its own — the installer
+// short-circuits once the install exists, and the node packs are pinned tarballs
+// with no git checkout to pull — so a user who upgrades keeps running the ComfyUI,
+// node pack refs and Python packages of whichever version installed it.
+//
+// The check is cheap (no network) and runs when the panel opens, so an install
+// that is already current says so instead of offering a pointless button.
+function ComfyUpdatePanel() {
+  const bridge = typeof window !== 'undefined' ? window.genStudioServices : null
+  const setupBridge = typeof window !== 'undefined' ? window.genStudioSetup : null
+  const isDesktop = !!bridge?.isDesktop && !!bridge?.checkComfyUpdate && !!setupBridge
+  const [installed, setInstalled] = useState(null)
+  const [plan, setPlan] = useState(null)
+  const [checking, setChecking] = useState(false)
+  const [error, setError] = useState('')
+  const [job, setJob] = useState('') // '' | 'update' | 'reinstall'
+  const [phase, setPhase] = useState('')
+  const [pct, setPct] = useState(0)
+  const [finished, setFinished] = useState(null)
+  const [confirming, setConfirming] = useState(false)
+
+  useEffect(() => {
+    if (!isDesktop) return undefined
+    let alive = true
+    const load = async () => {
+      try {
+        const st = await setupBridge.status()
+        if (!alive) return
+        setInstalled(!!st?.comfyui)
+        if (!st?.comfyui) return
+        setChecking(true)
+        const res = await bridge.checkComfyUpdate()
+        if (!alive) return
+        if (res?.ok) setPlan(res.plan)
+        else setError(res?.error || 'Could not check for ComfyUI updates.')
+      } catch (e) {
+        if (alive) setError(e?.message || 'Could not check for ComfyUI updates.')
+      } finally {
+        if (alive) setChecking(false)
+      }
+    }
+    load()
+    return () => { alive = false }
+  }, [isDesktop, bridge, setupBridge])
+
+  // Update/reinstall progress rides the same channel as the first-run installer,
+  // tagged so the two cards can't cross-report.
+  useEffect(() => {
+    if (!isDesktop) return undefined
+    let alive = true
+    const off = setupBridge.onProgress(evt => {
+      if (!alive || evt?.service !== 'comfyui-update') return
+      if (evt.kind === 'phase') { setPhase(evt.phase || ''); if (typeof evt.pct === 'number') setPct(evt.pct) }
+      else if (evt.kind === 'error') setError(evt.text || 'The update failed.')
+    })
+    return () => { alive = false; if (typeof off === 'function') off() }
+  }, [isDesktop, setupBridge])
+
+  const recheck = async () => {
+    setError(''); setChecking(true)
+    try {
+      const res = await bridge.checkComfyUpdate()
+      if (res?.ok) setPlan(res.plan)
+      else setError(res?.error || 'Could not check for ComfyUI updates.')
+    } catch (e) {
+      setError(e?.message || 'Could not check for ComfyUI updates.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const runJob = async kind => {
+    setError(''); setFinished(null); setConfirming(false)
+    setJob(kind); setPhase('Starting…'); setPct(0)
+    try {
+      const res = kind === 'update' ? await bridge.updateComfyUI() : await bridge.reinstallComfyUI()
+      if (res?.ok) {
+        setFinished({ kind, summary: res.summary, changed: res.changed !== false, wasRunning: !!res.wasRunning })
+        await recheck()
+      } else {
+        setError(res?.error || 'The update failed. See the desktop log for details.')
+      }
+    } catch (e) {
+      setError(e?.message || 'The update failed.')
+    } finally {
+      setJob('')
+    }
+  }
+
+  if (!isDesktop || !installed) return null
+
+  const busy = !!job
+  const reinstallNeeded = plan?.requiresReinstall || null
+  const primaryBtn = {
+    fontFamily: 'inherit', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+    border: 'none', borderRadius: '8px', padding: '9px 16px', color: '#0b0e14',
+    background: 'linear-gradient(90deg, #7c5cff, #22d3ee)',
+  }
+  const ghostBtn = {
+    fontFamily: 'inherit', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+    borderRadius: '8px', padding: '6px 14px', border: '1px solid rgba(255,255,255,0.12)',
+    background: '#1b2130', color: '#e8eaf0',
+  }
+
+  return (
+    <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+      {busy && (
+        <>
+          <p className="settings-helper-text" style={{ margin: 0 }}>
+            {job === 'reinstall' ? 'Reinstalling ComfyUI' : 'Updating ComfyUI'}… {Math.round(pct * 100)}%
+          </p>
+          <div style={{ height: '6px', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', marginTop: '8px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${Math.round(pct * 100)}%`, background: 'linear-gradient(90deg, #7c5cff, #22d3ee)', transition: 'width .3s' }} />
+          </div>
+          <p className="settings-helper-text" style={{ marginTop: '4px' }}>{phase}</p>
+        </>
+      )}
+
+      {!busy && reinstallNeeded && (
+        <>
+          <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4em', color: '#e0a030' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>warning</span>
+            {reinstallNeeded.reason}
+          </p>
+          {confirming ? (
+            <div style={{ display: 'flex', gap: '0.5em', alignItems: 'center' }}>
+              <button type="button" style={primaryBtn} onClick={() => runJob('reinstall')}>Reinstall now</button>
+              <button type="button" style={ghostBtn} onClick={() => setConfirming(false)}>Cancel</button>
+            </div>
+          ) : (
+            <button type="button" style={primaryBtn} onClick={() => setConfirming(true)}>Reinstall ComfyUI…</button>
+          )}
+          <p className="settings-helper-text">
+            Downloads ComfyUI, the custom nodes and PyTorch again (several GB). Your models,
+            inputs and outputs are kept.
+          </p>
+        </>
+      )}
+
+      {!busy && !reinstallNeeded && plan?.hasUpdates && (
+        <>
+          <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#22d3ee', margin: 0 }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>system_update_alt</span>
+            This app version ships a newer ComfyUI setup than the one installed:
+          </p>
+          <ul className="settings-helper-text" style={{ margin: '6px 0 8px', paddingLeft: '1.4em' }}>
+            {describeComfyPlan(plan).map(line => <li key={line}>{line}</li>)}
+          </ul>
+          <button type="button" style={primaryBtn} onClick={() => runJob('update')}>Update ComfyUI</button>
+          <p className="settings-helper-text">
+            ComfyUI is stopped while it updates, and only what changed is downloaded. Your
+            models, inputs and outputs are untouched.
+          </p>
+        </>
+      )}
+
+      {!busy && !reinstallNeeded && plan && !plan.hasUpdates && (
+        <p className="settings-helper-text" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', margin: 0 }}>
+          <span className="material-symbols-outlined" style={{ fontSize: '1.1em', color: '#4caf50' }}>check_circle</span>
+          ComfyUI, its custom nodes and its Python packages match this app version.
+          <button
+            type="button"
+            onClick={recheck}
+            disabled={checking}
+            style={{ ...ghostBtn, marginLeft: 'auto', cursor: checking ? 'default' : 'pointer', opacity: checking ? 0.6 : 1 }}
+          >
+            {checking ? 'Checking…' : 'Check again'}
+          </button>
+        </p>
+      )}
+
+      {!busy && !plan && checking && (
+        <p className="settings-helper-text" style={{ margin: 0 }}>Checking the installed custom nodes and packages…</p>
+      )}
+
+      {!busy && finished && (
+        <p className="settings-helper-text" style={{ color: '#4caf50' }}>
+          {finished.kind === 'reinstall'
+            ? 'ComfyUI was reinstalled.'
+            : finished.changed ? `Updated: ${finished.summary}.` : 'Already up to date.'}
+          {finished.wasRunning ? ' It was stopped for the update — start it again below.' : ''}
+        </p>
+      )}
+
+      {!busy && plan?.nodes?.unmanaged?.length > 0 && (
+        <p className="settings-helper-text">
+          Left untouched because 3D Gen Studio didn&apos;t install them:{' '}
+          {plan.nodes.unmanaged.map(n => n.name).join(', ')}. Node packs you add yourself are
+          never removed, but they can break the locked environment.
+        </p>
+      )}
+
+      {error && <p className="settings-helper-text" style={{ color: '#f87171' }}>{error}</p>}
+    </div>
+  )
+}
+
 // Desktop-only: start/stop a Python service on demand and show its status. The
 // services aren't started at app launch — they spin up when a tool needs them,
 // and can be stopped here (stopping Rigging frees its GPU memory). Renders
@@ -820,6 +1041,9 @@ export default function SettingsModal({ onClose }) {
                   readyText="A managed ComfyUI is installed and ready."
                   note="One-time install; downloads several GB (ComfyUI, the custom nodes the bundled workflows need, and PyTorch) and needs an NVIDIA GPU. Models are downloaded separately from the Setup Wizard."
                 />
+                {/* Desktop only: an install made by an older app version keeps that
+                    version's ComfyUI, node pack refs and packages until updated here. */}
+                <ComfyUpdatePanel />
                 <ServiceControl name="comfyui" />
                 <AutoStartToggle
                   checked={localSettings?.apis?.comfyui?.autoStart}

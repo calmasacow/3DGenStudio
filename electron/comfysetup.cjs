@@ -22,11 +22,17 @@
 // Models are NOT installed here. They live under the data dir (ComfyUI runs with
 // --base-directory) and are downloaded by the existing in-app Setup Wizard, which
 // is pointed at this install automatically.
+//
+// Upgrading is a separate operation (planComfyUpdate / updateComfyUI): installing
+// a newer app version does not touch an existing install, because the installer
+// short-circuits on the readiness marker and the node packs are pinned tarballs
+// with no .git to pull. See the "updating" section below.
 
 const path = require('node:path');
 const fs = require('node:fs');
 const https = require('node:https');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
 const { runStream, ensureVenv, venvPython, depsMarker, killTree } = require('./pysetup.cjs');
@@ -34,9 +40,11 @@ const { runStream, ensureVenv, venvPython, depsMarker, killTree } = require('./p
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 
-// Bump when the provisioning STEPS change in a way that needs a re-run. The lock
-// filename already changes when dependencies change, and the marker records it,
-// so a regenerated lock re-triggers setup on its own.
+// Bump when the provisioning STEPS change in a way that needs a re-run from
+// scratch. Note this is NOT how dependency changes reach an existing install:
+// isReady() only compares this tag, so a regenerated lock or a bumped node ref
+// leaves the marker valid. Those are handled incrementally by planComfyUpdate /
+// updateComfyUI (Settings -> ComfyUI -> Update).
 // History: 2 = lock installs with --no-deps + the opencv single-distribution
 // repair (see enforceSingleOpenCV), so venvs provisioned by an earlier build get
 // their cv2 fixed instead of staying broken behind an up-to-date marker.
@@ -128,7 +136,9 @@ function pickBuild(manifest) {
 // ---- HTTP -------------------------------------------------------------------
 // Follow redirects (GitHub's /archive/ URLs bounce to codeload) and hand back the
 // response stream. Rejects on a non-2xx so callers get a real error instead of an
-// HTML error page written to disk as a "tarball".
+// HTML error page written to disk as a "tarball". The rejection carries the status
+// code and any Retry-After, because whether a failure is worth retrying is decided
+// by the caller (see withRetry).
 function httpGet(url, redirectsLeft = 6) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': '3DGenStudio-desktop' } }, (res) => {
@@ -141,12 +151,96 @@ function httpGet(url, redirectsLeft = 6) {
       }
       if (statusCode !== 200) {
         res.resume();
-        return reject(new Error(`HTTP ${statusCode} for ${url}`));
+        const err = new Error(`HTTP ${statusCode} for ${url}`);
+        err.statusCode = statusCode;
+        err.retryAfterMs = parseRetryAfter(headers['retry-after']);
+        // 429 is unambiguous. A 403 is only a rate limit when it says so — for a
+        // private or renamed repo it is permanent and retrying just wastes minutes.
+        err.rateLimited = statusCode === 429
+          || (statusCode === 403 && (headers['x-ratelimit-remaining'] === '0' || err.retryAfterMs != null));
+        return reject(err);
       }
       resolve(res);
     });
     req.on('error', reject);
     req.setTimeout(120000, () => req.destroy(new Error(`Timed out fetching ${url}`)));
+  });
+}
+
+// Retry-After is either a number of seconds or an HTTP date. Capped so a hostile
+// or broken value can't park the install for an hour.
+function parseRetryAfter(value) {
+  if (!value) return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 600000);
+  const when = Date.parse(value);
+  if (!Number.isNaN(when)) return Math.min(Math.max(when - Date.now(), 0), 600000);
+  return null;
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// A managed install asks codeload.github.com for ComfyUI plus 11 node packs back
+// to back, unauthenticated. **It rate-limits that** (HTTP 429), per IP, and an
+// install or update that has already been run once today can be limited from its
+// very first request. That is a condition to wait out, not an error to report — so
+// every download retries with backoff, honouring Retry-After when the server sends
+// one. ~6 minutes of patience per URL, and each wait is announced (via onStatus) so
+// the progress bar doesn't look frozen.
+const RETRY_WAITS_MS = [5000, 15000, 30000, 60000, 120000, 180000];
+
+function isTransientHttpError(err) {
+  if (err.rateLimited) return true;
+  if (err.statusCode >= 500 && err.statusCode < 600) return true;
+  // Deliberately NOT ENOTFOUND: no DNS answer at all means offline or a typo, and
+  // six minutes of retries won't fix either.
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EAI_AGAIN', 'EPIPE', 'ECONNREFUSED'].includes(err.code)) return true;
+  return /socket hang up|Timed out fetching/i.test(err.message || '');
+}
+
+async function withRetry(url, attempt_, { onLine, onStatus } = {}) {
+  const notify = (text) => {
+    if (onLine) try { onLine(`${text}\n`); } catch { /* ignore */ }
+    if (onStatus) try { onStatus(text); } catch { /* ignore */ }
+  };
+  const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await attempt_();
+    } catch (err) {
+      const exhausted = attempt >= RETRY_WAITS_MS.length;
+      if (!isTransientHttpError(err) || exhausted) {
+        if (err.rateLimited) {
+          throw new Error(
+            `${host} is rate-limiting downloads (HTTP ${err.statusCode}) and did not let up after `
+            + `${RETRY_WAITS_MS.length} retries over several minutes. The limit is per network address `
+            + 'and normally clears on its own — nothing is broken, so try again in a while. '
+            + `Nothing already downloaded is lost.\n(${url})`
+          );
+        }
+        throw err;
+      }
+      const waitMs = err.retryAfterMs != null ? Math.max(err.retryAfterMs, 1000) : RETRY_WAITS_MS[attempt];
+      const secs = Math.round(waitMs / 1000);
+      notify(err.rateLimited
+        ? `${host} is rate-limiting downloads — waiting ${secs}s (retry ${attempt + 1}/${RETRY_WAITS_MS.length})`
+        : `Download failed (${err.message}) — retrying in ${secs}s (${attempt + 1}/${RETRY_WAITS_MS.length})`);
+      await sleepMs(waitMs);
+    }
+  }
+}
+
+// Read a whole response body. Kept separate so the retry wrapper covers the body
+// read too: a connection dropped mid-download is the other common transient
+// failure, and it used to surface as a corrupt archive.
+function drainResponse(res) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    res.on('data', (c) => chunks.push(c));
+    res.on('end', () => resolve(Buffer.concat(chunks)));
+    res.on('error', reject);
   });
 }
 
@@ -183,19 +277,28 @@ function urlExists(url, redirectsLeft = 6) {
 // than shelling out because neither `tar` (GNU tar can't do zip, bsdtar isn't
 // everywhere) nor an npm dependency is reliable across all three platforms.
 //
-// `strip` drops leading path components: GitHub wraps everything in a
-// "<repo>-<sha>/" directory we don't want on disk.
-async function extractTarGz(url, destDir, { strip = 1, onLine } = {}) {
+// Download an archive and gunzip it, with retries. Deliberately a SEPARATE step
+// from extraction: callers replace a directory wholesale, and doing that before the
+// bytes are safely in hand means a rate limit or a dropped connection leaves the
+// install with the old files deleted and the new ones never written. Fetch first,
+// destroy second.
+async function fetchArchive(url, { onLine, onStatus } = {}) {
   const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
   emit(`fetching ${url}\n`);
-  const res = await httpGet(url);
-  const gz = await new Promise((resolve, reject) => {
-    const chunks = [];
-    res.on('data', (c) => chunks.push(c));
-    res.on('end', () => resolve(Buffer.concat(chunks)));
-    res.on('error', reject);
-  });
-  const buf = zlib.gunzipSync(gz);
+  return withRetry(url, async () => {
+    const res = await httpGet(url);
+    return zlib.gunzipSync(await drainResponse(res));
+  }, { onLine, onStatus });
+}
+
+// `strip` drops leading path components: GitHub wraps everything in a
+// "<repo>-<sha>/" directory we don't want on disk.
+async function extractTarGz(url, destDir, opts = {}) {
+  return extractTar(await fetchArchive(url, opts), destDir, opts);
+}
+
+function extractTar(buf, destDir, { strip = 1, onLine } = {}) {
+  const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
   fs.mkdirSync(destDir, { recursive: true });
 
   let offset = 0;
@@ -268,7 +371,7 @@ async function extractTarGz(url, destDir, { strip = 1, onLine } = {}) {
     files += 1;
   }
   emit(`extracted ${files} file(s) to ${destDir}\n`);
-  if (!files) throw new Error(`Archive at ${url} contained no files.`);
+  if (!files) throw new Error(`The downloaded archive for ${path.basename(destDir)} contained no files.`);
   return files;
 }
 
@@ -276,24 +379,36 @@ function archiveUrl(repo, ref) {
   return `https://github.com/${repo}/archive/${ref}.tar.gz`;
 }
 
-// Stream a URL to disk. Used for the flash-attn wheel: pip/uv cannot resolve
-// Hugging Face Xet URLs directly (they 403), but a plain redirect-following GET
-// downloads them fine — so fetch first, then install the local file.
-async function downloadFile(url, destPath, onLine) {
+// Stream a URL to disk, with the same retry policy as the archives (Hugging Face
+// rate-limits too). Used for the flash-attn wheel: pip/uv cannot resolve Hugging
+// Face Xet URLs directly (they 403), but a plain redirect-following GET downloads
+// them fine — so fetch first, then install the local file.
+async function downloadFile(url, destPath, onLine, onStatus) {
   const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
   emit(`downloading ${url}\n`);
-  const res = await httpGet(url);
   fs.mkdirSync(path.dirname(destPath), { recursive: true });
-  await new Promise((resolve, reject) => {
-    const out = fs.createWriteStream(destPath);
-    res.pipe(out);
-    out.on('finish', resolve);
-    out.on('error', reject);
-    res.on('error', reject);
+  // Write to a sidecar and rename: a retry must not append to, or be satisfied by,
+  // the partial file a failed attempt left behind.
+  const partPath = `${destPath}.part`;
+  await withRetry(url, async () => {
+    const res = await httpGet(url);
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(partPath);
+      res.pipe(out);
+      out.on('finish', resolve);
+      out.on('error', reject);
+      res.on('error', reject);
+    });
+    const size = fs.statSync(partPath).size;
+    if (size < 1024) throw new Error(`Download of ${url} produced a ${size}-byte file.`);
+    fs.rmSync(destPath, { force: true });
+    fs.renameSync(partPath, destPath);
+    return destPath;
+  }, { onLine, onStatus }).catch((err) => {
+    try { fs.rmSync(partPath, { force: true }); } catch { /* ignore */ }
+    throw err;
   });
-  const size = fs.statSync(destPath).size;
-  emit(`saved ${path.basename(destPath)} (${(size / 1048576).toFixed(1)} MB)\n`);
-  if (size < 1024) throw new Error(`Download of ${url} produced a ${size}-byte file.`);
+  emit(`saved ${path.basename(destPath)} (${(fs.statSync(destPath).size / 1048576).toFixed(1)} MB)\n`);
   return destPath;
 }
 
@@ -614,14 +729,192 @@ async function enforceSingleOpenCV({ uv, venvDir, lockPath, onLine }) {
   emit(`ok        ${want.name} ${after.dists[want.name] || want.version} (cv2.ximgproc restored)\n`);
 }
 
+// ---- install state ----------------------------------------------------------
+// A record of WHAT was installed: the ComfyUI ref, every node pack ref, the lock
+// and the torch build. Without it an updated app has no way to tell which parts of
+// an existing install are stale — the readiness marker only says "provisioned",
+// and node packs are tarballs, so there is no .git to interrogate.
+//
+// It lives in the venv dir (beside the materialized lock) rather than in the
+// ComfyUI tree, because an update wipes and re-extracts that tree.
+const STATE_FILE = 'comfy-install.json';
+
+function statePath(venvDir) {
+  return path.join(venvDir, STATE_FILE);
+}
+
+// null when absent or unreadable. Callers treat that as "installed by a build
+// that predates this file" and fall back to refreshing everything.
+function readInstallState(venvDir) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath(venvDir), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeInstallState(venvDir, state) {
+  fs.mkdirSync(venvDir, { recursive: true });
+  fs.writeFileSync(statePath(venvDir), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+// Hash the lock AS SHIPPED (before placeholders are substituted, so the install
+// path can't change it). The filename alone is not enough: regenerating against a
+// new reference env keeps the same name whenever Python and CUDA are unchanged.
+function lockSha(appRoot, build) {
+  const p = path.join(appRoot, 'setup', build.lock);
+  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+}
+
+function describeState({ appRoot, manifest, build, appVersion }) {
+  return {
+    tag: COMFY_SETUP_TAG,
+    appVersion: appVersion || null,
+    installedAt: new Date().toISOString(),
+    pythonVersion: manifest.pythonVersion || '3.13',
+    comfyui: {
+      repo: manifest.comfyui.repo,
+      ref: manifest.comfyui.ref,
+      tag: manifest.comfyui.tag || null,
+    },
+    build: {
+      platform: build.platform,
+      cuda: build.cuda,
+      torchArgs: build.torchArgs,
+      lock: build.lock,
+    },
+    lockSha: lockSha(appRoot, build),
+    customNodes: (manifest.customNodes || []).map((n) => ({ name: n.name, repo: n.repo, ref: n.ref })),
+  };
+}
+
+// ---- shared install steps ---------------------------------------------------
+// Used by BOTH the first install and an in-place update, so the two can never
+// drift on the details that decide whether an install works: torch's own index,
+// the flash-attn ABI match, --no-deps, the opencv repair, the import gate.
+
+async function installTorch({ uv, vp, build, onLine }) {
+  const torchArgs = String(build.torchArgs || '').trim().split(/\s+/).filter(Boolean);
+  if (!torchArgs.length) throw new Error('The selected build has no torchArgs in setup/comfyui.json.');
+  const r = await runStream(uv, ['pip', 'install', '--python', vp, ...torchArgs], { onLine });
+  if (r.code !== 0) throw new Error(`PyTorch install failed (exit ${r.code}).`);
+}
+
+async function installFlashAttn({ uv, vp, appRoot, build, venvDir, onLine, onStatus }) {
+  const url = selectFlashAttn({ appRoot, build, onLine });
+  const local = path.join(venvDir, 'wheels', decodeURIComponent(url.split('/').pop().split('?')[0]));
+  await downloadFile(url, local, onLine, onStatus);
+  const r = await runStream(uv, ['pip', 'install', '--python', vp, local], { onLine });
+  if (r.code !== 0) throw new Error(`flash-attn install failed (exit ${r.code}).`);
+}
+
+async function installLockFile({ uv, vp, lockPath, onLine }) {
+  // --no-deps because the lock is a COMPLETE freeze of the reference env (minus
+  // torch and the deliberate exclusions), so there is nothing left to resolve —
+  // and resolving anyway is actively harmful: several packages here require a
+  // different opencv variant than the one pinned, and pip would happily install
+  // it on top of the pinned cv2. See enforceSingleOpenCV.
+  const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', '-r', lockPath], { onLine });
+  if (r.code !== 0) throw new Error(`Dependency install failed (exit ${r.code}). See details.`);
+}
+
+// Prove the CUDA extensions actually LOAD. A wheel built against a different
+// torch ABI installs cleanly and only dies at import with "undefined symbol",
+// which would otherwise surface as a mystery node-import failure much later.
+async function verifyEnvironment({ manifest, installDir, venvDir, pyVer, onLine, verb = 'installed' }) {
+  const vp = venvPython(venvDir);
+  const required = manifest.verifyImports || ['torch'];
+  // Optional modules are probed too, but only reported: these are guarded or
+  // in-function imports whose absence costs a specific feature rather than
+  // breaking the install (e.g. natten -> the Pixal3D-T model only).
+  const optional = manifest.optionalImports || [];
+  const probe = [
+    'import importlib, sys',
+    `required = ${JSON.stringify(required)}`,
+    `optional = ${JSON.stringify(optional)}`,
+    'bad = []',
+    'def probe(m):',
+    '    try:',
+    '        importlib.import_module(m)',
+    '        return True',
+    '    except Exception as e:',
+    '        print("     ", type(e).__name__, e)',
+    '        return False',
+    'for m in required:',
+    '    if probe(m):',
+    '        print("ok       ", m)',
+    '    else:',
+    '        print("FAIL     ", m)',
+    '        bad.append(m)',
+    'for m in optional:',
+    '    print(("ok       " if probe(m) else "optional "), m)',
+    'sys.exit(1 if bad else 0)',
+  ].join('\n');
+  const r = await runStream(vp, ['-c', probe], { cwd: installDir, onLine });
+  if (r.code !== 0) {
+    throw new Error(`ComfyUI ${verb} but some GPU modules will not import — most likely a torch ABI mismatch with a prebuilt wheel (see details).`);
+  }
+
+  // Importing triton proves nothing — it only compiles on first kernel launch.
+  const triton = await probeTritonCompile({ venvDir, onLine });
+  if (triton.fatal) {
+    throw new Error(
+      `ComfyUI ${verb} but Triton cannot compile its CUDA helper on this machine, so mesh `
+      + 'generation would fail on every run. This is a missing build dependency — install the '
+      + `C compiler and CPython headers (sudo apt install build-essential python${pyVer}-dev), `
+      + 'then try again.'
+    );
+  }
+  if (!triton.ok && onLine) {
+    onLine('Note: the Triton compile check did not pass here. If mesh generation fails, see the log above.\n');
+  }
+}
+
+// Replace rather than merge: a half-extracted pack from an interrupted run would
+// otherwise mix two refs, and a file the new ref deleted would survive.
+//
+// Download BEFORE deleting: a rate limit or a dropped connection must leave the
+// existing pack intact rather than removing a working one to make room for a
+// download that never arrived.
+async function extractNodePack({ nodesDir, node, onLine, onStatus }) {
+  const tar = await fetchArchive(archiveUrl(node.repo, node.ref), { onLine, onStatus });
+  const dest = path.join(nodesDir, node.name);
+  try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* ignore */ }
+  extractTar(tar, dest, { onLine });
+}
+
+// Put the pinned ComfyUI tree on disk, KEEPING custom_nodes. Wiping the rest
+// (instead of extracting over the top) is what removes files a newer ComfyUI
+// deleted; keeping custom_nodes is what stops a ComfyUI bump from re-downloading
+// every node pack, since those are versioned separately.
+//
+// Again: fetch first, wipe second. Wiping first cost a working install its main.py
+// when codeload answered the very next request with HTTP 429, which made a
+// transient rate limit look like a destroyed install.
+async function replaceComfyCore({ manifest, installDir, onLine, onStatus }) {
+  const tar = await fetchArchive(archiveUrl(manifest.comfyui.repo, manifest.comfyui.ref), { onLine, onStatus });
+  fs.mkdirSync(installDir, { recursive: true });
+  for (const entry of fs.readdirSync(installDir)) {
+    if (entry === 'custom_nodes') continue;
+    try { fs.rmSync(path.join(installDir, entry), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  extractTar(tar, installDir, { onLine });
+}
+
 // ---- provisioning -----------------------------------------------------------
 // `onProgress` receives { kind:'phase'|'log'|'done'|'error', phase, pct, text },
 // the same contract the other services use, so the setup window renders it with
 // no special-casing.
-async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgress }) {
+async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, appVersion, onProgress }) {
   const emit = (e) => onProgress(e);
   const log = (text) => emit({ kind: 'log', text });
-  const phase = (label, pct) => emit({ kind: 'phase', phase: label, pct });
+  // The progress UI shows the PHASE, not the log, so a download that is waiting out
+  // a rate limit has to say so there or the bar looks frozen. `status` re-labels the
+  // current phase without moving the bar.
+  let lastPct = 0;
+  const phase = (label, pct) => { lastPct = pct; emit({ kind: 'phase', phase: label, pct }); };
+  const status = (text) => emit({ kind: 'phase', phase: text, pct: lastPct });
 
   const manifest = loadManifest(appRoot);
   const build = pickBuild(manifest);
@@ -653,8 +946,7 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
   // references wheels that live inside ComfyUI-Trellis2/wheels/**, so those files
   // have to be on disk first.
   phase('Downloading ComfyUI', 0.12);
-  fs.mkdirSync(installDir, { recursive: true });
-  await extractTarGz(archiveUrl(manifest.comfyui.repo, manifest.comfyui.ref), installDir, { onLine: log });
+  await replaceComfyCore({ manifest, installDir, onLine: log, onStatus: status });
 
   const nodes = manifest.customNodes || [];
   const nodesDir = path.join(installDir, 'custom_nodes');
@@ -662,101 +954,29 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
   for (let i = 0; i < nodes.length; i += 1) {
     const node = nodes[i];
     phase(`Downloading custom nodes (${i + 1}/${nodes.length}: ${node.name})`, 0.16 + 0.24 * (i / nodes.length));
-    const dest = path.join(nodesDir, node.name);
-    // Replace rather than merge: a half-extracted pack from an interrupted run
-    // would otherwise mix two refs.
-    try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* ignore */ }
-    await extractTarGz(archiveUrl(node.repo, node.ref), dest, { onLine: log });
+    await extractNodePack({ nodesDir, node, onLine: log, onStatus: status });
   }
 
   // torch first, from its own CUDA index. The lock deliberately excludes torch:
   // it carries no index-url context, and every prebuilt wheel in it is ABI-matched
   // to exactly this torch version.
   phase('Installing PyTorch', 0.42);
-  {
-    const torchArgs = String(build.torchArgs || '').trim().split(/\s+/).filter(Boolean);
-    if (!torchArgs.length) throw new Error('The selected build has no torchArgs in setup/comfyui.json.');
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, ...torchArgs], { onLine: log });
-    if (r.code !== 0) throw new Error(`PyTorch install failed (exit ${r.code}).`);
-  }
+  await installTorch({ uv, vp, build, onLine: log });
 
   // flash-attn from the shared wheel table, ABI-matched to the torch just
   // installed. Downloaded first because pip/uv can't resolve HF Xet URLs.
   phase('Installing flash-attn', 0.5);
-  {
-    const url = selectFlashAttn({ appRoot, build, onLine: log });
-    const local = path.join(venvDir, 'wheels', decodeURIComponent(url.split('/').pop().split('?')[0]));
-    await downloadFile(url, local, log);
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, local], { onLine: log });
-    if (r.code !== 0) throw new Error(`flash-attn install failed (exit ${r.code}).`);
-  }
+  await installFlashAttn({ uv, vp, appRoot, build, venvDir, onLine: log, onStatus: status });
 
   phase('Installing ComfyUI dependencies', 0.6);
   const lockPath = materializeLock({ appRoot, build, manifest, installDir, venvDir });
-  {
-    // --no-deps because the lock is a COMPLETE freeze of the reference env (minus
-    // torch and the deliberate exclusions), so there is nothing left to resolve —
-    // and resolving anyway is actively harmful: several packages here require a
-    // different opencv variant than the one pinned, and pip would happily install
-    // it on top of the pinned cv2. See enforceSingleOpenCV.
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', '-r', lockPath], { onLine: log });
-    if (r.code !== 0) throw new Error(`Dependency install failed (exit ${r.code}). See details.`);
-  }
+  await installLockFile({ uv, vp, lockPath, onLine: log });
 
   phase('Checking OpenCV', 0.9);
   await enforceSingleOpenCV({ uv, venvDir, lockPath, onLine: log });
 
-  // Prove the CUDA extensions actually LOAD. A wheel built against a different
-  // torch ABI installs cleanly and only dies at import with "undefined symbol",
-  // which would otherwise surface as a mystery node-import failure much later.
   phase('Verifying install', 0.92);
-  {
-    const required = manifest.verifyImports || ['torch'];
-    // Optional modules are probed too, but only reported: these are guarded or
-    // in-function imports whose absence costs a specific feature rather than
-    // breaking the install (e.g. natten -> the Pixal3D-T model only).
-    const optional = manifest.optionalImports || [];
-    const probe = [
-      'import importlib, sys',
-      `required = ${JSON.stringify(required)}`,
-      `optional = ${JSON.stringify(optional)}`,
-      'bad = []',
-      'def probe(m):',
-      '    try:',
-      '        importlib.import_module(m)',
-      '        return True',
-      '    except Exception as e:',
-      '        print("     ", type(e).__name__, e)',
-      '        return False',
-      'for m in required:',
-      '    if probe(m):',
-      '        print("ok       ", m)',
-      '    else:',
-      '        print("FAIL     ", m)',
-      '        bad.append(m)',
-      'for m in optional:',
-      '    print(("ok       " if probe(m) else "optional "), m)',
-      'sys.exit(1 if bad else 0)',
-    ].join('\n');
-    const r = await runStream(vp, ['-c', probe], { cwd: installDir, onLine: log });
-    if (r.code !== 0) {
-      throw new Error('ComfyUI installed but some GPU modules will not import — most likely a torch ABI mismatch with a prebuilt wheel (see details).');
-    }
-
-    // Importing triton proves nothing — it only compiles on first kernel launch.
-    const triton = await probeTritonCompile({ venvDir, onLine: log });
-    if (triton.fatal) {
-      throw new Error(
-        'ComfyUI installed but Triton cannot compile its CUDA helper on this machine, so mesh '
-        + 'generation would fail on every run. This is a missing build dependency — install the '
-        + `C compiler and CPython headers (sudo apt install build-essential python${pyVer}-dev), `
-        + 'then run the install again.'
-      );
-    }
-    if (!triton.ok) {
-      log('Note: the Triton compile check did not pass here. If mesh generation fails, see the log above.\n');
-    }
-  }
+  await verifyEnvironment({ manifest, installDir, venvDir, pyVer, onLine: log });
 
   // The data dir is ComfyUI's --base-directory: models/, input/, output/, user/
   // all live here. Kept separate from installDir so re-running setup never risks
@@ -767,10 +987,389 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
   }
 
   fs.writeFileSync(depsMarker(venvDir), `${COMFY_SETUP_TAG} ${build.lock} ${new Date().toISOString()}`);
+  writeInstallState(venvDir, describeState({ appRoot, manifest, build, appVersion }));
   phase('ComfyUI ready', 1);
   emit({ kind: 'done' });
 
   return { installDir, dataDir, modelsPath: path.join(dataDir, 'models') };
+}
+
+// ---- updating ---------------------------------------------------------------
+// Installing the app again does NOT touch an existing managed ComfyUI: the
+// installer short-circuits on the readiness marker, and node packs are pinned
+// tarballs with no .git to pull. So a newer app version ships newer refs and a
+// newer lock that the user's install never receives.
+//
+// planComfyUpdate() diffs the shipped manifest against the recorded install state
+// and reports exactly what would change; updateComfyUI() applies it. The split
+// exists so the user sees the work before agreeing to it — and because the check
+// has to be cheap enough to run whenever the Settings panel opens (one filesystem
+// read plus one metadata query, no network).
+
+// PEP 503 normalisation, so a lock's `opencv-contrib-python` matches an installed
+// `opencv_contrib_python` and neither is mistaken for an orphan.
+function normalizeDistName(name) {
+  return String(name).trim().toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+// Requirement lines from a lock: `name==version` or `name @ <url>`.
+function parseLockRequirements(lockText) {
+  const out = [];
+  for (const raw of String(lockText).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('-')) continue;
+    const m = line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:@\s|==)/);
+    if (!m) continue;
+    out.push({ name: normalizeDistName(m[1]), line });
+  }
+  return out;
+}
+
+// Never uninstalled as an "orphan", whatever the lock says:
+//   - torch and flash-attn are installed OUTSIDE the lock, by design;
+//   - packaging tools would take the venv down with them.
+// The manifest's excludePackages are protected too — they are deliberate
+// omissions from the lock, not leftovers (and cv2 is handled by
+// enforceSingleOpenCV, which knows how to do it safely).
+const KEEP_INSTALLED = new Set([
+  'torch', 'torchvision', 'torchaudio', 'flash-attn',
+  'pip', 'setuptools', 'wheel', 'uv',
+]);
+
+// One metadata query for everything the plan needs to know about the venv: which
+// Python built it, and every installed distribution. importlib.metadata reads
+// dist-info directories, so this costs a fraction of a second — it never imports
+// torch.
+async function scanVenv(venvDir, onLine) {
+  const vp = venvPython(venvDir);
+  if (!fs.existsSync(vp)) {
+    throw new Error('The managed ComfyUI environment is missing its Python interpreter. Reinstall it from Settings.');
+  }
+  const probe = [
+    'import json, re, sys',
+    'from importlib.metadata import distributions',
+    'dists = {}',
+    'for d in distributions():',
+    '    n = d.metadata["Name"] or ""',
+    '    if n:',
+    '        dists[re.sub(r"[-_.]+", "-", n.lower())] = d.version',
+    'print("VENVSCAN " + json.dumps({"python": "%d.%d" % sys.version_info[:2], "dists": dists}))',
+  ].join('\n');
+  const r = await runStream(vp, ['-c', probe], { onLine });
+  const m = (r.stdout || '').match(/VENVSCAN (\{[\s\S]*\})/);
+  if (!m) {
+    throw new Error('Could not inspect the managed ComfyUI environment (its Python did not answer). Reinstall it from Settings.');
+  }
+  const parsed = JSON.parse(m[1]);
+  return { python: parsed.python, dists: parsed.dists || {} };
+}
+
+// What `torchArgs` should leave installed: the pinned version plus the CUDA local
+// tag from its index URL. The tag matters — 2.10.0+cu130 and 2.10.0+cu128 are the
+// same version and different ABIs, and the lock's prebuilt wheels are built
+// against one of them.
+function torchExpectation(build) {
+  const args = String(build.torchArgs || '');
+  const version = (args.match(/(?:^|\s)torch[=~]=([0-9][^\s]*)/) || [])[1] || null;
+  const cuTag = (args.match(/download\.pytorch\.org\/whl\/(cu\d+)/) || [])[1] || null;
+  return { version: version ? version.replace(/\+.*$/, '') : null, cuTag };
+}
+
+// Directories under custom_nodes. Files are ignored: ComfyUI itself ships
+// custom_nodes/websocket_image_save.py.example, and a pack is always a folder.
+function listNodePackDirs(installDir) {
+  try {
+    return fs.readdirSync(path.join(installDir, 'custom_nodes'), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== '__pycache__')
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+// Diff the shipped manifest against what is actually installed. Pure inspection —
+// nothing is downloaded, nothing is changed.
+async function planComfyUpdate({ appRoot, installDir, venvDir }) {
+  const manifest = loadManifest(appRoot);
+  const build = pickBuild(manifest);
+  const state = readInstallState(venvDir);
+  const unknownState = !state;
+  const scan = await scanVenv(venvDir);
+  const wantPython = manifest.pythonVersion || '3.13';
+
+  // A Python bump invalidates the whole venv: every wheel in the lock is tagged
+  // for one interpreter (cp313), so installing into a cp314 venv can't work.
+  // There is no incremental path — say so instead of failing halfway.
+  const requiresReinstall = scan.python && scan.python !== wantPython
+    ? {
+      reason: `This app version needs Python ${wantPython}, but the installed ComfyUI environment is Python ${scan.python}. `
+        + 'Every prebuilt wheel is tagged for one interpreter, so this needs a full reinstall rather than an update. '
+        + 'Models and outputs are kept.',
+    }
+    : null;
+
+  const onDisk = new Set(listNodePackDirs(installDir));
+  const recorded = new Map((state?.customNodes || []).map((n) => [n.name, n]));
+  const wanted = manifest.customNodes || [];
+  const excluded = new Set(manifest.excludeNodes || []);
+
+  const add = [];
+  const update = [];
+  const keep = [];
+  for (const node of wanted) {
+    const prev = recorded.get(node.name);
+    if (!onDisk.has(node.name)) {
+      add.push({ name: node.name, toRef: node.ref });
+    } else if (!prev) {
+      // On disk but not recorded — either a pre-state install or a pack restored
+      // by hand. Its actual ref is unknowable, so refresh it.
+      update.push({ name: node.name, fromRef: null, toRef: node.ref });
+    } else if (prev.ref !== node.ref) {
+      update.push({ name: node.name, fromRef: prev.ref, toRef: node.ref });
+    } else {
+      keep.push({ name: node.name, ref: node.ref });
+    }
+  }
+
+  // Only remove what we know is ours: a pack this install recorded, or one on the
+  // manifest's excludeNodes list (packs we deliberately stopped shipping). A
+  // folder the user dropped in themselves is reported and left alone.
+  const wantedNames = new Set(wanted.map((n) => n.name));
+  const remove = [];
+  const unmanaged = [];
+  for (const name of onDisk) {
+    if (wantedNames.has(name)) continue;
+    if (recorded.has(name) || excluded.has(name)) remove.push({ name });
+    else unmanaged.push({ name });
+  }
+
+  const core = {
+    fromRef: state?.comfyui?.ref || null,
+    fromTag: state?.comfyui?.tag || null,
+    toRef: manifest.comfyui.ref,
+    toTag: manifest.comfyui.tag || null,
+    // An install with no recorded ref gets refreshed: it's a ~50 MB download and
+    // the alternative is guessing.
+    changed: !state || state.comfyui?.ref !== manifest.comfyui.ref,
+  };
+
+  const shippedLock = fs.readFileSync(path.join(appRoot, 'setup', build.lock), 'utf8');
+  const toSha = lockSha(appRoot, build);
+  const deps = {
+    fromFile: state?.build?.lock || null,
+    toFile: build.lock,
+    changed: !state || state.lockSha !== toSha || state.build?.lock !== build.lock,
+  };
+
+  const wantTorch = torchExpectation(build);
+  const haveTorch = scan.dists.torch || null;
+  const torchOk = !!(haveTorch && wantTorch.version
+    && haveTorch.startsWith(wantTorch.version)
+    && (!wantTorch.cuTag || haveTorch.includes(wantTorch.cuTag)));
+  const torch = {
+    from: haveTorch,
+    to: wantTorch.cuTag ? `${wantTorch.version}+${wantTorch.cuTag}` : wantTorch.version,
+    changed: !torchOk,
+  };
+
+  // flash-attn is ABI-bound to torch, so a torch change means a new wheel.
+  const flashAttn = { changed: torch.changed || !scan.dists['flash-attn'] };
+
+  // Packages the venv has that the new lock doesn't want. This is the other half
+  // of "up to date": dropping a node pack leaves its dependencies behind, and a
+  // lock regenerated from a leaner reference env can shed a hundred of them.
+  const lockNames = new Set(parseLockRequirements(shippedLock).map((r) => r.name));
+  const protectedNames = new Set([
+    ...KEEP_INSTALLED,
+    ...(manifest.excludePackages || []).map(normalizeDistName),
+  ]);
+  const orphans = Object.entries(scan.dists)
+    .filter(([name]) => !lockNames.has(name) && !protectedNames.has(name))
+    .map(([name, version]) => ({ name, version }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const nodes = { add, update, remove, keep, unmanaged };
+  const hasUpdates = core.changed || deps.changed || torch.changed || flashAttn.changed
+    || !!(add.length || update.length || remove.length || orphans.length);
+
+  return {
+    unknownState,
+    requiresReinstall,
+    hasUpdates,
+    core,
+    nodes,
+    deps,
+    torch,
+    flashAttn,
+    orphans,
+    python: { installed: scan.python, wanted: wantPython },
+    build: { platform: build.platform, cuda: build.cuda },
+    installedAt: state?.installedAt || null,
+    installedByAppVersion: state?.appVersion || null,
+  };
+}
+
+// Force-reinstall the wheels that ship INSIDE a node pack we just replaced. The
+// lock pins them by path (`cumesh @ file:///…/custom_nodes/ComfyUI-Trellis2/…`),
+// and their version usually doesn't change when the pack does — so a plain install
+// considers them satisfied and the venv keeps the old binary next to the new
+// Python code.
+async function reinstallNodeWheels({ uv, vp, lockPath, packs, onLine }) {
+  if (!packs.length) return 0;
+  const lines = fs.readFileSync(lockPath, 'utf8').split(/\r?\n/).filter((raw) => {
+    const t = raw.trim();
+    if (!t || t.startsWith('#')) return false;
+    return packs.some((name) => t.includes(`/custom_nodes/${name}/`));
+  });
+  if (!lines.length) return 0;
+  if (onLine) onLine(`Re-installing ${lines.length} wheel(s) that ship inside the updated node packs\n`);
+  const reqPath = path.join(path.dirname(lockPath), 'comfyui-node-wheels.txt');
+  fs.writeFileSync(reqPath, `${lines.join('\n')}\n`);
+  const r = await runStream(
+    uv,
+    ['pip', 'install', '--python', vp, '--no-deps', '--force-reinstall', '-r', reqPath],
+    { onLine },
+  );
+  if (r.code !== 0) throw new Error(`Re-installing the node-pack wheels failed (exit ${r.code}).`);
+  return lines.length;
+}
+
+async function removeOrphanPackages({ uv, vp, orphans, onLine }) {
+  if (!orphans.length) return;
+  const names = orphans.map((o) => o.name);
+  if (onLine) onLine(`Removing ${names.length} package(s) the new dependency set no longer includes:\n  ${names.join(' ')}\n`);
+  // Chunked: a shed-a-hundred-packages update would otherwise build a command
+  // line long enough to matter on Windows.
+  for (let i = 0; i < names.length; i += 40) {
+    const chunk = names.slice(i, i + 40);
+    const r = await runStream(uv, ['pip', 'uninstall', '--python', vp, ...chunk], { onLine });
+    if (r.code !== 0) throw new Error(`Removing unused packages failed (exit ${r.code}).`);
+  }
+}
+
+// Apply a plan. ComfyUI must NOT be running: this replaces files its process has
+// open (on Windows a loaded .pyd cannot be deleted at all). The caller stops the
+// service first.
+async function updateComfyUI({ uv, appRoot, installDir, dataDir, venvDir, appVersion, onProgress }) {
+  const emit = (e) => onProgress(e);
+  const log = (text) => emit({ kind: 'log', text });
+  let lastPct = 0;
+  const phase = (label, pct) => { lastPct = pct; emit({ kind: 'phase', phase: label, pct }); };
+  // Rate-limit waits are reported through the phase label — see setupComfyUI.
+  const status = (text) => emit({ kind: 'phase', phase: text, pct: lastPct });
+
+  const manifest = loadManifest(appRoot);
+  const build = pickBuild(manifest);
+  const pyVer = manifest.pythonVersion || '3.13';
+  const vp = venvPython(venvDir);
+
+  // Always re-plan against the current disk state: the plan the UI is holding was
+  // made when the panel opened, and it decides what gets deleted.
+  //
+  // Note the readiness marker is deliberately left valid throughout. Every step
+  // here is idempotent and the plan is rebuilt from what is actually on disk, so a
+  // failed update is repaired by running it again — whereas invalidating the marker
+  // would demote a working install to "not installed" over a failed download.
+  const p = await planComfyUpdate({ appRoot, installDir, venvDir });
+  if (p.requiresReinstall) throw new Error(p.requiresReinstall.reason);
+  if (!p.hasUpdates) {
+    log('Everything is already up to date.\n');
+    phase('Up to date', 1);
+    emit({ kind: 'done' });
+    return { changed: false, summary: 'already up to date', plan: p };
+  }
+
+  const changedPacks = [...p.nodes.add, ...p.nodes.update];
+  log(`Updating the managed ComfyUI to ${manifest.comfyui.tag || manifest.comfyui.ref.slice(0, 8)} · Python ${pyVer} · CUDA ${build.cuda}\n`);
+  if (p.unknownState) {
+    log('This install predates update tracking, so ComfyUI and every node pack are refreshed once.\n');
+  }
+
+  phase('Checking prebuilt wheels', 0.02);
+  await verifyHostedWheels({ build, manifest, onLine: log });
+
+  if (p.core.changed) {
+    phase('Updating ComfyUI', 0.06);
+    await replaceComfyCore({ manifest, installDir, onLine: log, onStatus: status });
+  }
+
+  const nodesDir = path.join(installDir, 'custom_nodes');
+  if (p.nodes.remove.length) {
+    phase('Removing node packs that are no longer needed', 0.2);
+    for (const node of p.nodes.remove) {
+      log(`removing custom_nodes/${node.name}\n`);
+      try { fs.rmSync(path.join(nodesDir, node.name), { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+  for (const node of p.nodes.unmanaged) {
+    log(`leaving custom_nodes/${node.name} alone (not installed by 3D Gen Studio)\n`);
+  }
+
+  if (changedPacks.length) {
+    fs.mkdirSync(nodesDir, { recursive: true });
+    const byName = new Map((manifest.customNodes || []).map((n) => [n.name, n]));
+    for (let i = 0; i < changedPacks.length; i += 1) {
+      const node = byName.get(changedPacks[i].name);
+      if (!node) continue;
+      phase(`Downloading node packs (${i + 1}/${changedPacks.length}: ${node.name})`, 0.24 + 0.2 * (i / changedPacks.length));
+      await extractNodePack({ nodesDir, node, onLine: log, onStatus: status });
+    }
+  }
+
+  if (p.torch.changed) {
+    phase('Installing PyTorch', 0.46);
+    log(`torch ${p.torch.from || 'missing'} -> ${p.torch.to}\n`);
+    await installTorch({ uv, vp, build, onLine: log });
+  }
+  if (p.flashAttn.changed) {
+    phase('Installing flash-attn', 0.54);
+    await installFlashAttn({ uv, vp, appRoot, build, venvDir, onLine: log, onStatus: status });
+  }
+
+  // The lock is re-materialized either way: it is also the source of truth for
+  // the opencv pin and the node-local wheel paths.
+  const lockPath = materializeLock({ appRoot, build, manifest, installDir, venvDir });
+  if (p.deps.changed || changedPacks.length || p.torch.changed) {
+    phase('Updating ComfyUI dependencies', 0.6);
+    await installLockFile({ uv, vp, lockPath, onLine: log });
+    await reinstallNodeWheels({ uv, vp, lockPath, packs: changedPacks.map((n) => n.name), onLine: log });
+  }
+
+  if (p.orphans.length) {
+    phase('Removing unused packages', 0.84);
+    await removeOrphanPackages({ uv, vp, orphans: p.orphans, onLine: log });
+  }
+
+  phase('Checking OpenCV', 0.88);
+  await enforceSingleOpenCV({ uv, venvDir, lockPath, onLine: log });
+
+  phase('Verifying update', 0.92);
+  await verifyEnvironment({ manifest, installDir, venvDir, pyVer, onLine: log, verb: 'updated' });
+
+  phase('Preparing data folders', 0.97);
+  for (const sub of ['models', 'input', 'output', 'user']) {
+    fs.mkdirSync(path.join(dataDir, sub), { recursive: true });
+  }
+
+  // Marker first, state second: if writing the state fails, the install is still
+  // recorded as provisioned and the next check simply refreshes everything.
+  fs.writeFileSync(depsMarker(venvDir), `${COMFY_SETUP_TAG} ${build.lock} ${new Date().toISOString()}`);
+  writeInstallState(venvDir, describeState({ appRoot, manifest, build, appVersion }));
+
+  const summary = [
+    p.core.changed ? `ComfyUI ${p.core.fromTag || p.core.fromRef?.slice(0, 8) || 'unknown'} -> ${p.core.toTag || p.core.toRef.slice(0, 8)}` : null,
+    p.nodes.update.length ? `${p.nodes.update.length} pack(s) updated` : null,
+    p.nodes.add.length ? `${p.nodes.add.length} added` : null,
+    p.nodes.remove.length ? `${p.nodes.remove.length} removed` : null,
+    p.torch.changed ? `torch -> ${p.torch.to}` : null,
+    p.deps.changed ? 'dependencies reinstalled' : null,
+    p.orphans.length ? `${p.orphans.length} unused package(s) removed` : null,
+  ].filter(Boolean).join(', ');
+
+  log(`\nUpdate complete: ${summary}.\n`);
+  phase('ComfyUI updated', 1);
+  emit({ kind: 'done' });
+  return { changed: true, summary, plan: p };
 }
 
 // ---- launcher ---------------------------------------------------------------
@@ -897,6 +1496,9 @@ module.exports = {
   selectFlashAttn,
   setupComfyUI,
   startComfyUI,
+  readInstallState,
+  planComfyUpdate,
+  updateComfyUI,
   // Exported for offline validation of a regenerated lock (see docs/COMFYUI_MANAGED.md).
   materializeLock,
   verifyHostedWheels,

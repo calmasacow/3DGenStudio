@@ -25,6 +25,20 @@ contextBridge.exposeInMainWorld('genStudioServices', {
   // Re-point apis.comfyui.* at the managed install. Resolves { ok, port, path,
   // modelsPath } or { ok: false, error }.
   useManagedComfy: () => ipcRenderer.invoke('comfyui:use-managed'),
+
+  // Managed ComfyUI upgrades. Installing a newer app version leaves an existing
+  // ComfyUI on its old pins, so Settings offers this explicitly.
+  //   checkComfyUpdate -> { ok, plan } — what the shipped manifest wants vs what
+  //     is installed (node pack refs, ComfyUI ref, dependency lock, torch, and
+  //     packages that are no longer needed). Cheap: no network, no changes.
+  //   updateComfyUI    -> { ok, changed, summary, wasRunning } — applies it.
+  //   reinstallComfyUI -> { ok } — wipes code + venv and installs fresh, for when
+  //     an update can't be incremental (a Python version bump). Models are kept.
+  // Progress for the last two streams through genStudioSetup.onProgress tagged
+  // `service: 'comfyui-update'`.
+  checkComfyUpdate: () => ipcRenderer.invoke('comfyui:update-check'),
+  updateComfyUI: () => ipcRenderer.invoke('comfyui:update-run'),
+  reinstallComfyUI: () => ipcRenderer.invoke('comfyui:reinstall'),
 });
 
 contextBridge.exposeInMainWorld('genStudioSetup', {

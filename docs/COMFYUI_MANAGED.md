@@ -77,7 +77,8 @@ ABI-matched to exactly that torch version.
 > [!IMPORTANT]
 > Because node packs are tarballs rather than git checkouts, ComfyUI-Manager
 > cannot update them in place. Upgrades happen by regenerating the manifest and
-> shipping a new app version.
+> shipping a new app version — which the user then applies from **Settings →
+> ComfyUI → Update ComfyUI**. See [Updating an existing install](#updating-an-existing-install).
 
 ---
 
@@ -377,6 +378,120 @@ const lock = cs.materializeLock({ appRoot: '.', build, manifest: m,
    installs cleanly and only fails at `import` with `undefined symbol: …`;
    catching it here beats a mystery node-import failure later.
 9. Create the data folders, write the readiness marker, write the settings.
+
+## Updating an existing install
+
+**Installing a newer app version does not touch a managed ComfyUI.** The installer
+short-circuits on the readiness marker, and `isReady()` only compares
+`COMFY_SETUP_TAG` — so a bumped `comfyui.ref`, a bumped node pack `ref` or a
+regenerated lock all leave the marker perfectly valid. And because the packs are
+tarballs, there is no `git pull` that would notice either. Without a deliberate
+update path, a user who upgrades the app keeps running the ComfyUI, node packs and
+Python packages of whatever version first installed it.
+
+So the app records what it installed and offers an explicit update:
+
+```
+<data>/comfy-venv/comfy-install.json     the install state
+```
+
+| Field | Used to detect |
+| :--- | :--- |
+| `comfyui.ref` | a ComfyUI upgrade |
+| `customNodes[].ref` | packs to update, add or remove |
+| `lockSha` | a regenerated lock — the **filename** is unchanged whenever Python and CUDA are, so the hash is what actually decides |
+| `build.torchArgs` | a torch/CUDA change (which also forces a new flash-attn wheel) |
+| `pythonVersion` | an interpreter bump — see below |
+
+`planComfyUpdate()` diffs the shipped manifest against that record and returns
+exactly what would change; `updateComfyUI()` applies it. The split is what lets
+Settings check on open (one metadata query, **no network**) and show the work
+before the user agrees to it.
+
+### What an update does
+
+1. **ComfyUI itself**, if `ref` changed: wipe the install dir *except*
+   `custom_nodes`, then extract the new tarball. Wiping is what removes files the
+   new version deleted; keeping `custom_nodes` is what stops a ComfyUI bump from
+   re-downloading every pack.
+2. **Node packs**: extract the changed/new ones (each replaced wholesale), delete
+   the ones no longer shipped.
+3. **torch / flash-attn**, only if the build row changed.
+4. **The lock**, with `--no-deps` as always, plus a `--force-reinstall` of the
+   wheels that ship *inside* an updated pack — those are pinned by path and their
+   version usually doesn't change, so a plain install considers them satisfied and
+   leaves the old binary beside the new Python code.
+5. **Uninstall orphans**: installed distributions the new lock doesn't list. This
+   is the other half of "up to date" — dropping a node pack leaves its dependencies
+   behind, and a lock regenerated from a leaner reference env can shed a hundred of
+   them.
+6. `enforceSingleOpenCV` + the import gate + the triton probe, same as a fresh
+   install, then rewrite the marker and the state.
+
+The service is stopped first (`comfyui:update-run`), and `ensureService('comfyui')`
+is refused for the duration — an update deletes files a running ComfyUI has open,
+and Windows will not unlink a loaded `.pyd` at all.
+
+> [!CAUTION]
+> Orphan removal is guarded by a keep-list, and getting it wrong would break the
+> environment silently. `torch`/`torchvision`/`torchaudio`/`flash-attn` are
+> installed *outside* the lock by design; `pip`/`setuptools`/`wheel`/`uv` would take
+> the venv with them; and everything in `excludePackages` is a deliberate omission
+> rather than a leftover (`cv2` in particular is repaired by `enforceSingleOpenCV`,
+> which knows how to do it safely). Names are compared PEP 503-normalised.
+> Verified against a real managed install: zero orphans reported when the venv
+> matches the shipped lock.
+
+### Things that can't be done incrementally
+
+- **A `pythonVersion` bump.** Every wheel in the lock is tagged for one
+  interpreter, so a cp313 venv cannot host a cp314 lock. The plan reports
+  `requiresReinstall` with the reason and Settings offers a **Reinstall** instead,
+  which wipes `comfy-venv/` and `comfyui/` — never `comfy-data/`, so models,
+  inputs, outputs and the ComfyUI database survive.
+- **An install made before this feature existed** has no state file, so its refs
+  are unknowable and the first update refreshes ComfyUI and all packs once. The UI
+  says so, rather than presenting an 11-pack download as routine.
+
+### codeload rate-limits, so downloads retry — and never destroy first
+
+A managed install asks `codeload.github.com` for ComfyUI plus 11 node packs back to
+back, unauthenticated, and **it rate-limits that with HTTP 429** — per IP, so a
+second install or update on the same day can be limited from its very first
+request. Two rules follow, and the first update shipped without either:
+
+- **Every download retries with backoff** (`withRetry`): 5s → 15s → 30s → 60s →
+  120s → 180s, honouring `Retry-After` when the server sends one. `429`, `5xx` and
+  dropped connections are retried; `404` and a plain `403` are not (a private or
+  renamed repo is permanent, and six minutes of retries won't fix it) — a `403` only
+  counts as a rate limit when it carries `Retry-After` or
+  `x-ratelimit-remaining: 0`. The waits are reported through the **phase** label,
+  not just the log, because the Settings progress bar shows only the phase and a
+  silent three-minute wait reads as a hang.
+- **Fetch before you destroy.** `replaceComfyCore` and `extractNodePack` download and
+  gunzip the archive *first*, then delete, then extract. The first version wiped the
+  install dir and *then* fetched — so a 429 on that very request deleted a working
+  ComfyUI's `main.py` and left the user with an install that reported itself
+  uninstalled. `fetchArchive` and `extractTar` are separate for exactly this reason;
+  `extractTarGz` is now just the two composed.
+
+The retry wrapper covers the **body read** as well as the request, since a
+connection dropped mid-download used to surface as a corrupt archive. `downloadFile`
+(the flash-attn wheel) streams to a `.part` file and renames on success, so a retry
+never appends to a partial file or mistakes one for a finished download.
+
+### Safety rules worth keeping
+
+- Only packs the state recorded, or ones listed in `excludeNodes`, are ever
+  deleted. A folder the user dropped into `custom_nodes` themselves is reported and
+  left alone.
+- The readiness marker stays valid throughout an update. Every step is idempotent
+  and the plan is rebuilt from what's actually on disk, so a failed update is
+  repaired by running it again — invalidating the marker would instead demote a
+  working install to "not installed" over a dropped connection.
+- If an update dies *after* the ComfyUI tree is wiped, `main.py` is missing, so
+  `comfyReady()` goes false and Settings falls back to offering a full install.
+  That's the intended recovery.
 
 ## Platform support
 
