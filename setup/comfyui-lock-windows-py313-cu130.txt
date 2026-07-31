@@ -32,7 +32,7 @@ colorlog==6.12.0
 colour-science==0.4.7
 comfy-aimdo==0.4.10
 comfy-angle==0.1.0
-comfy-kitchen==0.2.23
+comfy-kitchen==0.2.24
 comfyui-embedded-docs==0.5.9
 comfyui-workflow-templates-core==0.3.284
 comfyui-workflow-templates-json==0.1.18
