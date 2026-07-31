@@ -367,11 +367,16 @@ const lock = cs.materializeLock({ appRoot: '.', build, manifest: m,
 4. Download ComfyUI, then each pinned node pack. Node packs come first because
    the lock references wheels that live inside them.
 5. Install torch from its CUDA index.
-6. Install the materialized lock.
-7. **Import-check** `verifyImports`. A wheel built against a different torch ABI
+6. Install the materialized lock **with `--no-deps`**. The lock is a complete
+   freeze of the reference env, so there is nothing left to resolve — and
+   resolving anyway pulls in packages the lock deliberately excludes (see the
+   opencv gotcha below).
+7. **Normalise opencv** (`enforceSingleOpenCV`) — exactly one opencv
+   distribution, and `cv2.ximgproc.guidedFilter` proven importable.
+8. **Import-check** `verifyImports`. A wheel built against a different torch ABI
    installs cleanly and only fails at `import` with `undefined symbol: …`;
    catching it here beats a mystery node-import failure later.
-8. Create the data folders, write the readiness marker, write the settings.
+9. Create the data folders, write the readiness marker, write the settings.
 
 ## Platform support
 
@@ -453,15 +458,42 @@ Use the per-directory flags instead (`--models-directory`, `--input-directory`,
 `is_valid_directory`, which **rejects a path that doesn't exist**, so the launcher
 creates all five before spawning.
 
-**Ship exactly one opencv distribution.** `opencv-python`,
-`opencv-contrib-python` and their two `-headless` variants all install into the
-same `cv2/` package and overwrite each other — the build you end up with depends
-on install order, which is not deterministic. With all four in the lock, the
-reference env happened to get the contrib build and a fresh managed install got
-the plain one, so `ComfyUI-Hunyuan3DWrapper` failed to import with
-`cannot import name 'guidedFilter' from 'cv2.ximgproc'`. The lock now excludes
-all but `opencv-contrib-python` (the superset that provides `ximgproc`). Watch for
-this whenever a node pack's `requirements.txt` adds an opencv variant.
+**Ship exactly one opencv distribution — and excluding the others from the lock
+is not enough.** `opencv-python`, `opencv-contrib-python` and their two
+`-headless` variants all unpack into the same `cv2/` package and overwrite each
+other, so which build you end up with is decided by install *order*. Only contrib
+carries `cv2.ximgproc`, which `ComfyUI-Hunyuan3DWrapper/nodes.py` imports at
+module scope, so losing the coin flip means
+`cannot import name 'guidedFilter' from 'cv2.ximgproc'` and every Hunyuan3D
+workflow reporting missing nodes.
+
+The lock pins only `opencv-contrib-python` (the other three are in
+`excludePackages`), but that alone does **not** keep them out: a
+dependency-resolving install re-adds them as transitive requirements —
+`albucore`/`albumentations` need `opencv-python-headless`,
+`groundingdino-py`/`pixeloe`/`supervision`/`transparent-background` need
+`opencv-python` — and whichever lands last owns `cv2/`. That's exactly how a fresh
+install regressed after the first fix. Two things now prevent it:
+
+- the lock installs with **`--no-deps`** (it is a full freeze, so nothing needs
+  resolving), and
+- **`enforceSingleOpenCV`** runs right after: it reads the single pin out of the
+  lock, uninstalls any other variant present, `--force-reinstall`s the pinned one
+  (mandatory — uninstalling a sibling deletes `cv2/` files it *shares* with
+  contrib, leaving contrib recorded as installed but gutted), and then fails the
+  install unless `from cv2.ximgproc import guidedFilter` actually works.
+
+The distribution list is not sufficient evidence on its own — contrib can be
+present per its metadata with a plain build's files on disk — which is why the
+check imports the symbol. It also repairs venvs provisioned by an older build of
+the app (`COMFY_SETUP_TAG` = `comfyui-2` re-triggers setup for those).
+
+**`--database-url` does not follow `--user-directory`.** `cli_args.py` defaults it
+to `<code dir>/../user/comfyui.db`, i.e. `<installDir>/user` — a folder the
+managed install never creates, since user data lives in the data dir. Every
+startup then logged `Failed to initialize database … unable to open database
+file` and ran without one. The launcher passes it explicitly, pointed at
+`<dataDir>/user/comfyui.db`.
 
 **Spawn Python services with `PYTHONIOENCODING=utf-8`.** We capture stdout and
 stderr through pipes, and for a pipe Python defaults to the ANSI codepage on

@@ -37,7 +37,10 @@ const IS_MAC = process.platform === 'darwin';
 // Bump when the provisioning STEPS change in a way that needs a re-run. The lock
 // filename already changes when dependencies change, and the marker records it,
 // so a regenerated lock re-triggers setup on its own.
-const COMFY_SETUP_TAG = 'comfyui-1';
+// History: 2 = lock installs with --no-deps + the opencv single-distribution
+// repair (see enforceSingleOpenCV), so venvs provisioned by an earlier build get
+// their cv2 fixed instead of staying broken behind an up-to-date marker.
+const COMFY_SETUP_TAG = 'comfyui-2';
 
 // ---- manifest ---------------------------------------------------------------
 function loadManifest(appRoot) {
@@ -497,6 +500,120 @@ async function verifyHostedWheels({ build, manifest, onLine }) {
   }
 }
 
+// ---- opencv -----------------------------------------------------------------
+// `opencv-python`, `opencv-contrib-python` and their two `-headless` variants all
+// unpack into the SAME `cv2/` package and overwrite each other's files, so the
+// build you end up with is decided by install ORDER. Only the contrib build
+// carries `cv2.ximgproc`, and ComfyUI-Hunyuan3DWrapper imports from it at module
+// scope (`from cv2.ximgproc import guidedFilter`) — lose the coin flip and the
+// whole node pack fails to import, which surfaces as every Hunyuan3D workflow
+// reporting missing nodes.
+//
+// Pinning only opencv-contrib-python in the lock is NOT enough by itself:
+// albucore/albumentations require `opencv-python-headless` and
+// groundingdino-py/pixeloe/supervision/transparent-background require
+// `opencv-python`, so a dependency-RESOLVING install pulls both variants in
+// behind the lock's back and one of them lands on top of contrib's cv2. The lock
+// is a complete freeze of the reference env, so it installs with --no-deps; this
+// runs after it as the belt-and-braces check, and also repairs a venv left broken
+// by an earlier build of the app.
+const OPENCV_VARIANTS = [
+  'opencv-python',
+  'opencv-contrib-python',
+  'opencv-python-headless',
+  'opencv-contrib-python-headless',
+];
+
+// The single opencv distribution the lock pins, as { name, version }. More than
+// one is a packaging mistake that would make cv2 order-dependent again, so it
+// fails the install rather than installing a coin flip.
+function lockedOpenCV(lockPath) {
+  const pins = [];
+  for (const line of fs.readFileSync(lockPath, 'utf8').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const m = t.match(/^(opencv[A-Za-z0-9._-]*)==(\S+)/i);
+    if (m && OPENCV_VARIANTS.includes(m[1].toLowerCase())) {
+      pins.push({ name: m[1].toLowerCase(), version: m[2] });
+    }
+  }
+  if (pins.length !== 1) {
+    const have = pins.map((p) => p.name).join(', ') || 'none';
+    throw new Error(`The dependency lock pins ${pins.length} opencv distributions (${have}); it must pin exactly one — opencv-contrib-python, the superset that provides cv2.ximgproc. Add the others to excludePackages in setup/comfyui.json and regenerate.`);
+  }
+  return pins[0];
+}
+
+// What's actually on disk: every installed opencv distribution, plus whether the
+// resulting cv2 really exposes the symbol the node pack needs. The dist list
+// alone is not enough — contrib can be "installed" per its metadata while its
+// files have been overwritten by a plain build.
+async function inspectOpenCV(vp, onLine) {
+  const probe = [
+    'import json',
+    'from importlib.metadata import distributions',
+    'dists = {}',
+    'for d in distributions():',
+    '    n = (d.metadata["Name"] or "").lower().replace("_", "-")',
+    '    if n.startswith("opencv"):',
+    '        dists[n] = d.version',
+    'try:',
+    '    from cv2.ximgproc import guidedFilter',
+    '    guided = True',
+    'except Exception as e:',
+    '    print("     ", type(e).__name__, e)',
+    '    guided = False',
+    'print("OPENCV " + json.dumps({"dists": dists, "guided": guided}))',
+  ].join('\n');
+  const r = await runStream(vp, ['-c', probe], { onLine });
+  const m = (r.stdout || '').match(/OPENCV (\{.*\})/);
+  if (!m) return { dists: {}, guided: false };
+  try {
+    const parsed = JSON.parse(m[1]);
+    return { dists: parsed.dists || {}, guided: !!parsed.guided };
+  } catch {
+    return { dists: {}, guided: false };
+  }
+}
+
+async function enforceSingleOpenCV({ uv, venvDir, lockPath, onLine }) {
+  const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
+  const vp = venvPython(venvDir);
+  const want = lockedOpenCV(lockPath);
+
+  const before = await inspectOpenCV(vp, onLine);
+  const extras = Object.keys(before.dists).filter((n) => n !== want.name);
+  if (!extras.length && before.guided) {
+    emit(`ok        ${want.name} ${before.dists[want.name] || want.version} (cv2.ximgproc present)\n`);
+    return;
+  }
+
+  if (extras.length) {
+    emit(`Removing conflicting opencv distribution(s): ${extras.join(', ')}\n`);
+    const r = await runStream(uv, ['pip', 'uninstall', '--python', vp, ...extras], { onLine });
+    if (r.code !== 0) throw new Error(`Could not remove the conflicting opencv distributions (exit ${r.code}).`);
+  } else {
+    emit(`cv2 has no working ximgproc — reinstalling ${want.name}.\n`);
+  }
+
+  // Unconditionally --force-reinstall: uninstalling a variant deletes cv2/ files
+  // it SHARES with the contrib build, so contrib is left half-gutted while still
+  // recorded as installed — a plain install would consider it satisfied.
+  const r = await runStream(
+    uv,
+    ['pip', 'install', '--python', vp, '--no-deps', '--force-reinstall', `${want.name}==${want.version}`],
+    { onLine },
+  );
+  if (r.code !== 0) throw new Error(`Reinstalling ${want.name}==${want.version} failed (exit ${r.code}).`);
+
+  const after = await inspectOpenCV(vp, onLine);
+  const left = Object.keys(after.dists).filter((n) => n !== want.name);
+  if (left.length || !after.guided) {
+    throw new Error(`cv2 is still not the contrib build after repair (installed: ${Object.keys(after.dists).join(', ') || 'none'}; cv2.ximgproc.guidedFilter ${after.guided ? 'ok' : 'MISSING'}). ComfyUI-Hunyuan3DWrapper cannot load without it, so every Hunyuan3D workflow would be missing nodes.`);
+  }
+  emit(`ok        ${want.name} ${after.dists[want.name] || want.version} (cv2.ximgproc restored)\n`);
+}
+
 // ---- provisioning -----------------------------------------------------------
 // `onProgress` receives { kind:'phase'|'log'|'done'|'error', phase, pct, text },
 // the same contract the other services use, so the setup window renders it with
@@ -575,11 +692,19 @@ async function setupComfyUI({ uv, appRoot, installDir, dataDir, venvDir, onProgr
   }
 
   phase('Installing ComfyUI dependencies', 0.6);
+  const lockPath = materializeLock({ appRoot, build, manifest, installDir, venvDir });
   {
-    const lockPath = materializeLock({ appRoot, build, manifest, installDir, venvDir });
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, '-r', lockPath], { onLine: log });
+    // --no-deps because the lock is a COMPLETE freeze of the reference env (minus
+    // torch and the deliberate exclusions), so there is nothing left to resolve —
+    // and resolving anyway is actively harmful: several packages here require a
+    // different opencv variant than the one pinned, and pip would happily install
+    // it on top of the pinned cv2. See enforceSingleOpenCV.
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', '-r', lockPath], { onLine: log });
     if (r.code !== 0) throw new Error(`Dependency install failed (exit ${r.code}). See details.`);
   }
+
+  phase('Checking OpenCV', 0.9);
+  await enforceSingleOpenCV({ uv, venvDir, lockPath, onLine: log });
 
   // Prove the CUDA extensions actually LOAD. A wheel built against a different
   // torch ABI installs cleanly and only dies at import with "undefined symbol",
@@ -694,6 +819,13 @@ function startComfyUI({ appRoot, installDir, dataDir, venvDir, port, logStream, 
     '--output-directory', dirs.output,
     '--user-directory', dirs.user,
     '--temp-directory', dirs.temp,
+    // --database-url does NOT follow --user-directory: cli_args.py defaults it to
+    // "<code dir>/../user/comfyui.db", i.e. <installDir>/user, which we never
+    // create (user data lives in dataDir). ComfyUI then logs "Failed to initialize
+    // database ... unable to open database file" at every startup. Point it at the
+    // real user dir; forward slashes so SQLAlchemy's URL parser doesn't have to
+    // deal with backslashes.
+    '--database-url', `sqlite:///${path.resolve(dirs.user, 'comfyui.db').replace(/\\/g, '/')}`,
     ...extraArgs,
   ];
 
@@ -768,4 +900,5 @@ module.exports = {
   // Exported for offline validation of a regenerated lock (see docs/COMFYUI_MANAGED.md).
   materializeLock,
   verifyHostedWheels,
+  enforceSingleOpenCV,
 };
