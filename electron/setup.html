@@ -77,6 +77,17 @@
       <div class="bar"><i></i></div>
     </div>
 
+    <div class="svc" id="svc-comfyui">
+      <div class="svc__head">
+        <span class="dot"></span>
+        <span class="svc__name">ComfyUI</span>
+        <span class="svc__tag">optional · powers image &amp; mesh generation</span>
+      </div>
+      <label class="opt"><input type="checkbox" id="opt-comfyui" /> Install and manage ComfyUI for me (needs an NVIDIA GPU; downloads several GB). Leave unchecked if you already run your own ComfyUI — point the app at it in Settings.</label>
+      <div class="svc__phase" style="display:none"></div>
+      <div class="bar" style="display:none"><i></i></div>
+    </div>
+
     <div class="svc" id="svc-rigging">
       <div class="svc__head">
         <span class="dot"></span>
@@ -104,17 +115,26 @@
   const rows = {
     meshtools: $('#svc-meshtools'),
     rigging: $('#svc-rigging'),
+    comfyui: $('#svc-comfyui'),
     uv: $('#svc-meshtools'), // uv provisioning shows under the first row
   };
   const logEl = $('#log');
   const errEl = $('#err');
 
-  // Rigging needs CUDA, so it exists on Windows and Linux only. Hide the option on
-  // macOS rather than offering an install that cannot succeed. (An unchecked box
-  // reads as false in runInstall, so nothing else needs to know.)
+  // Rigging needs CUDA, so it exists on Windows and Linux only. Hide the option
+  // on macOS rather than offering an install that cannot succeed. (An unchecked
+  // box reads as false in runInstall, so nothing else needs to know.)
   if ((window.genStudioDesktop && window.genStudioDesktop.platform) === 'darwin') {
     $('#svc-rigging').style.display = 'none';
   }
+
+  // The managed ComfyUI additionally needs a dependency set generated for THIS
+  // platform (the lock is a platform-specific resolution). The main process knows
+  // which platforms this build ships, so ask rather than guess.
+  $('#svc-comfyui').style.display = 'none';
+  window.genStudioSetup.status()
+    .then((s) => { if (s && s.comfyuiAvailable) $('#svc-comfyui').style.display = ''; })
+    .catch(() => {});
 
   function setRow(service, { state, phase, pct }) {
     const row = rows[service];
@@ -122,7 +142,7 @@
     const dot = row.querySelector('.dot');
     const phaseEl = row.querySelector('.svc__phase');
     const bar = row.querySelector('.bar > i');
-    if (service === 'rigging') { // reveal rigging progress once it starts
+    if (service === 'rigging' || service === 'comfyui') { // reveal progress once it starts
       row.querySelector('.svc__phase').style.display = '';
       row.querySelector('.bar').style.display = '';
     }
@@ -156,10 +176,12 @@
   async function runInstall() {
     errEl.textContent = '';
     const rigging = $('#opt-rigging').checked;
+    const comfyui = $('#opt-comfyui').checked;
     $('#btn-install').disabled = true;
     $('#opt-rigging').disabled = true;
+    $('#opt-comfyui').disabled = true;
     setRow('meshtools', { state: 'running', phase: 'Starting…', pct: 0 });
-    const res = await window.genStudioSetup.run({ rigging });
+    const res = await window.genStudioSetup.run({ rigging, comfyui });
     if (res && res.ok) {
       $('#btn-install').style.display = 'none';
       $('#btn-launch').style.display = '';
@@ -167,6 +189,7 @@
       errEl.textContent = (res && res.error) || 'Setup failed. See details.';
       $('#btn-install').disabled = false;
       $('#opt-rigging').disabled = false;
+      $('#opt-comfyui').disabled = false;
       $('#btn-install').textContent = 'Retry';
     }
   }

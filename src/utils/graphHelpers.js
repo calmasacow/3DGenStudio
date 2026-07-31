@@ -1,6 +1,12 @@
 // Pure helpers and config constants for the node-graph editor (GraphPage).
 // Extracted from GraphPage.jsx — no React, no component state.
 import { assetUrl } from '../config'
+import {
+  WORKFLOW_INPUT_NONE,
+  createWorkflowInputNoneValue,
+  isWorkflowInputNone,
+  isWorkflowInputNoneValue
+} from './workflowFileInputs'
 
 export const DEFAULT_OUTPUT_ID = 'output-0'
 export const DEFAULT_INPUT_ID = 'input-0'
@@ -858,6 +864,15 @@ export function getCompatibleInputSources(inputSources, valueType) {
   return (inputSources || []).filter(source => normalizeConnectorType(source.type) === normalizedValueType)
 }
 
+// Image and mesh parameters are fed by wiring alone in the graph: a node supplies
+// them from a connected input or they are left unset ("None"). There is no custom
+// value to pick — the graph itself is where an image or a mesh comes from.
+const CONNECTOR_ONLY_WORKFLOW_VALUE_TYPES = ['image', 'mesh']
+
+export function isConnectorOnlyWorkflowValueType(valueType) {
+  return CONNECTOR_ONLY_WORKFLOW_VALUE_TYPES.includes(valueType)
+}
+
 export function createWorkflowDraftBindings(workflow, inputSources = [], preferredConnectorTypes = []) {
   return Object.fromEntries((workflow?.parameters || []).map(parameter => {
     const valueType = getWorkflowParameterValueType(parameter)
@@ -866,7 +881,9 @@ export function createWorkflowDraftBindings(workflow, inputSources = [], preferr
       && (isFileWorkflowValueType(valueType) || preferredConnectorTypes.includes(valueType))
 
     return [parameter.id, {
-      source: shouldPreferConnector ? getInputSourceSelectionValue(compatibleSources[0]) : 'custom'
+      source: shouldPreferConnector
+        ? getInputSourceSelectionValue(compatibleSources[0])
+        : (isConnectorOnlyWorkflowValueType(valueType) ? WORKFLOW_INPUT_NONE : 'custom')
     }]
   }))
 }
@@ -886,6 +903,20 @@ export function resolveSelectedInputSource(sourceSelection, inputSources = []) {
 
 export function resolveWorkflowParameterValue(parameter, draft, inputSources = []) {
   const binding = getWorkflowParameterBinding(draft, parameter)
+  // "None": the parameter runs with the value saved in the workflow itself. The
+  // marker is a value like any other, so the run flows on instead of aborting on
+  // the "this file input is empty" check.
+  if (isWorkflowInputNone(binding.source)) {
+    return createWorkflowInputNoneValue()
+  }
+
+  // An image / mesh parameter has no source other than a connected input, so any
+  // other binding — including a connector that has since been unwired — is "None".
+  if (isConnectorOnlyWorkflowValueType(getWorkflowParameterValueType(parameter))) {
+    const connectedSource = resolveSelectedInputSource(binding.source, inputSources)
+    return connectedSource ? (connectedSource.value ?? null) : createWorkflowInputNoneValue()
+  }
+
   if (binding.source && binding.source !== 'custom') {
     const selectedSource = resolveSelectedInputSource(binding.source, inputSources)
     return selectedSource?.value ?? null
@@ -902,6 +933,7 @@ export function resolveWorkflowParameterValue(parameter, draft, inputSources = [
 
 export function formatLastActionValue(value) {
   if (value === null || value === undefined || value === '') return '—'
+  if (isWorkflowInputNoneValue(value)) return 'None'
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (typeof value === 'object') {
     if (value.source) return String(value.source)

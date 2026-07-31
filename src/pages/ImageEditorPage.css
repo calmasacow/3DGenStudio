@@ -321,6 +321,15 @@
   touch-action: none;
   cursor: crosshair;
   will-change: transform;
+  /* Transparency checker behind the composite itself, so transparent pixels read
+     as transparent instead of as the near-black page behind them. */
+  background-color: #2b2d31;
+  background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.09) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.09) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.09) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.09) 75%);
+  background-size: 18px 18px;
+  background-position: 0 0, 0 9px, 9px -9px, -9px 0;
 }
 
 .image-editor-cursor-preview {

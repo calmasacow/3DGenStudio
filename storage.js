@@ -180,7 +180,14 @@ export const DEFAULT_SETTINGS = {
       // (e.g. models are shared across ComfyUI installs via extra_model_paths.yaml).
       modelsPath: '',
       url: 'http://127.0.0.1',
-      port: '8188'
+      port: '8188',
+      // Desktop app: true when this ComfyUI was installed BY the app (into the
+      // per-user data dir) and is therefore ours to start, stop and upgrade.
+      // False/absent means the user runs their own — the app only talks to it.
+      managed: false,
+      // Desktop app: start the managed ComfyUI at launch. Default off — it is a
+      // heavy process and most sessions start on demand instead.
+      autoStart: false
     },
     meshtools: {
       url: 'http://127.0.0.1',

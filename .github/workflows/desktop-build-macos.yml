@@ -1,9 +1,8 @@
 name: Desktop build · macOS
 
 # Manual-only macOS build: Actions tab → "Desktop build · macOS" → Run workflow
-# → pick a branch. Produces the arm64 .dmg and .zip as the `3dgenstudio-macos`
-# artifact (Apple Silicon only — bpy 5.x has no macOS Intel wheel, see the mac
-# section of electron-builder.yml), plus the `mac-diagnostics` artifact — the
+# → pick a branch. Produces the x64 + arm64 .dmg and .zip as the
+# `3dgenstudio-macos` artifact, plus the `mac-diagnostics` artifact — the
 # Gatekeeper/code-signing report described in docs/DESKTOP_BUILD.md. Run this
 # one on its own when investigating a macOS install problem: the runner is an
 # Apple Silicon Mac, so it answers signing questions without needing a Mac.

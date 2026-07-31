@@ -12,6 +12,12 @@ import {
   isTripoMeshGenerationApi
 } from '../../utils/kanbanHelpers'
 import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
+import {
+  WORKFLOW_INPUT_NONE,
+  WORKFLOW_INPUT_NONE_HINT,
+  WORKFLOW_INPUT_NONE_LABEL,
+  isWorkflowInputNone
+} from '../../utils/workflowFileInputs'
 
 // A single Kanban board card (image / image-edit / mesh-gen / mesh-edit / texturing).
 // Presentational: all board state, derived selectors, and handlers are passed in
@@ -565,6 +571,7 @@ export default function KanbanImageCard({
                           if (['image', 'mesh'].includes(valueType)) {
                             const selectedAssetSource = binding.source || ''
                             const sourceGroups = getCardFileSourceGroups(card, valueType)
+                            const isNoneSource = isWorkflowInputNone(selectedAssetSource)
 
                             return (
                               <div key={parameter.id} className="params-card__field">
@@ -583,8 +590,11 @@ export default function KanbanImageCard({
                                       ))}
                                     </optgroup>
                                   ))}
+                                  <option value={WORKFLOW_INPUT_NONE}>{WORKFLOW_INPUT_NONE_LABEL}</option>
                                 </select>
-                                <span className="image-card__param-hint">{parameter.label}</span>
+                                <span className="image-card__param-hint">
+                                  {isNoneSource ? WORKFLOW_INPUT_NONE_HINT : parameter.label}
+                                </span>
                               </div>
                             )
                           }

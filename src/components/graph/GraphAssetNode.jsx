@@ -35,6 +35,7 @@ import {
   getWorkflowParameterBinding,
   getHitemResolutionOptions,
   getWorkflowParameterValueType,
+  isConnectorOnlyWorkflowValueType,
   isFileWorkflowValueType,
   isHitemMeshGenerationApi,
   isTencentMeshGenerationApi,
@@ -43,6 +44,12 @@ import {
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
 import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
+import {
+  WORKFLOW_INPUT_NONE,
+  WORKFLOW_INPUT_NONE_HINT,
+  WORKFLOW_INPUT_NONE_LABEL,
+  isWorkflowInputNone
+} from '../../utils/workflowFileInputs'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import LastActionInfo from './LastActionInfo'
 
@@ -125,33 +132,19 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
     const compatibleSources = getCompatibleInputSources(inputSources, valueType)
     const binding = getWorkflowParameterBinding(draft, parameter)
     const selectedSource = resolveSelectedInputSource(binding.source, compatibleSources)
+    // Image / mesh / video parameters can be left unset ("None"), so their source
+    // dropdown is offered even when no connected node could feed them. Image and
+    // mesh inputs offer nothing else: a connected input, or None.
+    const isFileValueType = isFileWorkflowValueType(valueType)
+    const isConnectorOnly = isConnectorOnlyWorkflowValueType(valueType)
+    const isNoneSource = isConnectorOnly
+      ? !selectedSource
+      : (isFileValueType && isWorkflowInputNone(binding.source))
 
+    // Never reached for image / mesh parameters: those are connector-only, so they
+    // are either wired to an input or set to "None".
     const renderCustomValueField = () => {
-      if ((isImageEditMode || isMeshGen) && valueType === 'image') {
-        const selectedSourceReference = currentValue?.source || currentValue || ''
-
-        if (data.libraryImageOptions.length === 0) {
-          return (
-            <div className="graph-node__linked-input font-label">
-              No custom image sources available in the asset library.
-            </div>
-          )
-        }
-
-        return (
-          <select
-            className="params-card__select nodrag"
-            value={selectedSourceReference}
-            onChange={event => data.onDraftInputChange?.(data.id, parameter, { source: event.target.value })}
-          >
-            {data.libraryImageOptions.map(asset => (
-              <option key={asset.id} value={asset.sourceReference || asset.id}>{asset.name}</option>
-            ))}
-          </select>
-        )
-      }
-
-      if (isFileWorkflowValueType(valueType)) {
+      if (isFileValueType) {
         return (
           <label className="image-card__file-input nodrag">
             <input
@@ -222,10 +215,10 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
 
     return (
       <>
-        {compatibleSources.length > 0 && (
+        {(compatibleSources.length > 0 || isFileValueType) && (
           <select
             className="params-card__select nodrag"
-            value={binding.source || 'custom'}
+            value={isNoneSource ? WORKFLOW_INPUT_NONE : (binding.source || 'custom')}
             onChange={event => data.onDraftInputSourceChange?.(data.id, parameter, event.target.value)}
           >
             {compatibleSources.map(source => (
@@ -233,11 +226,14 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                 {`${getConnectorTypeMeta(source.type).letter} · ${source.label}`}
               </option>
             ))}
-            <option value="custom">Custom value</option>
+            {!isConnectorOnly && <option value="custom">Custom value</option>}
+            {isFileValueType && <option value={WORKFLOW_INPUT_NONE}>{WORKFLOW_INPUT_NONE_LABEL}</option>}
           </select>
         )}
 
-        {selectedSource ? (
+        {isNoneSource ? (
+          <div className="graph-node__linked-input font-label">{WORKFLOW_INPUT_NONE_HINT}</div>
+        ) : selectedSource ? (
           <div className="graph-node__linked-input font-label">
             {`Using ${getConnectorTypeMeta(selectedSource.type).label} input · ${selectedSource.label}`}
           </div>

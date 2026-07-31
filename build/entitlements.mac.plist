@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the *signed* macOS build (used only when a
+  Developer ID certificate is present; see electron-builder.yml → mac).
+
+  Hardened runtime is required for notarization, but its defaults break this
+  app, which is why each of these is here:
+
+  - allow-jit / allow-unsigned-executable-memory
+      V8 (Chromium renderer + the Node backend running under
+      ELECTRON_RUN_AS_NODE) needs writable-executable memory.
+  - disable-library-validation
+      The bundle loads the sqlite3 native module, and the app spawns Python
+      interpreters/venvs provisioned into the user's data dir at first run.
+      None of those are signed by our team ID; library validation would refuse
+      to load them.
+  - allow-dyld-environment-variables
+      The backend and the Python services are launched with a modified
+      environment; keeps dyld from stripping it under hardened runtime.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

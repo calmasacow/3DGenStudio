@@ -83,6 +83,7 @@ import {
   getWorkflowFileInputAccept,
   getWorkflowParameterBinding,
   getWorkflowParameterValueType,
+  isConnectorOnlyWorkflowValueType,
   isFileWorkflowValueType,
   isHitemMeshGenerationApi,
   isTencentMeshGenerationApi,
@@ -101,6 +102,11 @@ import GraphDeleteEdge from '../components/graph/GraphDeleteEdge'
 import GraphImageCompareNode from '../components/graph/GraphImageCompareNode'
 import GraphValueNode from '../components/graph/GraphValueNode'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
+import {
+  WORKFLOW_INPUT_NONE,
+  isWorkflowInputNone,
+  isWorkflowInputNoneValue
+} from '../utils/workflowFileInputs'
 
 const flowNodeTypes = {
   image: GraphAssetNode,
@@ -1569,8 +1575,12 @@ export default function GraphPage({ project }) {
             // an edit of that image instead of as a brand-new asset — but only when
             // the workflow exposes an image input to receive it. A pure text-to-image
             // workflow can't edit the attached image, so it falls back to generation.
+            // An image input bound to "None" receives nothing, so it doesn't count.
             const connectedInputAsset = getConnectedInputAssetFrom(nodes, edges, targetNodeId)
-            const workflowAcceptsImageInput = (workflow.parameters || []).some(parameter => getWorkflowParameterValueType(parameter) === 'image')
+            const workflowAcceptsImageInput = (workflow.parameters || []).some(parameter => (
+              getWorkflowParameterValueType(parameter) === 'image'
+              && !isWorkflowInputNoneValue(inputValues[parameter.id])
+            ))
             const saveAsEdit = Boolean(connectedInputAsset && workflowAcceptsImageInput)
             const promptId = createComfyExecutionId('graph-image-prompt')
             const clientId = createComfyExecutionId('graph-image-client')
@@ -3054,10 +3064,16 @@ export default function GraphPage({ project }) {
               const currentSource = currentBinding.source || 'custom'
               let nextSource = currentSource
 
-              if (currentSource !== 'custom' && !resolveSelectedInputSource(currentSource, compatibleSources)) {
+              // Re-point a binding whose connected input is gone. "None" and "custom"
+              // are deliberate choices, not stale wiring, so they are left alone —
+              // this effect also runs on every node/edge change (selecting a node
+              // counts), which would otherwise undo the user's pick immediately.
+              if (currentSource !== 'custom'
+                && !isWorkflowInputNone(currentSource)
+                && !resolveSelectedInputSource(currentSource, compatibleSources)) {
                 nextSource = compatibleSources[0]
                   ? getInputSourceSelectionValue(compatibleSources[0])
-                  : 'custom'
+                  : (isConnectorOnlyWorkflowValueType(valueType) ? WORKFLOW_INPUT_NONE : 'custom')
               }
 
               if (nextSource !== currentSource) {

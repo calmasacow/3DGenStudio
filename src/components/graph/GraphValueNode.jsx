@@ -11,10 +11,17 @@ import {
   getInputSourceSelectionValue,
   getWorkflowParameterBinding,
   getWorkflowParameterValueType,
+  isConnectorOnlyWorkflowValueType,
   isFileWorkflowValueType,
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
 import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../../utils/workflowEnums'
+import {
+  WORKFLOW_INPUT_NONE,
+  WORKFLOW_INPUT_NONE_HINT,
+  WORKFLOW_INPUT_NONE_LABEL,
+  isWorkflowInputNone
+} from '../../utils/workflowFileInputs'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import LastActionInfo from './LastActionInfo'
 
@@ -54,9 +61,17 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
     const compatibleSources = getCompatibleInputSources(inputSources, valueType)
     const binding = getWorkflowParameterBinding(draft, parameter)
     const selectedSource = resolveSelectedInputSource(binding.source, compatibleSources)
+    // Image / mesh / video parameters can be left unset ("None"), so their source
+    // dropdown is offered even when no connected node could feed them. Image and
+    // mesh inputs offer nothing else: a connected input, or None.
+    const isFileValueType = isFileWorkflowValueType(valueType)
+    const isConnectorOnly = isConnectorOnlyWorkflowValueType(valueType)
+    const isNoneSource = isConnectorOnly
+      ? !selectedSource
+      : (isFileValueType && isWorkflowInputNone(binding.source))
 
     const renderCustomValueField = () => {
-      if (isFileWorkflowValueType(valueType)) {
+      if (isFileValueType) {
         return (
           <div className="graph-node__linked-input font-label">
             {`Connect a ${valueType} input to provide this value.`}
@@ -121,10 +136,10 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
 
     return (
       <>
-        {compatibleSources.length > 0 && (
+        {(compatibleSources.length > 0 || isFileValueType) && (
           <select
             className="params-card__select nodrag"
-            value={binding.source || 'custom'}
+            value={isNoneSource ? WORKFLOW_INPUT_NONE : (binding.source || 'custom')}
             onChange={event => data.onDraftInputSourceChange?.(data.id, parameter, event.target.value)}
           >
             {compatibleSources.map(source => (
@@ -132,11 +147,14 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
                 {`${getConnectorTypeMeta(source.type).letter} · ${source.label}`}
               </option>
             ))}
-            <option value="custom">Custom value</option>
+            {!isConnectorOnly && <option value="custom">Custom value</option>}
+            {isFileValueType && <option value={WORKFLOW_INPUT_NONE}>{WORKFLOW_INPUT_NONE_LABEL}</option>}
           </select>
         )}
 
-        {selectedSource ? (
+        {isNoneSource ? (
+          <div className="graph-node__linked-input font-label">{WORKFLOW_INPUT_NONE_HINT}</div>
+        ) : selectedSource ? (
           <div className="graph-node__linked-input font-label">
             {`Using ${getConnectorTypeMeta(selectedSource.type).label} input · ${selectedSource.label}`}
           </div>

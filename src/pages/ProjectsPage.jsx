@@ -24,6 +24,15 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.2.1',
+    date: '2026-07-31',
+    items: [
+			'Desktop App: Install ComfyUI',
+			'ImageEditor: Fixed alpha transparency',
+			'MultiView support with Trellis2'
+    ],
+  },
+  {
     version: 'v2.1.2',
     date: '2026-07-28',
     items: [

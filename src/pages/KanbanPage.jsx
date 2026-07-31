@@ -56,6 +56,14 @@ import {
 } from '../utils/kanbanHelpers'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
 import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../utils/workflowEnums'
+import {
+  WORKFLOW_INPUT_NONE,
+  WORKFLOW_INPUT_NONE_HINT,
+  WORKFLOW_INPUT_NONE_LABEL,
+  createWorkflowInputNoneValue,
+  isWorkflowInputNone,
+  isWorkflowInputNoneValue
+} from '../utils/workflowFileInputs'
 
 // Database id of the "Mesh Gen" kanban column (see IMAGE_CARD_COLUMNS).
 const MESH_GEN_COLUMN_ID = 3
@@ -540,6 +548,8 @@ export default function KanbanPage() {
         const valueType = getWorkflowParameterValueType(parameter)
         const currentValue = draft.inputs?.[parameter.id]
 
+        // A file input set to "None" carries the marker instead of a File, which is
+        // a value like any other here — only a genuinely empty one blocks the run.
         if (['image', 'video'].includes(valueType) && !currentValue) {
           showStatusMessage(`Select a ${valueType} file for ${parameter.name}.`, 'error')
           return
@@ -1170,6 +1180,8 @@ export default function KanbanPage() {
         const valueType = getWorkflowParameterValueType(parameter)
         const currentValue = draft.inputs?.[parameter.id]
 
+        // A file input set to "None" carries the marker instead of a File, which is
+        // a value like any other here — only a genuinely empty one blocks the run.
         if (['image', 'video', 'mesh'].includes(valueType) && !currentValue) {
           showStatusMessage(`Select a ${valueType} file for ${parameter.name}.`, 'error')
           return
@@ -1773,7 +1785,9 @@ export default function KanbanPage() {
       const valueType = getWorkflowParameterValueType(parameter)
 
       if (['image', 'mesh'].includes(valueType)) {
-        const defaultSource = getCardFileSourceGroups(card, valueType)[0]?.options?.[0]?.value || ''
+        // With no asset of that type on the card there is nothing to preselect, so
+        // the parameter starts on "None" — the one source that is always valid.
+        const defaultSource = getCardFileSourceGroups(card, valueType)[0]?.options?.[0]?.value || WORKFLOW_INPUT_NONE
         return [parameter.id, {
           source: defaultSource,
           customValue: ''
@@ -1801,7 +1815,7 @@ export default function KanbanPage() {
     const valueType = getWorkflowParameterValueType(parameter)
 
     return draft?.inputBindings?.[parameter.id] || {
-      source: isFileWorkflowValueType(valueType) ? '' : 'custom',
+      source: isFileWorkflowValueType(valueType) ? WORKFLOW_INPUT_NONE : 'custom',
       customValue: valueType === 'boolean' ? false : ''
     }
   }
@@ -2496,6 +2510,13 @@ export default function KanbanPage() {
           const resolvedValue = resolveImageEditParameterValue(card, imageEditDraft, parameter)
 
           if (isFileWorkflowValueType(valueType)) {
+            // "None": nothing is sent for this input, so there is no source asset to
+            // resolve and no candidate parent for the result either.
+            if (isWorkflowInputNone(resolvedValue)) {
+              inputValues[parameter.id] = createWorkflowInputNoneValue()
+              continue
+            }
+
             if (!resolvedValue) {
               showStatusMessage(`Select a ${valueType} for ${parameter.name}.`, 'error')
               return
@@ -3199,19 +3220,33 @@ export default function KanbanPage() {
                                 </label>
 
                                 {isFileWorkflowValueType(getWorkflowParameterValueType(parameter)) ? (
-                                  <label className="image-card__file-input">
-                                    <input
-                                      type="file"
-                                      accept={getWorkflowFileInputAccept(getWorkflowParameterValueType(parameter))}
-                                      onChange={e => handleComfyInputChange(parameter, e.target.files?.[0] || null)}
-                                    />
-                                    <span className="material-symbols-outlined">
-                                      {getWorkflowFileInputIcon(getWorkflowParameterValueType(parameter))}
-                                    </span>
-                                    <span>
-                                      {imageDraft.inputs?.[parameter.id]?.name || `Select ${getWorkflowParameterValueType(parameter)} file`}
-                                    </span>
-                                  </label>
+                                  <>
+                                    <select
+                                      className="params-card__select"
+                                      value={isWorkflowInputNoneValue(imageDraft.inputs?.[parameter.id]) ? WORKFLOW_INPUT_NONE : 'file'}
+                                      onChange={e => handleComfyInputChange(parameter, e.target.value === WORKFLOW_INPUT_NONE ? createWorkflowInputNoneValue() : null)}
+                                    >
+                                      <option value="file">From computer</option>
+                                      <option value={WORKFLOW_INPUT_NONE}>{WORKFLOW_INPUT_NONE_LABEL}</option>
+                                    </select>
+                                    {isWorkflowInputNoneValue(imageDraft.inputs?.[parameter.id]) ? (
+                                      <span className="image-card__param-hint">{WORKFLOW_INPUT_NONE_HINT}</span>
+                                    ) : (
+                                      <label className="image-card__file-input">
+                                        <input
+                                          type="file"
+                                          accept={getWorkflowFileInputAccept(getWorkflowParameterValueType(parameter))}
+                                          onChange={e => handleComfyInputChange(parameter, e.target.files?.[0] || null)}
+                                        />
+                                        <span className="material-symbols-outlined">
+                                          {getWorkflowFileInputIcon(getWorkflowParameterValueType(parameter))}
+                                        </span>
+                                        <span>
+                                          {imageDraft.inputs?.[parameter.id]?.name || `Select ${getWorkflowParameterValueType(parameter)} file`}
+                                        </span>
+                                      </label>
+                                    )}
+                                  </>
                                 ) : getWorkflowParameterValueType(parameter) === 'boolean' ? (
                                   <label className="params-card__checkbox-label">
                                     <div className={`params-card__checkbox ${imageDraft.inputs?.[parameter.id] ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`} onClick={() => handleComfyInputChange(parameter, !(imageDraft.inputs?.[parameter.id]))}>
@@ -3443,19 +3478,33 @@ export default function KanbanPage() {
                                 </label>
 
                                 {isFileWorkflowValueType(getWorkflowParameterValueType(parameter)) ? (
-                                  <label className="image-card__file-input">
-                                    <input
-                                      type="file"
-                                      accept={getWorkflowFileInputAccept(getWorkflowParameterValueType(parameter))}
-                                      onChange={e => handleMeshComfyInputChange(parameter, e.target.files?.[0] || null)}
-                                    />
-                                    <span className="material-symbols-outlined">
-                                      {getWorkflowFileInputIcon(getWorkflowParameterValueType(parameter))}
-                                    </span>
-                                    <span>
-                                      {meshDraft.inputs?.[parameter.id]?.name || `Select ${getWorkflowParameterValueType(parameter)} file`}
-                                    </span>
-                                  </label>
+                                  <>
+                                    <select
+                                      className="params-card__select"
+                                      value={isWorkflowInputNoneValue(meshDraft.inputs?.[parameter.id]) ? WORKFLOW_INPUT_NONE : 'file'}
+                                      onChange={e => handleMeshComfyInputChange(parameter, e.target.value === WORKFLOW_INPUT_NONE ? createWorkflowInputNoneValue() : null)}
+                                    >
+                                      <option value="file">From computer</option>
+                                      <option value={WORKFLOW_INPUT_NONE}>{WORKFLOW_INPUT_NONE_LABEL}</option>
+                                    </select>
+                                    {isWorkflowInputNoneValue(meshDraft.inputs?.[parameter.id]) ? (
+                                      <span className="image-card__param-hint">{WORKFLOW_INPUT_NONE_HINT}</span>
+                                    ) : (
+                                      <label className="image-card__file-input">
+                                        <input
+                                          type="file"
+                                          accept={getWorkflowFileInputAccept(getWorkflowParameterValueType(parameter))}
+                                          onChange={e => handleMeshComfyInputChange(parameter, e.target.files?.[0] || null)}
+                                        />
+                                        <span className="material-symbols-outlined">
+                                          {getWorkflowFileInputIcon(getWorkflowParameterValueType(parameter))}
+                                        </span>
+                                        <span>
+                                          {meshDraft.inputs?.[parameter.id]?.name || `Select ${getWorkflowParameterValueType(parameter)} file`}
+                                        </span>
+                                      </label>
+                                    )}
+                                  </>
                                 ) : getWorkflowParameterValueType(parameter) === 'boolean' ? (
                                   <label className="params-card__checkbox-label">
                                     <div className={`params-card__checkbox ${meshDraft.inputs?.[parameter.id] ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`} onClick={() => handleMeshComfyInputChange(parameter, !(meshDraft.inputs?.[parameter.id]))}>
