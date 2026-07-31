@@ -1,0 +1,124 @@
+{
+  "1": {
+    "inputs": {
+      "front": "",
+      "preprocess": true,
+      "padding": 5,
+      "remove_background": false,
+      "max_size": 1024,
+      "back": "",
+      "left": "",
+      "right": ""
+    },
+    "class_type": "Trellis2SelectImagesForMultiView",
+    "_meta": {
+      "title": "Trellis2 - Select Images For MultiView"
+    }
+  },
+  "2": {
+    "inputs": {
+      "modelname": "microsoft/TRELLIS.2-4B",
+      "backend": "flash_attn",
+      "device": "cuda",
+      "low_vram": true,
+      "keep_models_loaded": false,
+      "conv_backend": "flex_gemm",
+      "sparse_backend": "flash_attn",
+      "use_reconviagen": false
+    },
+    "class_type": "Trellis2LoadModel",
+    "_meta": {
+      "title": "Trellis2 - LoadModel"
+    }
+  },
+  "16": {
+    "inputs": {
+      "seed": 12345,
+      "texture_steps": 12,
+      "texture_guidance_strength": 1,
+      "texture_guidance_rescale": 0.5,
+      "texture_rescale_t": 3,
+      "resolution": 1024,
+      "texture_size": 2048,
+      "texture_alpha_mode": "OPAQUE",
+      "double_side_material": false,
+      "texture_guidance_interval_start": 0.6,
+      "texture_guidance_interval_end": 0.9,
+      "bake_on_vertices": false,
+      "use_custom_normals": false,
+      "mesh_cluster_threshold_cone_half_angle_rad": 60,
+      "front_axis": "z",
+      "blend_temperature": 1,
+      "sampler": "euler",
+      "inpainting": "telea",
+      "verbose": false,
+      "dino_lock": 0,
+      "dino_substeps": 4,
+      "dino_foundation_cap": 0.92,
+      "pipeline": [
+        "2",
+        0
+      ],
+      "front_image": [
+        "1",
+        0
+      ],
+      "trimesh": [
+        "17",
+        0
+      ],
+      "back_image": [
+        "1",
+        1
+      ],
+      "left_image": [
+        "1",
+        2
+      ],
+      "right_image": [
+        "1",
+        3
+      ]
+    },
+    "class_type": "Trellis2MeshTexturingMultiView",
+    "_meta": {
+      "title": "Trellis2 - Mesh Texturing Multi-View"
+    }
+  },
+  "17": {
+    "inputs": {
+      "glb_path": ""
+    },
+    "class_type": "Trellis2LoadMesh",
+    "_meta": {
+      "title": "Trellis2 - Load Mesh"
+    }
+  },
+  "18": {
+    "inputs": {
+      "filename_prefix": "3DGenStudioMVTextured",
+      "file_format": "glb",
+      "trimesh": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "Trellis2ExportMesh",
+    "_meta": {
+      "title": "Trellis2 - Export Mesh"
+    }
+  },
+  "19": {
+    "inputs": {
+      "model_file": [
+        "18",
+        0
+      ],
+      "image": ""
+    },
+    "class_type": "Preview3D",
+    "_meta": {
+      "title": "Preview 3D & Animation"
+    }
+  }
+}

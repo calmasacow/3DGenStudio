@@ -34,6 +34,7 @@ import ComfyUIFullControls from '../components/imageEditor/controls/ComfyUIFullC
 import ComfyUIMaskControls from '../components/imageEditor/controls/ComfyUIMaskControls'
 import useImageEditorHistory from '../hooks/useImageEditorHistory'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
+import { createWorkflowInputNoneValue } from '../utils/workflowFileInputs'
 import './ImageEditorPage.css'
 
 const DEFAULT_ADJUST_VALUES = { blackPoint: 0, whitePoint: 255, contrast: 0, saturation: 0 }
@@ -1096,6 +1097,8 @@ export default function ImageEditorPage() {
             continue
           }
 
+          // "- Not used -": the parameter keeps the workflow's own saved value.
+          inputs[parameter.id] = createWorkflowInputNoneValue()
           continue
         }
 
@@ -1259,7 +1262,9 @@ export default function ImageEditorPage() {
             continue
           }
 
-          // 'mask' or 'none' have no meaning when working on the whole image
+          // 'mask' or 'none' have no meaning when working on the whole image, so the
+          // parameter is sent as "not used" and keeps the workflow's own value.
+          inputs[parameter.id] = createWorkflowInputNoneValue()
           continue
         }
 

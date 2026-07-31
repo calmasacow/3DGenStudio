@@ -1436,8 +1436,16 @@ function createComfyExecutionMonitor(baseUrl, { clientId, promptId, workflowJson
   };
 }
 
+// A file (image / video / mesh) parameter the app explicitly bound to "None":
+// nothing is uploaded for it and the value stored in the workflow JSON is kept.
+// The marker is required rather than an omitted key, so a file parameter left
+// unset by mistake (e.g. from an MCP call) still fails loudly.
+function isComfyNoneInput(value) {
+  return isPlainObject(value) && value.__none === true;
+}
+
 function coerceComfyParameterValue(parameter, providedValue) {
-  if (providedValue === undefined) return cloneSerializable(parameter.defaultValue);
+  if (providedValue === undefined || isComfyNoneInput(providedValue)) return cloneSerializable(parameter.defaultValue);
 
   switch (parameter.type) {
     case 'number': {
@@ -3656,6 +3664,13 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
 
       if (uploadedFile) {
         resolvedInputs[parameter.id] = await uploadComfyInputFile(baseUrl, uploadedFile);
+        continue;
+      }
+
+      // "None": upload nothing and resolve no source asset, so the input keeps the
+      // value baked into the saved workflow JSON.
+      if (isComfyNoneInput(fileMarker)) {
+        delete resolvedInputs[parameter.id];
         continue;
       }
 
@@ -7124,6 +7139,12 @@ app.post('/api/image-edits/comfy', async (req, res) => {
       const providedValue = rawInputValues?.[parameter.id];
 
       if (valueType === 'image') {
+        // "None": upload nothing and reference no asset, so the input keeps the
+        // value baked into the saved workflow JSON.
+        if (isComfyNoneInput(providedValue)) {
+          continue;
+        }
+
         const sourceReference = isPlainObject(providedValue)
           ? (providedValue.source || providedValue.filePath || providedValue.assetId)
           : providedValue;
