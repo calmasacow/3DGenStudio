@@ -1532,10 +1532,14 @@ export function buildAssetUrl(asset) {
     return rawPath
   }
 
+  // Accept every shape a path can arrive in: a stored filePath ("data/assets/images/x.png"),
+  // a served filename ("images/x.png"), or a rooted url ("/assets/images/x.png") straight off
+  // asset.url. assetUrl() re-adds the /assets/ mount, so any leading slash must go too —
+  // otherwise we'd emit /assets//assets/... and 404.
   const normalizedPath = String(rawPath)
     .replace(/\\/g, '/')
-    .replace(/^data\/assets\//, '')
-    .replace(/^assets\//, '')
+    .replace(/^\/?(?:data\/)?assets\//, '')
+    .replace(/^\/+/, '')
 
   return assetUrl(normalizedPath)
 }
