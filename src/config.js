@@ -5,6 +5,13 @@
 //   VITE_SERVER_ORIGIN=http://192.168.1.50:3001
 // An empty string ("") forces same-origin (relative) URLs.
 //
+// LEAVE IT UNSET FOR PRODUCTION BUILDS, including LAN servers. It is tempting
+// to set it to the server's address, but the value is baked into dist/ at build
+// time — the bundle then only works from that exact host/port and breaks the
+// moment a reverse proxy, a different port or a hostname is put in front. The
+// backend serves dist/ and the API together, so same-origin always works.
+// (Deployment-side counterpart: PUBLIC_BASE_URL / X-Forwarded-* in server.js.)
+//
 // When unset, the default depends on the build:
 //  - production build (vite build): same origin ("") — Express serves dist/ and
 //    the API together, so relative /api and /assets URLs just work.

@@ -125,12 +125,70 @@ process.on('unhandledRejection', reason => {
   console.error('Unhandled promise rejection (server kept alive):', reason);
 });
 
+// Explicit override for the externally-reachable base URL. Set this when the
+// app sits behind a proxy that rewrites or drops the original host/port, e.g.
+//   PUBLIC_BASE_URL=https://studio.example.com:4443
+// When unset the base URL is derived per request (see getRequestBaseUrl).
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+// Forwarded headers are honoured by default (a proxy sets them deliberately).
+// Set TRUST_PROXY_HEADERS=0 to ignore them and use the raw connection instead.
+const TRUST_PROXY_HEADERS = !/^(0|false|no)$/i.test(String(process.env.TRUST_PROXY_HEADERS ?? '1').trim());
+// host[:port] only — keeps a spoofed header from injecting anything else into
+// the URLs we hand back to the client.
+const SAFE_HOST_PATTERN = /^[A-Za-z0-9._-]+(:\d{1,5})?$/;
+const DEFAULT_PORTS = { http: '80', https: '443' };
+// Remember which base URLs we have already logged so a misconfigured proxy is
+// obvious in the console without spamming a line per request.
+const loggedBaseUrls = new Set();
+
+// A forwarded header may carry a comma-separated list (proxy chain); the first
+// entry is the value the original client saw.
+function firstForwardedValue(req, header) {
+  const raw = req.get(header);
+  if (!raw) return '';
+  return String(raw).split(',')[0].trim();
+}
+
 // Build the externally-reachable base URL ("http://host:port") from the
 // incoming request so generated asset/media URLs point back at whatever host
 // and port the client actually used to reach us — works on another machine or
 // another port without baking "localhost" into responses.
+//
+// Behind a reverse proxy the connection itself only knows about the internal
+// hop, so X-Forwarded-Proto/Host/Port win when present. This matters because
+// the widespread `proxy_set_header Host $host;` drops the port: without the
+// forwarded headers we would emit https://example.com/assets/... for a proxy
+// listening on :4443, and every image would silently load from the wrong port.
 function getRequestBaseUrl(req) {
-  return `${req.protocol}://${req.get('host')}`;
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+
+  let protocol = req.protocol;
+  let host = req.get('host') || `localhost:${PORT}`;
+
+  if (TRUST_PROXY_HEADERS) {
+    const forwardedProto = firstForwardedValue(req, 'x-forwarded-proto').toLowerCase();
+    if (forwardedProto === 'http' || forwardedProto === 'https') protocol = forwardedProto;
+
+    const forwardedHost = firstForwardedValue(req, 'x-forwarded-host');
+    if (SAFE_HOST_PATTERN.test(forwardedHost)) host = forwardedHost;
+
+    // Re-attach the public port when the forwarded host lost it (`$host`) and
+    // the proxy told us which port it actually listens on (`$server_port`).
+    if (!host.includes(':')) {
+      const forwardedPort = firstForwardedValue(req, 'x-forwarded-port');
+      if (/^\d{1,5}$/.test(forwardedPort) && forwardedPort !== DEFAULT_PORTS[protocol]) {
+        host = `${host}:${forwardedPort}`;
+      }
+    }
+  }
+
+  const baseUrl = `${protocol}://${host}`;
+  if (!loggedBaseUrls.has(baseUrl)) {
+    loggedBaseUrls.add(baseUrl);
+    console.log(`🌐 Resolved external base URL for generated asset URLs: ${baseUrl}`);
+    console.log('   (wrong host or port? set PUBLIC_BASE_URL, or forward X-Forwarded-Host/-Proto/-Port from your proxy)');
+  }
+  return baseUrl;
 }
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']);
 const MESH_EXTENSIONS = new Set(['.glb', '.gltf', '.obj', '.fbx', '.stl', '.ply']);
@@ -8313,6 +8371,11 @@ initializeStorage().then(async () => {
   app.listen(PORT, () => {
     console.log(`🚀 3D Gen Studio Backend running at http://localhost:${PORT}`);
     console.log(`📁 Local Workspace: ${DATA_DIR}`);
+    if (PUBLIC_BASE_URL) {
+      console.log(`🌐 External base URL pinned by PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}`);
+    } else {
+      console.log(`🌐 External base URL: derived per request${TRUST_PROXY_HEADERS ? ' (X-Forwarded-Proto/Host/Port honoured)' : ' (forwarded headers ignored — TRUST_PROXY_HEADERS=0)'} — logged on the first request`);
+    }
     if (HAS_DIST) {
       console.log(`🖥️  Serving bundled UI from dist/ — open http://localhost:${PORT}`);
     } else {

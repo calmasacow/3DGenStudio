@@ -234,6 +234,41 @@ Open the application and configure your services in the settings area:
 - External API credentials
 - Optional custom endpoints
 
+### Serving over a LAN or a reverse proxy
+
+Build once (`npm run build`) and run `npm start` — the backend serves the UI and
+the API from the same origin, so it works from any host or port without a
+rebuild.
+
+> [!IMPORTANT]
+> Leave `VITE_SERVER_ORIGIN` **unset** for production builds, LAN servers
+> included. It is baked into `dist/` at build time, which pins the bundle to one
+> host/port and breaks as soon as a proxy or a different address is used.
+
+Behind a reverse proxy, the app needs to know the address **clients** use, since
+generated image and mesh URLs are absolute. Either forward the standard headers:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3001;
+    proxy_set_header Host              $http_host;   # $http_host keeps the port, $host drops it
+    proxy_set_header X-Forwarded-Host  $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port  $server_port;
+}
+```
+
+…or pin the public address explicitly, which overrides everything above:
+
+```bash
+PUBLIC_BASE_URL=https://studio.example.com:4443 npm start
+```
+
+The resolved external base URL is printed on the first request — if the host,
+scheme or port in that line is not what clients use, images will load blank
+while the API keeps working. Set `TRUST_PROXY_HEADERS=0` to ignore forwarded
+headers when the server is exposed directly.
+
 ---
 
 ## 💻 Tech Stack
