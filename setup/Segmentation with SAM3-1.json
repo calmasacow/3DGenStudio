@@ -8,10 +8,10 @@
       "title": "Load Image"
     }
   },
-  "166": {
+  "180": {
     "inputs": {
       "mask": [
-        "174",
+        "164:75",
         0
       ]
     },
@@ -20,110 +20,42 @@
       "title": "Invert Mask"
     }
   },
-  "167": {
+  "181": {
     "inputs": {
-      "x": 0,
-      "y": 0,
-      "offset_x": 0,
-      "offset_y": 0,
-      "destination": [
+      "image": [
         "163",
         0
       ],
-      "source": [
-        "169",
-        0
-      ],
-      "mask": [
-        "166",
+      "alpha": [
+        "180",
         0
       ]
     },
-    "class_type": "ImageComposite+",
+    "class_type": "JoinImageWithAlpha",
     "_meta": {
-      "title": "🔧 Image Composite"
+      "title": "Join Image with Alpha"
     }
   },
-  "168": {
+  "251": {
     "inputs": {
-      "value": 0,
-      "width": 1024,
-      "height": 1024
-    },
-    "class_type": "SolidMask",
-    "_meta": {
-      "title": "Create Solid Mask"
-    }
-  },
-  "169": {
-    "inputs": {
-      "mask": [
-        "168",
-        0
-      ]
-    },
-    "class_type": "MaskToImage",
-    "_meta": {
-      "title": "Convert Mask to Image"
-    }
-  },
-  "171": {
-    "inputs": {
+      "padding": 0,
+      "remove_background": false,
+      "max_size": 2048,
       "image": [
-        "167",
+        "181",
         0
       ]
     },
-    "class_type": "ImageListToBatch+",
+    "class_type": "VisualBrunoToolsCropImageAlpha",
     "_meta": {
-      "title": "🔧 Image List To Batch"
+      "title": "Image - Crop Image with Alpha"
     }
   },
-  "172": {
+  "253": {
     "inputs": {
-      "image": [
-        "173",
-        0
-      ]
-    },
-    "class_type": "ImageBatchToList+",
-    "_meta": {
-      "title": "🔧 Image Batch To List"
-    }
-  },
-  "173": {
-    "inputs": {
-      "mask": [
-        "164:75",
-        0
-      ]
-    },
-    "class_type": "MaskToImage",
-    "_meta": {
-      "title": "Convert Mask to Image"
-    }
-  },
-  "174": {
-    "inputs": {
-      "red": 255,
-      "green": 255,
-      "blue": 255,
-      "threshold": 0,
-      "image": [
-        "172",
-        0
-      ]
-    },
-    "class_type": "MaskFromColor+",
-    "_meta": {
-      "title": "🔧 Mask From Color"
-    }
-  },
-  "175": {
-    "inputs": {
-      "filename_prefix": "Parts",
+      "filename_prefix": "3DGenStudioParts",
       "images": [
-        "176",
+        "251",
         0
       ]
     },
@@ -132,30 +64,18 @@
       "title": "Save Image"
     }
   },
-  "176": {
+  "164:77": {
     "inputs": {
-      "model": "RMBG-2.0",
-      "sensitivity": 1,
-      "process_res": 1024,
-      "mask_blur": 0,
-      "mask_offset": 0,
-      "invert_output": false,
-      "refine_foreground": true,
-      "background": "Alpha",
-      "background_color": "#222222",
-      "image": [
-        "171",
-        0
-      ]
+      "ckpt_name": "sam3.1_multiplex_fp16.safetensors"
     },
-    "class_type": "RMBG",
+    "class_type": "CheckpointLoaderSimple",
     "_meta": {
-      "title": "Remove Background (RMBG)"
+      "title": "Load Checkpoint"
     }
   },
   "164:78": {
     "inputs": {
-      "text": "gloves, red vest, short pants, boots, necklace, white t-shirt",
+      "text": "",
       "clip": [
         "164:77",
         1
@@ -187,15 +107,6 @@
     "class_type": "SAM3_Detect",
     "_meta": {
       "title": "SAM3 Detect"
-    }
-  },
-  "164:77": {
-    "inputs": {
-      "ckpt_name": "sam3.1_multiplex_fp16.safetensors"
-    },
-    "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Load Checkpoint"
     }
   }
 }

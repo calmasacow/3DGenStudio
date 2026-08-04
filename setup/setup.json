@@ -653,7 +653,7 @@
 				{ "Node": "164:78", "Input": "text",  "Name": "Prompt", "Type": "String" }
 			],
 			"Outputs": [
-				{ "Node": "175", "Name": "Save Images", "Type": "Image" }
+				{ "Node": "253", "Name": "Save Images", "Type": "Image" }
 			]
 		},
 		{
