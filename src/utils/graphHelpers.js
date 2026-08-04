@@ -787,13 +787,7 @@ export function formatWorkflowDefaultValue(value) {
   return String(value)
 }
 
-export function createComfyExecutionId(prefix = 'comfy') {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1E9)}`
-}
+export { createComfyExecutionId } from './ids'
 
 export function getAssetSourceReference(asset) {
   if (!asset?.id) {

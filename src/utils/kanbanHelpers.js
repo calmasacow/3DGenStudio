@@ -1,6 +1,7 @@
 // Pure helpers and config constants for the Kanban board page (KanbanPage).
 // Extracted from KanbanPage.jsx — no React, no component state.
 import { assetUrl } from '../config'
+import { createUuid } from './ids'
 
 export const IMAGE_API_LIST = [
   { id: 'nanobana', name: 'Nanobana' },
@@ -179,20 +180,10 @@ export function getAssetChildren(asset) {
 }
 
 export function createImageCardId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `image-card-${Date.now()}-${Math.round(Math.random() * 1E9)}`
+  return createUuid()
 }
 
-export function createComfyExecutionId(prefix = 'comfy') {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1E9)}`
-}
+export { createComfyExecutionId } from './ids'
 
 export function buildMeshEditorPath(asset, projectId, returnTo) {
   const query = new URLSearchParams({

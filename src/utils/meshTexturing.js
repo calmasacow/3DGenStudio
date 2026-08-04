@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { assetUrl } from '../config'
+import { createComfyExecutionId } from './ids'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -1587,12 +1588,8 @@ export function getDefaultTextureWorkflowParameterIds(workflow) {
   }
 }
 
-export function createExecutionId(prefix = 'mesh-texture') {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e9)}`
+export function createExecutionId() {
+  return createComfyExecutionId()
 }
 
 export function getTextureKeyFromMaterial(material) {

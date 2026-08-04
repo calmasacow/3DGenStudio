@@ -1545,9 +1545,18 @@ async function sleep(ms) {
   return await new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function queueComfyPrompt(baseUrl, workflowJson, identifiers = {}) {
   const clientId = String(identifiers?.clientId || '').trim() || randomUUID();
   const promptId = String(identifiers?.promptId || '').trim() || randomUUID();
+
+  // ComfyUI rejects a non-UUID prompt_id. The id is not rewritten here because the client
+  // subscribes to progress under the id it sent, so substituting one would strand that listener.
+  if (!UUID_PATTERN.test(promptId)) {
+    console.warn(`Client supplied a non-UUID promptId (${promptId}); ComfyUI will likely reject it.`);
+  }
+
   const response = await fetch(`${baseUrl}/prompt`, {
     method: 'POST',
     headers: {

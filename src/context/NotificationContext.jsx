@@ -1,15 +1,12 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import { createUuid } from '../utils/ids'
 
 const NotificationContext = createContext(null)
 const MAX_NOTIFICATIONS = 30
 
 function createNotificationId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-
-  return `app-notification-${Date.now()}-${Math.round(Math.random() * 1e9)}`
+  return createUuid()
 }
 
 function normalizeTone(tone) {
