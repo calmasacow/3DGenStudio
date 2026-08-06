@@ -184,6 +184,26 @@
   font-family: var(--font-label);
 }
 
+/* Shown instead of the quality dropdown for packs with no quality variants. */
+.setup-wizard__model-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--on-surface-variant);
+  padding: 0.625rem 0.75rem;
+  border: 1px solid rgba(71, 72, 74, 0.18);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.setup-wizard__model-toggle input[type="checkbox"] {
+  accent-color: var(--primary);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
 .setup-wizard__summary {
   display: flex;
   align-items: center;

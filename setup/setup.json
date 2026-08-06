@@ -5,12 +5,13 @@
 		"TextEncoder": "models/text_encoders",
 		"LoRA": "models/loras",
 		"ControlNet": "models/controlnet",
-		"UpscaleModels": "models/upscale_models"
+		"UpscaleModels": "models/upscale_models",
+		"Checkpoints": "models/checkpoints"
 	},
-	"DiffusionModels": [
+	"Models": [
 		{
 			"Name": "Qwen Image Edit 2511",
-			"Models": {
+			"DiffusionModels": {
 				"F16":  { "FileName": "qwen-image-edit-2511-F16.gguf",    "Url": "https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-F16.gguf?download=true",    "Size": 40.9 },
 				"BF16": { "FileName": "qwen-image-edit-2511-BF16.gguf",   "Url": "https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-BF16.gguf?download=true",   "Size": 40.9 },
 				"Q8":   { "FileName": "qwen-image-edit-2511-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q8_0.gguf?download=true",   "Size": 21.8 },
@@ -156,7 +157,7 @@
 		},
 		{
 			"Name": "Qwen Image 2512",
-			"Models": {
+			"DiffusionModels": {
 				"F16":  { "FileName": "qwen-image-2512-F16.gguf",    "Url": "https://huggingface.co/unsloth/Qwen-Image-2512-GGUF/resolve/main/qwen-image-2512-F16.gguf?download=true",    "Size": 40.9 },
 				"BF16": { "FileName": "qwen-image-2512-BF16.gguf",   "Url": "https://huggingface.co/unsloth/Qwen-Image-2512-GGUF/resolve/main/qwen-image-2512-BF16.gguf?download=true",   "Size": 40.9 },
 				"Q8":   { "FileName": "qwen-image-2512-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/Qwen-Image-2512-GGUF/resolve/main/qwen-image-2512-Q8_0.gguf?download=true",   "Size": 21.8 },
@@ -206,7 +207,7 @@
 		},
 		{
 			"Name": "Flux 2 Dev",
-			"Models": {
+			"DiffusionModels": {
 				"F16":  { "FileName": "flux2-dev-F16.gguf",    "Url": "https://huggingface.co/unsloth/FLUX.2-dev-GGUF/resolve/main/flux2-dev-F16.gguf?download=true",    "Size": 64.4 },
 				"BF16": { "FileName": "flux2-dev-BF16.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-dev-GGUF/resolve/main/flux2-dev-BF16.gguf?download=true",   "Size": 64.4 },
 				"Q8":   { "FileName": "flux2-dev-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-dev-GGUF/resolve/main/flux2-dev-Q8_0.gguf?download=true",   "Size": 35.0 },
@@ -276,7 +277,7 @@
 		},
 		{
 			"Name": "Z-Image Turbo",
-			"Models": {
+			"DiffusionModels": {
 				"F16":  { "FileName": "z-image-turbo-F16.gguf",    "Url": "https://huggingface.co/unsloth/Z-Image-Turbo-GGUF/resolve/main/z-image-turbo-F16.gguf?download=true",    "Size": 12.3 },
 				"BF16": { "FileName": "z-image-turbo-BF16.gguf",   "Url": "https://huggingface.co/unsloth/Z-Image-Turbo-GGUF/resolve/main/z-image-turbo-BF16.gguf?download=true",   "Size": 12.3 },
 				"Q8":   { "FileName": "z-image-turbo-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/Z-Image-Turbo-GGUF/resolve/main/z-image-turbo-Q8_0.gguf?download=true",   "Size": 7.22 },
@@ -306,7 +307,7 @@
 		},
 		{
 			"Name": "Flux2-Klein4B",
-			"Models": {				
+			"DiffusionModels": {				
 				"F16": { "FileName": "flux-2-klein-4b-F16.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-F16.gguf?download=true",   "Size": 7.8 },
 				"BF16":  { "FileName": "flux-2-klein-4b-BF16.gguf",    "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-BF16.gguf?download=true",    "Size": 7.8 },
 				"Q8": { "FileName": "flux-2-klein-4b-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q8_0.gguf?download=true",   "Size": 4.3 },
@@ -365,7 +366,7 @@
 		},
 		{
 			"Name": "Flux2-Klein9B",
-			"Models": {				
+			"DiffusionModels": {				
 				"F16": { "FileName": "flux-2-klein-9b-F16.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-F16.gguf?download=true",   "Size": 18.2 },
 				"BF16":  { "FileName": "flux-2-klein-9b-BF16.gguf",    "Url": "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-BF16.gguf?download=true",    "Size": 18.2 },
 				"Q8": { "FileName": "flux-2-klein-9b-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf?download=true",   "Size": 10.0 },
@@ -459,7 +460,7 @@
 		},
 		{
 			"Name": "Krea2 Turbo",
-			"Models": {
+			"DiffusionModels": {
 				"Q8":   { "FileName": "krea2_turbo-Q8_0.gguf",   "Url": "https://huggingface.co/vantagewithai/Krea-2-Turbo-GGUF/resolve/main/krea2_turbo-Q8_0.gguf?download=true",   "Size": 13.7 },
 				"Q6":   { "FileName": "krea2_turbo-Q6_K.gguf",   "Url": "https://huggingface.co/vantagewithai/Krea-2-Turbo-GGUF/resolve/main/krea2_turbo-Q6_K.gguf?download=true",   "Size": 10.6 },
 				"Q5":   { "FileName": "krea2_turbo-Q5_K_M.gguf", "Url": "https://huggingface.co/vantagewithai/Krea-2-Turbo-GGUF/resolve/main/krea2_turbo-Q5_K_M.gguf?download=true", "Size": 8.87  },
@@ -488,7 +489,7 @@
 		},
 		{
 			"Name": "Boogu-Image Turbo",
-			"Models": {
+			"DiffusionModels": {
 				"Q8":   { "FileName": "Boogu-Turbo-V2_dit-Q8_0.gguf",   "Url": "https://huggingface.co/realrebelai/Boogu-Image-Turbo_GGUFs/resolve/main/Boogu-Turbo-V2_dit-Q8_0.gguf?download=true",   "Size": 11.6 },
 				"Q5":   { "FileName": "Boogu-Turbo-V2_dit-Q5_0.gguf", "Url": "https://huggingface.co/realrebelai/Boogu-Image-Turbo_GGUFs/resolve/main/Boogu-Turbo-V2_dit-Q5_0.gguf?download=true", "Size": 7.99  },
 				"Q4":   { "FileName": "Boogu-Turbo-V2_dit-Q4_0.gguf", "Url": "https://huggingface.co/realrebelai/Boogu-Image-Turbo_GGUFs/resolve/main/Boogu-Turbo-V2_dit-Q4_0.gguf?download=true", "Size": 6.78  }
@@ -514,7 +515,7 @@
 		},
 		{
 			"Name": "Boogu-Image Edit Turbo",
-			"Models": {
+			"DiffusionModels": {
 				"Q8":   { "FileName": "boogu-edit-dit-Q8_0.gguf",   "Url": "https://huggingface.co/realrebelai/Boogu-Image-Edit_GGUFs/resolve/main/boogu-edit-dit-Q8_0.gguf?download=true",   "Size": 11.6 },
 				"Q5":   { "FileName": "boogu-edit-dit-Q5_0.gguf", "Url": "https://huggingface.co/realrebelai/Boogu-Image-Edit_GGUFs/resolve/main/boogu-edit-dit-Q5_0.gguf?download=true", "Size": 8.04  },
 				"Q4":   { "FileName": "boogu-edit-dit-Q4_0.gguf", "Url": "https://huggingface.co/realrebelai/Boogu-Image-Edit_GGUFs/resolve/main/boogu-edit-dit-Q4_0.gguf?download=true", "Size": 6.84  }
@@ -534,6 +535,25 @@
 					],
 					"Outputs": [
 						{ "Node": "57", "Name": "Save Image", "Type": "Image" }
+					]
+				}
+			]
+		},
+		{
+			"Name": "SAM 3.1",
+			"Checkpoints":[
+				{ "FileName": "sam3.1_multiplex_fp16.safetensors",   "Url": "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors?download=true",   "Size": 1.75 }
+			],
+			"Workflows": [
+				{
+					"Name": "Segmentation with SAM3-1",
+					"File": "setup/Segmentation with SAM3-1.json",
+					"Inputs": [
+						{ "Node": "163", "Input": "image",  "Name": "Source Image", "Type": "Image" },
+						{ "Node": "164:78", "Input": "text",  "Name": "Prompt", "Type": "String" }
+					],
+					"Outputs": [
+						{ "Node": "254", "Name": "Save Images", "Type": "Image" }
 					]
 				}
 			]
@@ -643,17 +663,6 @@
 			],
 			"Outputs": [
 				{ "Node": "7", "Name": "Save Mesh", "Type": "Mesh" }
-			]
-		},
-		{
-			"Name": "Segmentation with SAM3-1",
-			"File": "setup/Segmentation with SAM3-1.json",
-			"Inputs": [
-				{ "Node": "163", "Input": "image",  "Name": "Source Image", "Type": "Image" },
-				{ "Node": "164:78", "Input": "text",  "Name": "Prompt", "Type": "String" }
-			],
-			"Outputs": [
-				{ "Node": "253", "Name": "Save Images", "Type": "Image" }
 			]
 		},
 		{

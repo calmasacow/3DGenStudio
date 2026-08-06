@@ -20,6 +20,18 @@ function bytesFromGB(gb) {
   return Number.isFinite(value) ? Math.round(value * (1024 ** 3)) : 0
 }
 
+// Model-pack keys that map 1:1 onto ComfyUIPaths categories. "DiffusionModels" is
+// handled separately because it is a map of quality → entry, not a flat list.
+const FILE_CATEGORIES = ['VAE', 'TextEncoder', 'LoRA', 'ControlNet', 'UpscaleModels', 'Checkpoints']
+
+// Packs without quality variants (e.g. a checkpoint-only pack) are picked with a
+// checkbox instead of a dropdown; this sentinel is the "yes, install it" value.
+const INSTALL_SENTINEL = 'install'
+
+function packQualities(pack) {
+  return Object.keys(pack?.DiffusionModels || {})
+}
+
 function buildFileList(config, selections, comfyPathsByCategory) {
   const map = new Map()
 
@@ -37,29 +49,15 @@ function buildFileList(config, selections, comfyPathsByCategory) {
 
   for (const selection of selections) {
     if (!selection.modelQuality) continue
-    const diffusion = (config.DiffusionModels || []).find(d => d.Name === selection.diffusionName)
-    if (!diffusion) continue
-    const modelEntry = diffusion.Models?.[selection.modelQuality]
-    addFile(comfyPathsByCategory.DiffusionModels, modelEntry)
-    addFile(comfyPathsByCategory.VAE, diffusion.VAE)
-    addFile(comfyPathsByCategory.TextEncoder, diffusion.TextEncoder)
-    const loras = Array.isArray(diffusion.LoRA)
-      ? diffusion.LoRA
-      : (diffusion.LoRA ? [diffusion.LoRA] : [])
-    for (const loraEntry of loras) {
-      addFile(comfyPathsByCategory.LoRA, loraEntry)
-    }
-    const controlnets = Array.isArray(diffusion.ControlNet)
-      ? diffusion.ControlNet
-      : (diffusion.ControlNet ? [diffusion.ControlNet] : [])
-    for (const controlnetEntry of controlnets) {
-      addFile(comfyPathsByCategory.ControlNet, controlnetEntry)
-    }
-    const upscaleModels = Array.isArray(diffusion.UpscaleModels)
-      ? diffusion.UpscaleModels
-      : (diffusion.UpscaleModels ? [diffusion.UpscaleModels] : [])
-    for (const upscaleEntry of upscaleModels) {
-      addFile(comfyPathsByCategory.UpscaleModels, upscaleEntry)
+    const pack = (config.Models || []).find(m => m.Name === selection.modelName)
+    if (!pack) continue
+    addFile(comfyPathsByCategory.DiffusionModels, pack.DiffusionModels?.[selection.modelQuality])
+    for (const category of FILE_CATEGORIES) {
+      const value = pack[category]
+      const entries = Array.isArray(value) ? value : (value ? [value] : [])
+      for (const entry of entries) {
+        addFile(comfyPathsByCategory[category], entry)
+      }
     }
   }
 
@@ -104,8 +102,8 @@ export default function SetupWizardModal({ onComplete, onClose }) {
         if (!res.ok) throw new Error(data?.error || 'Failed to load setup config')
         setConfig(data)
         const initial = {}
-        for (const diffusion of data.DiffusionModels || []) {
-          initial[diffusion.Name] = ''
+        for (const pack of data.Models || []) {
+          initial[pack.Name] = ''
         }
         setSelectionByName(initial)
       } catch (err) {
@@ -130,9 +128,12 @@ export default function SetupWizardModal({ onComplete, onClose }) {
   const allCandidateFiles = useMemo(() => {
     if (!config) return []
     const paths = config.ComfyUIPaths || {}
-    const allSelections = (config.DiffusionModels || []).flatMap(diffusion => {
-      const qualities = Object.keys(diffusion.Models || {})
-      return qualities.map(q => ({ diffusionName: diffusion.Name, modelQuality: q }))
+    const allSelections = (config.Models || []).flatMap(pack => {
+      const qualities = packQualities(pack)
+      // A pack with no quality variants still has files (checkpoints, LoRAs, …),
+      // so give it one pseudo-selection or its files never get existence-checked.
+      if (qualities.length === 0) return [{ modelName: pack.Name, modelQuality: INSTALL_SENTINEL }]
+      return qualities.map(q => ({ modelName: pack.Name, modelQuality: q }))
     })
     return buildFileList(config, allSelections, paths)
   }, [config])
@@ -166,7 +167,7 @@ export default function SetupWizardModal({ onComplete, onClose }) {
   }, [allCandidateFiles, comfyPath, modelsPath, config])
 
   const selections = useMemo(
-    () => Object.entries(selectionByName).map(([diffusionName, modelQuality]) => ({ diffusionName, modelQuality })),
+    () => Object.entries(selectionByName).map(([modelName, modelQuality]) => ({ modelName, modelQuality })),
     [selectionByName]
   )
 
@@ -186,14 +187,14 @@ export default function SetupWizardModal({ onComplete, onClose }) {
     const items = []
     for (const sel of selections) {
       if (!sel.modelQuality) continue
-      const diffusion = (config.DiffusionModels || []).find(d => d.Name === sel.diffusionName)
-      for (const workflow of diffusion?.Workflows || []) {
+      const pack = (config.Models || []).find(m => m.Name === sel.modelName)
+      for (const workflow of pack?.Workflows || []) {
         items.push({
           key: workflow.File,
           name: workflow.Name,
           workflowFile: workflow.File,
-          subtitle: diffusion.Name,
-          diffusionName: diffusion.Name,
+          subtitle: pack.Name,
+          modelName: pack.Name,
           modelQuality: sel.modelQuality
         })
       }
@@ -204,7 +205,7 @@ export default function SetupWizardModal({ onComplete, onClose }) {
         name: workflow.Name,
         workflowFile: workflow.File,
         subtitle: 'Other',
-        diffusionName: null,
+        modelName: null,
         modelQuality: null
       })
     }
@@ -371,7 +372,7 @@ export default function SetupWizardModal({ onComplete, onClose }) {
         .filter(item => workflowSelection[item.key])
         .map(item => ({
           workflowFile: item.workflowFile,
-          diffusionName: item.diffusionName,
+          modelName: item.modelName,
           modelQuality: item.modelQuality
         }))
 
@@ -523,22 +524,32 @@ export default function SetupWizardModal({ onComplete, onClose }) {
             </p>
 
             <div className="setup-wizard__model-list">
-              {(config.DiffusionModels || []).map(diffusion => {
-                const currentQuality = selectionByName[diffusion.Name] || ''
+              {(config.Models || []).map(pack => {
+                const qualities = packQualities(pack)
+                const hasQualities = qualities.length > 0
+                const currentQuality = selectionByName[pack.Name] || ''
                 const selectionFiles = buildFileList(
                   config,
-                  [{ diffusionName: diffusion.Name, modelQuality: currentQuality }],
+                  [{ modelName: pack.Name, modelQuality: currentQuality }],
                   config.ComfyUIPaths || {}
                 )
                 const selectionDownload = selectionFiles.filter(
                   file => !existingFileKeys.has(`${file.relativeDir}::${file.fileName}`)
                 )
                 const selectionDownloadBytes = selectionDownload.reduce((sum, f) => sum + (f.expectedBytes || 0), 0)
+                // Packs without quality variants have a fixed size — show it up front
+                // so the checkbox isn't a blind choice.
+                const packFiles = hasQualities ? [] : buildFileList(
+                  config,
+                  [{ modelName: pack.Name, modelQuality: INSTALL_SENTINEL }],
+                  config.ComfyUIPaths || {}
+                )
+                const packBytes = packFiles.reduce((sum, f) => sum + (f.expectedBytes || 0), 0)
 
                 return (
-                  <div key={diffusion.Name} className="setup-wizard__model-card">
+                  <div key={pack.Name} className="setup-wizard__model-card">
                     <div className="setup-wizard__model-head">
-                      <span className="setup-wizard__model-name font-headline">{diffusion.Name}</span>
+                      <span className="setup-wizard__model-name font-headline">{pack.Name}</span>
                       {currentQuality && (
                         <span className="setup-wizard__model-meta">
                           {selectionDownload.length === 0 ? 'Already installed' : `${formatGB(selectionDownloadBytes)} to download`}
@@ -546,23 +557,42 @@ export default function SetupWizardModal({ onComplete, onClose }) {
                       )}
                     </div>
 
-                    <div className="projects-page__select-wrap">
-                      <select
-                        className="projects-page__select"
-                        value={currentQuality}
-                        onChange={(e) =>
-                          setSelectionByName(prev => ({ ...prev, [diffusion.Name]: e.target.value }))
-                        }
-                      >
-                        <option value="">Don&apos;t install</option>
-                        {Object.entries(diffusion.Models || {}).map(([quality, entry]) => (
-                          <option key={quality} value={quality}>
-                            {quality} — {entry.FileName} ({Number(entry.Size).toFixed(1)} GB)
-                          </option>
-                        ))}
-                      </select>
-                      <span className="material-symbols-outlined projects-page__select-icon">expand_more</span>
-                    </div>
+                    {hasQualities ? (
+                      <div className="projects-page__select-wrap">
+                        <select
+                          className="projects-page__select"
+                          value={currentQuality}
+                          onChange={(e) =>
+                            setSelectionByName(prev => ({ ...prev, [pack.Name]: e.target.value }))
+                          }
+                        >
+                          <option value="">Don&apos;t install</option>
+                          {qualities.map(quality => {
+                            const entry = pack.DiffusionModels[quality]
+                            return (
+                              <option key={quality} value={quality}>
+                                {quality} — {entry.FileName} ({Number(entry.Size).toFixed(1)} GB)
+                              </option>
+                            )
+                          })}
+                        </select>
+                        <span className="material-symbols-outlined projects-page__select-icon">expand_more</span>
+                      </div>
+                    ) : (
+                      <label className="setup-wizard__model-toggle">
+                        <input
+                          type="checkbox"
+                          checked={currentQuality === INSTALL_SENTINEL}
+                          onChange={(e) =>
+                            setSelectionByName(prev => ({
+                              ...prev,
+                              [pack.Name]: e.target.checked ? INSTALL_SENTINEL : ''
+                            }))
+                          }
+                        />
+                        <span>Install ({formatGB(packBytes)})</span>
+                      </label>
+                    )}
                   </div>
                 )
               })}

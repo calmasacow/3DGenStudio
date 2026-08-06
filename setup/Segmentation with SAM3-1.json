@@ -42,7 +42,7 @@
       "remove_background": false,
       "max_size": 2048,
       "image": [
-        "181",
+        "256",
         0
       ]
     },
@@ -51,17 +51,28 @@
       "title": "Image - Crop Image with Alpha"
     }
   },
-  "253": {
+  "254": {
     "inputs": {
-      "filename_prefix": "3DGenStudioParts",
       "images": [
         "251",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Save Image"
+      "title": "Preview Image"
+    }
+  },
+  "256": {
+    "inputs": {
+      "image": [
+        "181",
+        0
+      ]
+    },
+    "class_type": "ImageBatchToList+",
+    "_meta": {
+      "title": "🔧 Image Batch To List"
     }
   },
   "164:77": {
@@ -75,7 +86,7 @@
   },
   "164:78": {
     "inputs": {
-      "text": "",
+      "text": "Head, hat, clothes, hand, boots, belt",
       "clip": [
         "164:77",
         1

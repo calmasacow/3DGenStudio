@@ -8227,15 +8227,15 @@ app.post('/api/setup/install-workflows', async (req, res) => {
     }
 
     const config = await loadSetupConfig();
-    const diffusionByName = new Map((config.DiffusionModels || []).map(model => [model.Name, model]));
+    const packByName = new Map((config.Models || []).map(model => [model.Name, model]));
     const workflowsByFile = new Map();
-    for (const diffusion of config.DiffusionModels || []) {
-      for (const workflow of diffusion.Workflows || []) {
-        workflowsByFile.set(workflow.File, { workflow, diffusion });
+    for (const pack of config.Models || []) {
+      for (const workflow of pack.Workflows || []) {
+        workflowsByFile.set(workflow.File, { workflow, pack });
       }
     }
     for (const workflow of config.OtherWorkflows || []) {
-      workflowsByFile.set(workflow.File, { workflow, diffusion: null });
+      workflowsByFile.set(workflow.File, { workflow, pack: null });
     }
 
     const existingByName = new Map();
@@ -8254,7 +8254,7 @@ app.post('/api/setup/install-workflows', async (req, res) => {
         continue;
       }
 
-      const { workflow: workflowConfig, diffusion } = entry;
+      const { workflow: workflowConfig, pack } = entry;
       const normalizedName = sanitizeDisplayName(workflowConfig.Name, 'Workflow');
       const existing = existingByName.get(normalizedName);
 
@@ -8263,10 +8263,12 @@ app.post('/api/setup/install-workflows', async (req, res) => {
         continue;
       }
 
+      // Only packs that ship quality variants have a {diffusion_model} placeholder to
+      // fill in; checkpoint-only packs reference their file inside the workflow itself.
       let diffusionFileName = '';
-      if (diffusion) {
-        const diffusionRecord = selection.diffusionName ? diffusionByName.get(selection.diffusionName) : diffusion;
-        const modelEntry = diffusionRecord?.Models?.[selection.modelQuality];
+      const packRecord = selection.modelName ? packByName.get(selection.modelName) : pack;
+      if (packRecord?.DiffusionModels) {
+        const modelEntry = packRecord.DiffusionModels[selection.modelQuality];
         if (!modelEntry?.FileName) {
           errors.push({ workflow: normalizedName, error: 'Missing diffusion model selection' });
           continue;
