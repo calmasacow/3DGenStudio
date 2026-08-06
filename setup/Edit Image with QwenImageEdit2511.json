@@ -213,19 +213,6 @@
       "title": "Load CLIP"
     }
   },
-  "155": {
-    "inputs": {
-      "filename_prefix": "Images/Image",
-      "images": [
-        "147",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "156": {
     "inputs": {
       "value": 1024
@@ -233,6 +220,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Image Resolution"
+    }
+  },
+  "157": {
+    "inputs": {
+      "images": [
+        "147",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

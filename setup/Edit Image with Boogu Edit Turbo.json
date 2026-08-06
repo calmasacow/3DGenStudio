@@ -131,17 +131,16 @@
       "title": "Image Resolution"
     }
   },
-  "57": {
+  "58": {
     "inputs": {
-      "filename_prefix": "3DGenStudioBooguEdit",
       "images": [
         "8",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Save Image"
+      "title": "Preview Image"
     }
   }
 }

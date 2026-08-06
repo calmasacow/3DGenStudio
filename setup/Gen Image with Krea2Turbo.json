@@ -107,19 +107,6 @@
       "title": "Load CLIP"
     }
   },
-  "22": {
-    "inputs": {
-      "filename_prefix": "3DGenStudioKrea2",
-      "images": [
-        "3",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "30": {
     "inputs": {
       "unet_name": "{diffusion_model}"
@@ -136,6 +123,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Image Resolution"
+    }
+  },
+  "32": {
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

@@ -1,17 +1,4 @@
 {
-  "43": {
-    "inputs": {
-      "filename_prefix": "z-image",
-      "images": [
-        "34:8",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "44": {
     "inputs": {
       "unet_name": "{diffusion_model}"
@@ -19,6 +6,18 @@
     "class_type": "UnetLoaderGGUF",
     "_meta": {
       "title": "Unet Loader (GGUF)"
+    }
+  },
+  "45": {
+    "inputs": {
+      "images": [
+        "34:8",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   },
   "34:29": {

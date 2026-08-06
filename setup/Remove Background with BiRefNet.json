@@ -28,17 +28,16 @@
       "title": "BiRefNet Remove Background (RMBG)"
     }
   },
-  "24": {
+  "25": {
     "inputs": {
-      "filename_prefix": "3DGenStudioRMBG",
       "images": [
         "23",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Save Image"
+      "title": "Preview Image"
     }
   }
 }

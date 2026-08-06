@@ -45,7 +45,7 @@
 						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "37", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -62,7 +62,7 @@
 						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }						
 					],
 					"Outputs": [
-						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "40", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -75,7 +75,7 @@
 						{ "Node": "156", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "155", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "157", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -89,7 +89,7 @@
 						{ "Node": "138", "Input": "largest_size",  "Name": "Image Scale To MaxDim",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "14", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "162", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -101,7 +101,7 @@
 						{ "Node": "172", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "155", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "179", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -117,7 +117,7 @@
 						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "40", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -134,7 +134,7 @@
 						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }						
 					],
 					"Outputs": [
-						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "43", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -150,7 +150,7 @@
 						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "45", "Name": "Save Image", "Type": "Image" }
 					]
 				}		
 			]
@@ -186,7 +186,7 @@
 						{ "Node": "114",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "90", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "120", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -200,7 +200,7 @@
 						{ "Node": "137", "Input": "value", "Name": "Image Size",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "90", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "138", "Name": "Save Image", "Type": "Image" }
 					]
 				}				
 			]
@@ -238,7 +238,7 @@
 						{ "Node": "85", "Input": "steps",      "Name": "Steps",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "9", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "103", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -254,7 +254,7 @@
 						{ "Node": "75", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "9", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "77", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -270,7 +270,7 @@
 						{ "Node": "75", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "9", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "79", "Name": "Save Image", "Type": "Image" }
 					]
 				}				
 			]
@@ -300,7 +300,7 @@
 						{ "Node": "34:13",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "43", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "45", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -334,7 +334,7 @@
 						{ "Node": "8:18",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "63", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "66", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -347,7 +347,7 @@
 						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -359,7 +359,7 @@
 						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -397,7 +397,7 @@
 						{ "Node": "8:18",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "63", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "66", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -412,7 +412,7 @@
 						{ "Node": "67", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "64", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "69", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -425,7 +425,7 @@
 						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -438,7 +438,7 @@
 						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
 					]
 				},
 				{
@@ -453,7 +453,7 @@
 						{ "Node": "67", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "64", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -482,7 +482,7 @@
 						{ "Node": "10",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "22", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "32", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -508,7 +508,7 @@
 						{ "Node": "43",  "Input": "batch_size", "Name": "Number of Images to Generate",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "47", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "48", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -534,7 +534,7 @@
 						{ "Node": "56",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
 					],
 					"Outputs": [
-						{ "Node": "57", "Name": "Save Image", "Type": "Image" }
+						{ "Node": "58", "Name": "Save Image", "Type": "Image" }
 					]
 				}
 			]
@@ -682,10 +682,10 @@
 			"File": "setup/Remove Background and Centered.json",
 			"Inputs": [
 				{ "Node": "5", "Input": "image",  "Name": "Source Image", "Type": "Image" },
-				{ "Node": "2",  "Input": "padding",  "Name": "Padding",   "Type": "Number" }
+				{ "Node": "8",  "Input": "padding",  "Name": "Padding",   "Type": "Number" }
 			],
 			"Outputs": [
-				{ "Node": "4", "Name": "Save Image", "Type": "Image" }
+				{ "Node": "7", "Name": "Save Image", "Type": "Image" }
 			]
 		},
 		{
@@ -724,7 +724,7 @@
 				{ "Node": "23",  "Input": "mask_blur",  "Name": "Mask Blur",   "Type": "Number" }				
 			],
 			"Outputs": [
-				{ "Node": "24", "Name": "Save Image", "Type": "Image" }
+				{ "Node": "25", "Name": "Save Image", "Type": "Image" }
 			]
 		},
 		{

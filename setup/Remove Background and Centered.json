@@ -1,19 +1,4 @@
 {
-  "2": {
-    "inputs": {
-      "padding": 0,
-      "remove_background": true,
-      "max_size": 4096,
-      "image": [
-        "3",
-        0
-      ]
-    },
-    "class_type": "Trellis2PreProcessImage",
-    "_meta": {
-      "title": "Trellis2 - PreProcess Image"
-    }
-  },
   "3": {
     "inputs": {
       "model": "RMBG-2.0",
@@ -33,19 +18,6 @@
     "class_type": "RMBG",
     "_meta": {
       "title": "Remove Background (RMBG)"
-    }
-  },
-  "4": {
-    "inputs": {
-      "filename_prefix": "3DGenStudioCentered",
-      "images": [
-        "6",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
     }
   },
   "5": {
@@ -69,13 +41,40 @@
       "background": "Alpha",
       "background_color": "#222222",
       "image": [
-        "2",
+        "8",
         0
       ]
     },
     "class_type": "RMBG",
     "_meta": {
       "title": "Remove Background (RMBG)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "padding": 0,
+      "remove_background": false,
+      "max_size": 8192,
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VisualBrunoToolsCropImageAlpha",
+    "_meta": {
+      "title": "Image - Crop Image with Alpha"
     }
   }
 }

@@ -371,19 +371,6 @@
       "title": "Image Resolution"
     }
   },
-  "35": {
-    "inputs": {
-      "filename_prefix": "Qwen",
-      "images": [
-        "36",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "36": {
     "inputs": {
       "model": "RMBG-2.0",
@@ -403,6 +390,18 @@
     "class_type": "RMBG",
     "_meta": {
       "title": "Remove Background (RMBG)"
+    }
+  },
+  "37": {
+    "inputs": {
+      "images": [
+        "36",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

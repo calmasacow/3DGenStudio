@@ -95,17 +95,16 @@
       "title": "Image Resolution"
     }
   },
-  "70": {
+  "71": {
     "inputs": {
-      "filename_prefix": "3DGenStudioFlux2Klein9B",
       "images": [
         "8:19",
         0
       ]
     },
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "_meta": {
-      "title": "Save Image"
+      "title": "Preview Image"
     }
   },
   "8:16": {
@@ -115,6 +114,22 @@
     "class_type": "KSamplerSelect",
     "_meta": {
       "title": "KSamplerSelect"
+    }
+  },
+  "20:12:78": {
+    "inputs": {
+      "pixels": [
+        "1",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
     }
   },
   "8:17": {
@@ -149,22 +164,6 @@
     "class_type": "EmptyFlux2LatentImage",
     "_meta": {
       "title": "Empty Flux 2 Latent"
-    }
-  },
-  "20:12:78": {
-    "inputs": {
-      "pixels": [
-        "1",
-        0
-      ],
-      "vae": [
-        "4",
-        0
-      ]
-    },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE Encode"
     }
   },
   "20:12:76": {

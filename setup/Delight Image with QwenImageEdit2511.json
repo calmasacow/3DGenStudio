@@ -213,19 +213,6 @@
       "title": "Load CLIP"
     }
   },
-  "155": {
-    "inputs": {
-      "filename_prefix": "Qwen",
-      "images": [
-        "147",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "172": {
     "inputs": {
       "value": 1024
@@ -319,6 +306,18 @@
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
       "title": "Load LoRA"
+    }
+  },
+  "179": {
+    "inputs": {
+      "images": [
+        "147",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

@@ -54,19 +54,6 @@
       "title": "CLIP Text Encode (Negative Prompt)"
     }
   },
-  "63": {
-    "inputs": {
-      "filename_prefix": "3DGenStudioFlux2Klein",
-      "images": [
-        "8:19",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "64": {
     "inputs": {
       "unet_name": "{diffusion_model}"
@@ -83,6 +70,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Image Resolution"
+    }
+  },
+  "66": {
+    "inputs": {
+      "images": [
+        "8:19",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   },
   "8:16": {

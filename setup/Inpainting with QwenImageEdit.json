@@ -54,19 +54,6 @@
       "title": "VAE Decode"
     }
   },
-  "14": {
-    "inputs": {
-      "filename_prefix": "3DGenStudioInpainting",
-      "images": [
-        "13",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "24": {
     "inputs": {
       "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
@@ -328,6 +315,18 @@
     "class_type": "LoadImageMask",
     "_meta": {
       "title": "Source Mask"
+    }
+  },
+  "162": {
+    "inputs": {
+      "images": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

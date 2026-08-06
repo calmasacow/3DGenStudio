@@ -1,17 +1,4 @@
 {
-  "90": {
-    "inputs": {
-      "filename_prefix": "Qwen",
-      "images": [
-        "113",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "110": {
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
@@ -217,6 +204,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Image Size"
+    }
+  },
+  "138": {
+    "inputs": {
+      "images": [
+        "113",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

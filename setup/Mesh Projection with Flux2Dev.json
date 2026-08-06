@@ -28,19 +28,6 @@
       "title": "VAE Decode"
     }
   },
-  "9": {
-    "inputs": {
-      "filename_prefix": "Flux2",
-      "images": [
-        "75",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "10": {
     "inputs": {
       "vae_name": "flux2-vae.safetensors"
@@ -275,36 +262,6 @@
       "title": "Unet Loader (GGUF)"
     }
   },
-  "70": {
-    "inputs": {
-      "rgthree_comparer": {
-        "images": [
-          {
-            "name": "A",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_npqyg_00003_.png&type=temp&subfolder=&rand=0.2221026949754732"
-          },
-          {
-            "name": "B",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_npqyg_00004_.png&type=temp&subfolder=&rand=0.8474962319220829"
-          }
-        ]
-      },
-      "image_a": [
-        "74",
-        0
-      ],
-      "image_b": [
-        "8",
-        0
-      ]
-    },
-    "class_type": "Image Comparer (rgthree)",
-    "_meta": {
-      "title": "Image Comparer (rgthree)"
-    }
-  },
   "71": {
     "inputs": {
       "controlnet_name": "FLUX.2-dev-Fun-Controlnet-Union.safetensors"
@@ -381,6 +338,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Image Resolution"
+    }
+  },
+  "77": {
+    "inputs": {
+      "images": [
+        "75",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }

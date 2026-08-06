@@ -114,19 +114,6 @@
       "title": "Unet Loader (GGUF)"
     }
   },
-  "64": {
-    "inputs": {
-      "filename_prefix": "3DGenStudioFlux2KleinProjection",
-      "images": [
-        "67",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "66": {
     "inputs": {
       "value": 1024
@@ -180,6 +167,18 @@
     "class_type": "UpscaleModelLoader",
     "_meta": {
       "title": "Load Upscale Model"
+    }
+  },
+  "70": {
+    "inputs": {
+      "images": [
+        "67",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   },
   "8:16": {

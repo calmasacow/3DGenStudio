@@ -1,17 +1,4 @@
 {
-  "9": {
-    "inputs": {
-      "filename_prefix": "Flux2-Klein",
-      "images": [
-        "97",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "84": {
     "inputs": {
       "sampler_name": "euler"
@@ -200,6 +187,18 @@
     "class_type": "UnetLoaderGGUF",
     "_meta": {
       "title": "Unet Loader (GGUF)"
+    }
+  },
+  "103": {
+    "inputs": {
+      "images": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }
