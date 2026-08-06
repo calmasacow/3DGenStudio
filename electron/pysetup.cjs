@@ -40,6 +40,31 @@ function venvPython(venvDir) {
     : path.join(venvDir, 'bin', 'python');
 }
 
+// Force UTF-8 on EVERY Python we spawn — provisioning as well as the long-running
+// services. Layered on top of `base` (the app environment by default).
+//
+// Windows outside a UTF-8 locale is the reason this exists. On a Chinese system
+// the ANSI codepage is GBK/cp936 (cp932 on Japanese, cp949 on Korean, cp1252 on
+// Western), and a child Python inherits it as its default text encoding, which
+// breaks provisioning in two ways:
+//
+//   - Source builds die. setuptools opens a package's UTF-8 setup.py/README with
+//     the locale codec: `UnicodeDecodeError: 'gbk' codec can't decode byte 0xa4`
+//     while building groundingdino-py, so the whole managed ComfyUI install fails
+//     on a machine where the identical lock installs fine in an English locale.
+//   - Output we read back through a pipe is mojibake, because for a pipe (as
+//     opposed to a console) Python picks the ANSI codepage while Node decodes as
+//     UTF-8.
+//
+// PYTHONUTF8=1 is UTF-8 Mode (PEP 540): the interpreter uses UTF-8 for files and
+// streams regardless of locale. PYTHONIOENCODING covers stdio on interpreters
+// that ignore UTF-8 Mode. Set unconditionally rather than only on Windows —
+// the same guarantee costs nothing elsewhere, and an ambient PYTHONIOENCODING
+// inherited from the user's shell is exactly what we do NOT want to honour here.
+function utf8Env(base) {
+  return { ...(base || process.env), PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+}
+
 // Written only after a service's deps fully install, so an interrupted first run
 // is detected and re-completed next time instead of launching a broken service.
 function depsMarker(venvDir) {
@@ -55,7 +80,7 @@ function venvUsable(venvDir) {
   const vp = venvPython(venvDir);
   if (!fs.existsSync(vp)) return false;
   try {
-    const r = spawnSync(vp, ['-c', 'import sys'], { timeout: 20000, stdio: 'ignore' });
+    const r = spawnSync(vp, ['-c', 'import sys'], { timeout: 20000, stdio: 'ignore', env: utf8Env() });
     return r.status === 0;
   } catch {
     return false;
@@ -96,13 +121,17 @@ async function ensureVenv({ uv, serviceDir, venvDir, onLine, pythonVersion }) {
 
 // Spawn a command, stream stdout+stderr line-ish chunks to onLine, resolve the
 // exit code. Never rejects. `capture` also accumulates stdout for the caller.
+//
+// Every provisioning command — uv, the venv's python, the build backends uv
+// spawns underneath — goes through here, so this is where UTF-8 is guaranteed
+// for the whole install rather than at each of the ~15 call sites. See utf8Env.
 function runStream(cmd, args, { cwd, env, onLine } = {}) {
   return new Promise((resolve) => {
     const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
     emit(`$ ${path.basename(cmd)} ${args.join(' ')}\n`);
     let p;
     try {
-      p = spawn(cmd, args, { cwd, env: env || process.env });
+      p = spawn(cmd, args, { cwd, env: utf8Env(env) });
     } catch (err) {
       emit(`spawn error: ${err.message}\n`);
       return resolve({ code: -1, stdout: '' });
@@ -344,11 +373,10 @@ function startService({ name, serviceDir, venvDir, script, env, logStream, log }
     log && log(`Starting ${name} service…`);
     proc = spawn(vp, [script], {
       cwd: serviceDir,
-      // PYTHONIOENCODING/PYTHONUTF8: output goes through a pipe, and for pipes
-      // Python defaults to the ANSI codepage on Windows (cp1252) — any non-ASCII
-      // log line then raises UnicodeEncodeError inside logging and can kill the
-      // service mid-startup. Caller env still wins.
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...env },
+      // utf8Env: output goes through a pipe, and for pipes Python defaults to the
+      // ANSI codepage on Windows — any non-ASCII log line then raises
+      // UnicodeEncodeError inside logging and can kill the service mid-startup.
+      env: utf8Env({ ...process.env, ...env }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     proc.stdout.on('data', (d) => { const s = d.toString(); write(s); keepTail(s); });
@@ -392,4 +420,5 @@ module.exports = {
   ensureVenv,
   depsMarker,
   venvUsable,
+  utf8Env,
 };

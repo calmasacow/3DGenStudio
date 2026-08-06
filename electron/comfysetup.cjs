@@ -35,7 +35,7 @@ const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const { runStream, ensureVenv, venvPython, depsMarker, killTree } = require('./pysetup.cjs');
+const { runStream, ensureVenv, venvPython, depsMarker, killTree, utf8Env } = require('./pysetup.cjs');
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -506,7 +506,7 @@ function checkNativeToolchain({ venvDir, pythonVersion, onLine }) {
   // depends on whether uv built the venv from its managed CPython or a system one.
   const vp = venvPython(venvDir);
   const r = spawnSync(vp, ['-c', "import sysconfig;print(sysconfig.get_paths()['include'])"], {
-    encoding: 'utf8', timeout: 30000,
+    encoding: 'utf8', timeout: 30000, env: utf8Env(),
   });
   const incDir = (r.stdout || '').trim();
   if (r.status !== 0 || !incDir) {
@@ -1441,18 +1441,13 @@ function startComfyUI({ appRoot, installDir, dataDir, venvDir, port, logStream, 
     log && log(`Starting ComfyUI on port ${port}…`);
     proc = spawn(vp, args, {
       cwd: installDir,
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: '1',
-        // MANDATORY on Windows. We capture stdout/stderr through pipes, and for a
-        // pipe Python defaults to the ANSI codepage (cp1252) rather than utf-8.
-        // Several node packs log emoji at import time (rgthree's "Loaded 48
-        // fantastic nodes. 🎉"), which then raises UnicodeEncodeError inside
-        // logging and KILLS ComfyUI with exit code 1 partway through loading —
-        // looking exactly like a mystery startup crash.
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1',
-      },
+      // utf8Env is MANDATORY on Windows here. We capture stdout/stderr through
+      // pipes, and for a pipe Python defaults to the ANSI codepage rather than
+      // utf-8. Several node packs log emoji at import time (rgthree's "Loaded 48
+      // fantastic nodes. 🎉"), which then raises UnicodeEncodeError inside
+      // logging and KILLS ComfyUI with exit code 1 partway through loading —
+      // looking exactly like a mystery startup crash.
+      env: utf8Env({ ...process.env, PYTHONUNBUFFERED: '1' }),
       stdio: ['ignore', 'pipe', 'pipe'],
       // Own process group so killTree can take down worker children too.
       detached: !IS_WIN,

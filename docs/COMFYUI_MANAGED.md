@@ -610,14 +610,30 @@ startup then logged `Failed to initialize database … unable to open database
 file` and ran without one. The launcher passes it explicitly, pointed at
 `<dataDir>/user/comfyui.db`.
 
-**Spawn Python services with `PYTHONIOENCODING=utf-8`.** We capture stdout and
-stderr through pipes, and for a pipe Python defaults to the ANSI codepage on
-Windows (cp1252) rather than utf-8. Several node packs log emoji at import time —
-rgthree's `Loaded 48 fantastic nodes. 🎉` — which raises `UnicodeEncodeError`
-inside `logging` and **kills ComfyUI with exit code 1** partway through loading.
-It presents as a mystery startup crash, and it does not reproduce in a terminal
-(where stdout is a console, so Python picks utf-8). Both launchers now set
-`PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
+**Spawn every Python with `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`.** A child
+Python inherits the system ANSI codepage as its default text encoding, and on
+Windows that is never utf-8 — cp1252 on a Western system, cp936/GBK on Chinese,
+cp932 on Japanese, cp949 on Korean. That breaks two different things:
+
+- *At launch.* We capture stdout and stderr through pipes, and for a pipe Python
+  picks the ANSI codepage. Several node packs log emoji at import time — rgthree's
+  `Loaded 48 fantastic nodes. 🎉` — which raises `UnicodeEncodeError` inside
+  `logging` and **kills ComfyUI with exit code 1** partway through loading. It
+  presents as a mystery startup crash and does not reproduce in a terminal (where
+  stdout is a console, so Python picks utf-8).
+- *During provisioning* ([#21](https://github.com/visualbruno/3DGenStudio/issues/21)).
+  A source build reads the package's utf-8 `setup.py`/README with the locale
+  codec: `UnicodeDecodeError: 'gbk' codec can't decode byte 0xa4 in position 2878`
+  while building `groundingdino-py`, aborting the whole install. The identical
+  lock installs fine in a Western locale, because cp1252 happens to decode those
+  bytes without complaining — so this is invisible unless you test in a CJK locale.
+
+`pysetup.cjs` exports `utf8Env(base)`, which layers both variables on top of an
+environment, and it is applied in `runStream` — the single chokepoint every uv
+command, venv probe and build backend goes through — as well as in both service
+launchers and the remaining `spawnSync` probes. It is set unconditionally rather
+than only on Windows: an ambient `PYTHONIOENCODING` from the user's shell is
+exactly what must not win here.
 
 **A crash used to look like a hang, then like a healthy service.** `ensureService`
 now races the health poll against the process exiting, so a service that dies on
