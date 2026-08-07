@@ -39,7 +39,8 @@ export default function BatchPage({ project }) {
     getBatchConfig,
     saveBatchConfig,
     getComfyWorkflows,
-    getProjectAssets
+    getProjectAssets,
+    createProject
   } = useProjects()
 
   const [config, setConfig] = useState(createEmptyBatchConfig)
@@ -54,6 +55,9 @@ export default function BatchPage({ project }) {
   // Stages and results compete for vertical space, so only one is shown at a
   // time rather than cropping both.
   const [activeTab, setActiveTab] = useState('stages')
+  const [duplicateName, setDuplicateName] = useState(null) // null = dialog closed
+  const [duplicating, setDuplicating] = useState(false)
+  const [duplicateError, setDuplicateError] = useState('')
 
   const saveTimerRef = useRef(null)
   const lastSavedRef = useRef('')
@@ -354,6 +358,47 @@ export default function BatchPage({ project }) {
     if (path) navigate(path)
   }, [navigate, project.id])
 
+  // --- Duplicate -----------------------------------------------------------
+
+  // Copies the recipe, never the results. Variables, groups and stages are the
+  // whole config document; results live as Cards, so not copying them is simply
+  // a matter of leaving the new project empty. lastRunId is dropped so the fresh
+  // project's grid does not claim to have run anything.
+  const handleDuplicate = useCallback(async () => {
+    const trimmedName = String(duplicateName || '').trim()
+    if (!trimmedName) {
+      setDuplicateError('Give the new project a name')
+      return
+    }
+
+    setDuplicating(true)
+    setDuplicateError('')
+    try {
+      const source = normalizeBatchConfig(config)
+      const newProject = await createProject({
+        name: trimmedName,
+        description: project.description || '',
+        preset: 'Batch'
+      })
+      if (!newProject?.id) {
+        throw new Error('The new project was not created')
+      }
+
+      await saveBatchConfig(newProject.id, {
+        ...source,
+        lastRunId: null
+      })
+
+      setDuplicateName(null)
+      navigate(`/projects/${newProject.id}`)
+    } catch (err) {
+      console.error('Failed to duplicate the batch project:', err)
+      setDuplicateError(err?.message || 'Failed to duplicate the project')
+    } finally {
+      setDuplicating(false)
+    }
+  }, [config, createProject, duplicateName, navigate, project.description, saveBatchConfig])
+
   // --- Run -----------------------------------------------------------------
 
   const problems = useMemo(
@@ -375,6 +420,58 @@ export default function BatchPage({ project }) {
       />
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {duplicateName !== null && (
+        <div className="batch-modal__overlay" onClick={() => !duplicating && setDuplicateName(null)}>
+          <div className="batch-modal" onClick={event => event.stopPropagation()}>
+            <h2 className="batch-modal__title font-headline">Duplicate Batch Project</h2>
+            <p className="batch-modal__desc">
+              Creates a new Batch project with the same {normalized.variables.length} variable
+              {normalized.variables.length === 1 ? '' : 's'}, {normalized.groups.length} group
+              {normalized.groups.length === 1 ? '' : 's'} and {normalized.stages.length} stage
+              {normalized.stages.length === 1 ? '' : 's'}. Generated images and meshes are not copied.
+            </p>
+
+            <label className="batch-field">
+              <span className="batch-field__label font-label">NEW PROJECT NAME</span>
+              <input
+                type="text"
+                className="batch-input"
+                value={duplicateName}
+                autoFocus
+                onChange={event => setDuplicateName(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') handleDuplicate()
+                  if (event.key === 'Escape' && !duplicating) setDuplicateName(null)
+                }}
+                disabled={duplicating}
+              />
+            </label>
+
+            {duplicateError && <p className="batch-modal__error">{duplicateError}</p>}
+
+            <div className="batch-modal__actions">
+              <button
+                type="button"
+                className="batch-btn batch-btn--ghost"
+                onClick={() => setDuplicateName(null)}
+                disabled={duplicating}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="batch-btn batch-btn--primary"
+                onClick={handleDuplicate}
+                disabled={duplicating || !String(duplicateName).trim()}
+              >
+                <span className="material-symbols-outlined">content_copy</span>
+                {duplicating ? 'Duplicating…' : 'Duplicate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="batch-page__toolbar">
         <div className="batch-page__toolbar-left">
@@ -415,6 +512,20 @@ export default function BatchPage({ project }) {
         </div>
 
         <div className="batch-page__toolbar-right">
+          <button
+            type="button"
+            className="batch-btn"
+            onClick={() => {
+              setDuplicateError('')
+              setDuplicateName(`${project.name || 'Batch'} copy`)
+            }}
+            disabled={loading || isRunning}
+            title="Create a new Batch project with these variables, groups and stages — without the results"
+          >
+            <span className="material-symbols-outlined">content_copy</span>
+            Duplicate Project
+          </button>
+
           {isRunning ? (
             <button type="button" className="batch-btn batch-btn--danger" onClick={cancelBatch}>
               <span className="material-symbols-outlined">stop</span>
