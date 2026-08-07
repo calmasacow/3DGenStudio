@@ -24,6 +24,17 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.2.2',
+    date: '2026-08-07',
+    items: [
+			'Fixed bugs',
+			'Support for Chinese Computer',
+			'Updated managed ComfyUI and packages',
+			'SetupWizard: Added SAM 3.1 model',
+			'Updated all image workflows'
+    ],
+  },
+  {
     version: 'v2.2.1',
     date: '2026-07-31',
     items: [
