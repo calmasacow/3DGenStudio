@@ -4561,6 +4561,13 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     });
   }
 
+  // Batch Processing recipe (variables / groups / stages). Absent for other
+  // presets, and absent from bundles written before Batch existed — the import
+  // side treats it as optional. Without it a Batch bundle would carry only the
+  // generated results and lose the whole configuration that produced them.
+  const batchConfigRow = await get(db, 'SELECT stateJson FROM BatchConfigs WHERE projectId = ?', [project.id]);
+  const batchConfig = batchConfigRow ? parseJson(batchConfigRow.stateJson, null) : null;
+
   const manifest = {
     schemaVersion: PROJECT_EXPORT_SCHEMA_VERSION,
     app: '3DGenStudio',
@@ -4572,6 +4579,7 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
       status: project.status || 'active'
     },
     mode,
+    batchConfig,
     assets,
     // Asset <-> project membership (schemaVersion 2+). Independent of cards, so
     // detached assets and edits/versions attached straight to the project travel
@@ -4581,6 +4589,10 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
       .filter(assetId => collectedIds.has(assetId)),
     cards: cards.map(card => ({
       refKey: card.id,
+      // A batch result card is addressed by a self-describing clientKey, which
+      // is the only thing tying it back to its cell in the results grid. Carry
+      // it so an imported batch still shows its results.
+      clientKey: card.clientKey || null,
       columnName: card.columnName,
       name: card.name,
       position: card.position,
@@ -4742,6 +4754,16 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
       [newProjectId, projectName, proj.description || '', proj.preset || '', createdAt, proj.status || 'active']
     );
 
+    // Batch Processing recipe. Optional: only Batch projects carry one, and
+    // bundles written before Batch existed have none.
+    if (manifest.batchConfig && typeof manifest.batchConfig === 'object') {
+      await run(
+        db,
+        'INSERT INTO BatchConfigs (projectId, stateJson, updatedAt) VALUES (?, ?, ?)',
+        [newProjectId, JSON.stringify(manifest.batchConfig), createdAt]
+      );
+    }
+
     const assetIdMap = new Map();   // original refId -> new asset id
     const editPathMap = new Map();  // original stored filePath -> new stored filePath
     const insertedAssets = [];      // { newId, metadata } for the post-remap pass
@@ -4874,6 +4896,14 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
         // A card whose live run state was stripped must not stay "processing".
         const cardStatus = removedProcessing ? null : (card.status ?? null);
         const cardProgress = removedProcessing ? null : (card.progress ?? null);
+        // Client keys are otherwise dropped on import, since they are only
+        // meaningful to whoever minted them. A batch result key is the exception:
+        // it encodes the run/group/stage the card belongs to, and the results
+        // grid finds the card by it. Unique per project, so a fresh project id
+        // cannot collide.
+        const importedClientKey = String(card.clientKey || '').startsWith('batch:')
+          ? card.clientKey
+          : null;
         const result = await run(
           db,
           `INSERT INTO Cards (projectId, kanbanColumnId, clientKey, name, position, creationDate, status, progress, metadata)
@@ -4881,7 +4911,7 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
           [
             newProjectId,
             columnId,
-            null,
+            importedClientKey,
             card.name ?? null,
             Number(card.position) || 0,
             Date.now(),
