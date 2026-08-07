@@ -23,6 +23,8 @@ import {
   createStageDefaultInputs,
   createVariable,
   deriveCellsFromAssets,
+  getRunIdFromCells,
+  summarizeRunProgress,
   normalizeBatchConfig,
   validateBatch
 } from '../utils/batchHelpers'
@@ -410,6 +412,16 @@ export default function BatchPage({ project }) {
   const plannedRuns = normalized.groups.length * normalized.stages.length
   const completedCount = Object.values(displayCells).filter(cell => cell?.status === 'completed').length
 
+  // A stopped (or reloaded) run can be picked up where it left off: keep its run
+  // id so results land in the same cells, and skip whatever already finished.
+  // Works after a reload too, because the derived cells carry their card keys.
+  const progress = summarizeRunProgress(displayCells, normalized)
+  const resumeRunId = getRunIdFromCells(displayCells)
+  const canContinue = !isRunning
+    && Boolean(resumeRunId)
+    && progress.done > 0
+    && progress.outstanding > 0
+
   return (
     <div className="batch-page">
       <Header
@@ -532,16 +544,41 @@ export default function BatchPage({ project }) {
               {runState.status === 'cancelling' ? 'Stopping after this run…' : 'Stop'}
             </button>
           ) : (
-            <button
-              type="button"
-              className="batch-btn batch-btn--primary"
-              onClick={() => startBatch({ project, workflowsById, config })}
-              disabled={loading || problems.length > 0 || plannedRuns === 0}
-              title={problems.length > 0 ? 'Resolve the problems listed below first' : 'Run every group through every stage'}
-            >
-              <span className="material-symbols-outlined">play_arrow</span>
-              Run batch
-            </button>
+            <>
+              {canContinue && (
+                <button
+                  type="button"
+                  className="batch-btn batch-btn--primary"
+                  onClick={() => startBatch({
+                    project,
+                    workflowsById,
+                    config,
+                    resumeFrom: { runId: resumeRunId, cells: displayCells }
+                  })}
+                  disabled={loading || problems.length > 0}
+                  title={problems.length > 0
+                    ? 'Resolve the problems listed below first'
+                    : `Pick up where the run stopped — ${progress.done} done, ${progress.outstanding} to go`}
+                >
+                  <span className="material-symbols-outlined">resume</span>
+                  Continue ({progress.outstanding})
+                </button>
+              )}
+              <button
+                type="button"
+                className={`batch-btn ${canContinue ? '' : 'batch-btn--primary'}`}
+                onClick={() => startBatch({ project, workflowsById, config })}
+                disabled={loading || problems.length > 0 || plannedRuns === 0}
+                title={problems.length > 0
+                  ? 'Resolve the problems listed below first'
+                  : canContinue
+                    ? 'Start over: run every group through every stage again'
+                    : 'Run every group through every stage'}
+              >
+                <span className="material-symbols-outlined">{canContinue ? 'restart_alt' : 'play_arrow'}</span>
+                {canContinue ? 'Restart' : 'Run batch'}
+              </button>
+            </>
           )}
         </div>
       </div>

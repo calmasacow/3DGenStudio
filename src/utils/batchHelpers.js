@@ -500,6 +500,42 @@ export function deriveCellsFromAssets(assets, { groups, stages }) {
   return newestRun ? newestRun.cells : {}
 }
 
+// --- Resuming a stopped run ----------------------------------------------
+
+// A resumed run must keep the run id of the one it continues, so its results
+// keep landing in the same cells. Every cell that produced something carries the
+// card key it was written to, and that key embeds the run id.
+export function getRunIdFromCells(cells) {
+  for (const cell of Object.values(cells || {})) {
+    const parsed = parseBatchCardKey(cell?.cardKey)
+    if (parsed) {
+      return parsed.runId
+    }
+  }
+  return null
+}
+
+// Split the group × stage matrix into what is already done and what a Continue
+// would still have to run. Anything not finished counts as outstanding —
+// cancelled cells, cells that never started, and cells that failed.
+export function summarizeRunProgress(cells, { groups, stages }) {
+  let done = 0
+  let outstanding = 0
+
+  for (const group of groups || []) {
+    for (const stage of stages || []) {
+      const cell = cells?.[`${group.id}:${stage.id}`]
+      if (cell?.status === 'completed' && cell.assetId) {
+        done += 1
+      } else {
+        outstanding += 1
+      }
+    }
+  }
+
+  return { done, outstanding, total: done + outstanding }
+}
+
 export function buildResultName({ group, groupIndex, stage, stageIndex, variables }) {
   const hasTemplate = String(stage?.name || '').trim() !== ''
   const stageName = resolveStageName(stage, stageIndex, { group, variables })

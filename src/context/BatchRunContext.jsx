@@ -43,20 +43,32 @@ export function BatchRunProvider({ children }) {
     setRunState(current => (current.status === 'running' ? { ...current, status: 'cancelling' } : current))
   }, [])
 
-  const startBatch = useCallback(async ({ project, workflowsById, config }) => {
+  // `resumeFrom` continues a stopped run instead of starting a fresh one: it
+  // carries that run's id (so results keep landing in the same cells) and its
+  // cells (so finished work is skipped). Anything not finished is re-run,
+  // including cells that failed.
+  const startBatch = useCallback(async ({ project, workflowsById, config, resumeFrom = null }) => {
     if (runningRef.current) {
       return null
     }
     runningRef.current = true
 
     const { variables, groups, stages } = normalizeBatchConfig(config)
-    const runId = createComfyExecutionId('batch').slice(0, 18)
+    const priorCells = resumeFrom?.cells || {}
+    const runId = resumeFrom?.runId || createComfyExecutionId('batch').slice(0, 18)
     cancelRef.current = false
 
+    const isAlreadyDone = (cellKey) => {
+      const prior = priorCells[cellKey]
+      return prior?.status === 'completed' && Boolean(prior.assetId)
+    }
+
+    // Finished cells keep their result; everything else goes back to queued.
     const seededCells = {}
     groups.forEach(group => {
       stages.forEach(stage => {
-        seededCells[`${group.id}:${stage.id}`] = { status: 'queued' }
+        const cellKey = `${group.id}:${stage.id}`
+        seededCells[cellKey] = isAlreadyDone(cellKey) ? priorCells[cellKey] : { status: 'queued' }
       })
     })
     setRunState({ status: 'running', runId, projectId: project.id, cells: seededCells, error: null })
@@ -70,6 +82,14 @@ export function BatchRunProvider({ children }) {
         for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
           const stage = stages[stageIndex]
           const cellKey = `${group.id}:${stage.id}`
+
+          // Already produced by the run being resumed. Don't regenerate it, but
+          // do publish its asset so later stages in this group can chain onto it.
+          if (isAlreadyDone(cellKey)) {
+            const prior = priorCells[cellKey]
+            stageOutputs[stage.id] = { id: prior.assetId, type: prior.assetType || null }
+            continue
+          }
 
           if (cancelRef.current) {
             patchCell(cellKey, { status: 'cancelled' })
