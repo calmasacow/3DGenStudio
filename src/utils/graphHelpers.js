@@ -1025,3 +1025,48 @@ export function filterTextGenerationWorkflows(workflows = []) {
     return outputValueTypes.includes('string')
   })
 }
+
+// --- Action draft persistence --------------------------------------------
+// A node's open parameter panel is saved into its card metadata so the values
+// survive a reload, not just a run. Locally-picked File objects cannot be
+// serialized, so they are dropped and the parameter comes back needing a
+// re-pick rather than silently holding a dead value.
+
+export function serializeActionDraft(draft) {
+  if (!draft || typeof draft !== 'object') {
+    return null
+  }
+
+  const inputs = {}
+  const droppedFileParameterIds = []
+  for (const [parameterId, value] of Object.entries(draft.inputs || {})) {
+    if (typeof File !== 'undefined' && value instanceof File) {
+      droppedFileParameterIds.push(parameterId)
+      continue
+    }
+    if (typeof Blob !== 'undefined' && value instanceof Blob) {
+      droppedFileParameterIds.push(parameterId)
+      continue
+    }
+    inputs[parameterId] = value
+  }
+
+  return { ...draft, inputs, droppedFileParameterIds }
+}
+
+export function deserializeActionDraft(stored) {
+  if (!stored || typeof stored !== 'object' || !stored.mode) {
+    return null
+  }
+
+  // A restored draft never carries a File, so any parameter that held one is
+  // reset to empty — the panel shows its "Select file" state again.
+  const inputs = { ...(stored.inputs || {}) }
+  for (const parameterId of stored.droppedFileParameterIds || []) {
+    inputs[parameterId] = null
+  }
+
+  const draft = { ...stored, inputs }
+  delete draft.droppedFileParameterIds
+  return draft
+}

@@ -72,6 +72,11 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
   const [lightIntensity, setLightIntensity] = useState(2.2)
   const [showMeshPreview, setShowMeshPreview] = useState(false)
   const draft = data.actionDraft
+  // The panel outlives a run: it stays mounted and its controls go inert until
+  // the node leaves 'processing', so the parameters are still there afterwards.
+  const isPanelLocked = isProcessing
+  const isDraftCollapsed = Boolean(data.isDraftCollapsed)
+  const panelClassName = `image-card__edit-panel nodrag${isPanelLocked ? ' image-card__edit-panel--locked' : ''}`
   const isImageEditMode = ['edit-api', 'edit-comfy'].includes(draft?.mode)
   const sourceLabel = isMeshGen ? 'MESH' : 'IMAGE'
   const metaLabel = isProcessing
@@ -453,10 +458,28 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
           <div className="image-card__attributes graph-node__actions-panel">
             <div className="image-card__edit-actions">
               <div className="graph-node__primary-actions">
-                <button className="image-card__edit-action-btn nodrag" onClick={() => data.onToggleAction?.(data.id, data.nodeKind)} disabled={isProcessing}>
+                <button
+                  className="image-card__edit-action-btn nodrag"
+                  onClick={() => data.onToggleAction?.(data.id, data.nodeKind)}
+                  disabled={isPanelLocked}
+                  title={draft ? 'Close the parameters' : 'Open the parameters'}
+                >
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>play_arrow</span>
                   Action
                 </button>
+                {draft && (
+                  <button
+                    className="image-card__edit-action-btn nodrag"
+                    onClick={() => data.onToggleDraftCollapsed?.(data.id)}
+                    title={isDraftCollapsed ? 'Show the parameters' : 'Hide the parameters'}
+                    aria-expanded={!isDraftCollapsed}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                      {isDraftCollapsed ? 'expand_more' : 'expand_less'}
+                    </span>
+                    {isDraftCollapsed ? 'Params' : 'Hide'}
+                  </button>
+                )}
                 {canFetchAsyncResult && (
                   <button className="image-card__edit-action-btn nodrag" onClick={() => data.onGetAsyncMeshResult?.(data.id)}>
                     <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>refresh</span>
@@ -476,6 +499,15 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                   </button>
                 )}
               </div>
+
+              {isPanelLocked && draft && (
+                <div className="graph-node__panel-lock-note font-label">
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>lock</span>
+                  Parameters locked while running
+                </div>
+              )}
+
+              {!isDraftCollapsed && (<>
 
               {draft?.mode === 'select' && (
                 <div className="image-card__edit-action-menu">
@@ -515,7 +547,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
 							{draft?.mode === 'assets' && (
-								<div className="image-card__edit-panel nodrag">
+								<div className={panelClassName}>
 									<span className="graph-node__panel-title font-label">SELECT FROM ASSETS</span>
 									<div className="image-card__asset-picker-empty">
 										<span className="material-symbols-outlined">perm_media</span>
@@ -530,7 +562,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
 									</button>
 									<button
 										className="kanban-sidebar__nav-item nodrag"
-										onClick={() => data.onToggleAction?.(data.id, data.nodeKind)}
+										onClick={() => data.onBackToActionMenu?.(data.id, data.nodeKind)}
 										style={{ justifyContent: 'center' }}
 									>
 										BACK
@@ -539,7 +571,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
 							)}
 
               {draft?.mode === 'api' && !isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">REMOTE API</span>
                   <input
                     type="text"
@@ -577,7 +609,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft?.mode === 'comfy' && !isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">COMFYUI WORKFLOW</span>
                   {data.comfyLoading ? (
                     <div className="image-card__asset-picker-empty">
@@ -652,7 +684,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft?.mode === 'api' && isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">MESH GEN API</span>
                   <input
                     type="text"
@@ -1011,7 +1043,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft?.mode === 'comfy' && isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">COMFYUI MESH GEN</span>
                   {data.comfyLoading ? (
                     <div className="image-card__asset-picker-empty">
@@ -1091,7 +1123,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft?.mode === 'edit-api' && !isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">IMAGE EDIT API</span>
                   <input
                     type="text"
@@ -1155,7 +1187,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft?.mode === 'edit-comfy' && !isMeshGen && (
-                <div className="image-card__edit-panel nodrag">
+                <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">COMFYUI IMAGE EDIT</span>
                   {data.comfyLoading ? (
                     <div className="image-card__asset-picker-empty">
@@ -1235,10 +1267,17 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
 
               {draft && draft.mode !== 'select' && (
-                <button className="kanban-sidebar__nav-item nodrag" onClick={() => data.onToggleAction?.(data.id, data.nodeKind)} style={{ justifyContent: 'center' }}>
+                <button
+                  className="kanban-sidebar__nav-item nodrag"
+                  onClick={() => data.onBackToActionMenu?.(data.id, data.nodeKind)}
+                  disabled={isPanelLocked}
+                  style={{ justifyContent: 'center' }}
+                >
                   BACK
                 </button>
               )}
+
+              </>)}
             </div>
           </div>
         </div>

@@ -54,6 +54,8 @@ import {
   TRIPO_TEXTURE_QUALITY_OPTIONS,
   buildInputConnectors,
   buildLastActionParams,
+  deserializeActionDraft,
+  serializeActionDraft,
   buildNodeInputSources,
   canFetchHitemMeshResult,
   canFetchTencentMeshResult,
@@ -157,7 +159,12 @@ export default function GraphPage({ project }) {
   const [loading, setLoading] = useState(true)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  // Open parameter panels, keyed by node id. Several nodes can have their panel
+  // open at once, and a panel stays mounted across a run (locked, not unmounted)
+  // so the user never loses the parameters they just typed.
   const [actionDraftsByNodeId, setActionDraftsByNodeId] = useState({})
+  // Panels the user has folded away. The draft survives; only the body is hidden.
+  const [collapsedDraftNodeIds, setCollapsedDraftNodeIds] = useState(() => new Set())
   const [libraryAssets, setLibraryAssets] = useState({ images: [], meshes: [] })
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [comfyWorkflows, setComfyWorkflows] = useState([])
@@ -181,6 +188,54 @@ export default function GraphPage({ project }) {
   const graphCanvasRef = useRef(null)
   const hasAutoFitOnLoadRef = useRef(false)
   const viewportSaveTimeoutRef = useRef(null)
+  // What each node's draft looked like the last time it hit the DB, so the
+  // autosave below only writes nodes that actually changed.
+  const persistedDraftsRef = useRef(new Map())
+  const draftSaveTimeoutRef = useRef(null)
+  // Latest pending autosave, so leaving the page mid-edit still writes.
+  const flushDraftSaveRef = useRef(null)
+
+  // Open one node's panel without touching any other node's. Every writer goes
+  // through here: replacing the whole map is what used to make the panels
+  // mutually exclusive.
+  const setActionDraft = useCallback((nodeId, draft) => {
+    setActionDraftsByNodeId(currentDrafts => ({ ...currentDrafts, [String(nodeId)]: draft }))
+  }, [])
+
+  // Close one node's panel and drop its collapsed flag. Only user-driven closes
+  // (BACK, an attached asset, a deleted node) call this — a run never does.
+  const closeActionDraft = useCallback((nodeId) => {
+    const key = String(nodeId)
+    setActionDraftsByNodeId(currentDrafts => {
+      if (!(key in currentDrafts)) {
+        return currentDrafts
+      }
+      const nextDrafts = { ...currentDrafts }
+      delete nextDrafts[key]
+      return nextDrafts
+    })
+    setCollapsedDraftNodeIds(currentIds => {
+      if (!currentIds.has(key)) {
+        return currentIds
+      }
+      const nextIds = new Set(currentIds)
+      nextIds.delete(key)
+      return nextIds
+    })
+  }, [])
+
+  const toggleDraftCollapsed = useCallback((nodeId) => {
+    const key = String(nodeId)
+    setCollapsedDraftNodeIds(currentIds => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(key)) {
+        nextIds.delete(key)
+      } else {
+        nextIds.add(key)
+      }
+      return nextIds
+    })
+  }, [])
 
   const pushMeshGenerationFailureNotification = useCallback((message, source = 'Mesh generation API') => {
     addNotification({
@@ -709,6 +764,30 @@ export default function GraphPage({ project }) {
 
         setNodes(projectNodes.map(node => toBaseFlowNode(node, handleDeleteNode)))
         setEdges(projectConnections.map(toFlowEdge))
+
+        // Bring back the parameter panels exactly as the user left them, and
+        // seed the autosave baseline so hydration doesn't write straight back.
+        const restoredDrafts = {}
+        const restoredCollapsed = new Set()
+        const restoredBaseline = new Map()
+        for (const node of projectNodes) {
+          const restoredDraft = deserializeActionDraft(node.metadata?.actionDraft)
+          if (!restoredDraft) {
+            continue
+          }
+          const key = String(node.id)
+          restoredDrafts[key] = restoredDraft
+          if (node.metadata?.actionDraftCollapsed) {
+            restoredCollapsed.add(key)
+          }
+          restoredBaseline.set(key, JSON.stringify({
+            draft: serializeActionDraft(restoredDraft),
+            collapsed: Boolean(node.metadata?.actionDraftCollapsed)
+          }))
+        }
+        persistedDraftsRef.current = restoredBaseline
+        setActionDraftsByNodeId(restoredDrafts)
+        setCollapsedDraftNodeIds(restoredCollapsed)
       } catch (err) {
         console.error('Failed to load workflow graph:', err)
         if (!cancelled) {
@@ -728,6 +807,97 @@ export default function GraphPage({ project }) {
       cancelled = true
     }
   }, [getProjectConnections, getProjectNodes, handleDeleteNode, project.id, setEdges, setNodes, externalReloadTick])
+
+  // Autosave open parameter panels into their card metadata. Debounced because
+  // this fires on every keystroke in a prompt box, and diffed against the last
+  // persisted value so an unrelated draft edit doesn't rewrite every node.
+  useEffect(() => {
+    if (loading) {
+      return undefined
+    }
+
+    const saveDrafts = async () => {
+      const liveNodeIds = new Set(nodes.map(node => String(node.id)))
+      const baseline = persistedDraftsRef.current
+      const nextKeys = new Set(Object.keys(actionDraftsByNodeId))
+
+      for (const nodeId of liveNodeIds) {
+        const draft = actionDraftsByNodeId[nodeId] || null
+        const isCollapsed = collapsedDraftNodeIds.has(nodeId)
+        const serialized = draft
+          ? JSON.stringify({ draft: serializeActionDraft(draft), collapsed: isCollapsed })
+          : null
+
+        if ((baseline.get(nodeId) ?? null) === serialized) {
+          continue
+        }
+
+        try {
+          await updateProjectNode(project.id, Number(nodeId), {
+            metadata: {
+              actionDraft: draft ? serializeActionDraft(draft) : null,
+              actionDraftCollapsed: draft ? isCollapsed : null
+            }
+          })
+          if (serialized === null) {
+            baseline.delete(nodeId)
+          } else {
+            baseline.set(nodeId, serialized)
+          }
+        } catch (err) {
+          console.error('Failed to persist node parameters:', err)
+        }
+      }
+
+      // Drop baselines for nodes that no longer exist, so a recreated id starts clean.
+      for (const nodeId of Array.from(baseline.keys())) {
+        if (!liveNodeIds.has(nodeId) && !nextKeys.has(nodeId)) {
+          baseline.delete(nodeId)
+        }
+      }
+    }
+
+    flushDraftSaveRef.current = saveDrafts
+    draftSaveTimeoutRef.current = setTimeout(saveDrafts, 600)
+
+    return () => {
+      clearTimeout(draftSaveTimeoutRef.current)
+    }
+  }, [actionDraftsByNodeId, collapsedDraftNodeIds, loading, nodes, project.id, updateProjectNode])
+
+  // Navigating away mid-edit would otherwise lose whatever was typed inside the
+  // debounce window. The save diffs against its baseline, so flushing is a no-op
+  // when nothing changed.
+  useEffect(() => () => {
+    flushDraftSaveRef.current?.()
+  }, [])
+
+  // The workflow list and the asset library are lazy: they used to load only
+  // when the user picked a mode from the Action menu. A panel restored on mount
+  // (or after navigating back mid-run) skips that click, so it would render
+  // against an empty list and claim "No imported workflows available". Both
+  // loaders are ref-guarded, so asking again once they are warm costs nothing.
+  useEffect(() => {
+    const openDrafts = Object.values(actionDraftsByNodeId).filter(Boolean)
+    if (openDrafts.length === 0) {
+      return
+    }
+
+    const needsWorkflows = openDrafts.some(draft => String(draft.mode || '').includes('comfy'))
+    const needsLibrary = openDrafts.some(draft => draft.mode && draft.mode !== 'select')
+
+    if (needsWorkflows) {
+      ensureComfyWorkflowsLoaded().catch(err => {
+        console.error('Failed to load ComfyUI workflows for a restored panel:', err)
+      })
+    }
+
+    if (needsLibrary) {
+      ensureLibraryLoaded().catch(err => {
+        console.error('Failed to load the asset library for a restored panel:', err)
+      })
+    }
+  }, [actionDraftsByNodeId, ensureComfyWorkflowsLoaded, ensureLibraryLoaded])
 
   const handleCreateNode = useCallback(async (nodeTypeName, initialData = {}) => {
     const nextIndex = nodes.length
@@ -852,18 +1022,31 @@ export default function GraphPage({ project }) {
     openNodePickerAt(pointerPosition.x, pointerPosition.y, pendingConnection)
   }, [openNodePickerAt])
 
-  const openActionDraft = useCallback((nodeId, nodeKind) => {
+  const buildSelectDraft = useCallback((nodeId, nodeKind) => {
     const inputSources = buildNodeInputSources(nodeId, nodes, edges)
-    setActionDraftsByNodeId({
-      [String(nodeId)]: nodeKind === 'meshGen'
-        ? createMeshGenNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
-        : nodeKind === 'imageEdit'
-        ? createImageEditNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
-        : nodeKind === 'text'
-        ? createTextNodeDraft('select', inputSources)
-        : createImageNodeDraft('select', inputSources)
-    })
+    return nodeKind === 'meshGen'
+      ? createMeshGenNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
+      : nodeKind === 'imageEdit'
+      ? createImageEditNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
+      : nodeKind === 'text'
+      ? createTextNodeDraft('select', inputSources)
+      : createImageNodeDraft('select', inputSources)
   }, [createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, edges, getConnectedInputAssetFrom, libraryImageOptions, nodes])
+
+  // BACK: rewind an open panel to the mode menu without closing it.
+  const openActionDraft = useCallback((nodeId, nodeKind) => {
+    setActionDraft(nodeId, buildSelectDraft(nodeId, nodeKind))
+  }, [buildSelectDraft, setActionDraft])
+
+  // The node's Action button: open the panel, or close it if it is already open.
+  const toggleActionDraft = useCallback((nodeId, nodeKind) => {
+    const key = String(nodeId)
+    if (actionDraftsByNodeId[key]) {
+      closeActionDraft(nodeId)
+      return
+    }
+    setActionDraft(nodeId, buildSelectDraft(nodeId, nodeKind))
+  }, [actionDraftsByNodeId, buildSelectDraft, closeActionDraft, setActionDraft])
 
 	const handleOpenAssetSelector = useCallback((nodeId, type, showEdits = true) => {
 		setAssetSelectorType(type === 'mesh' ? 'mesh' : 'image');
@@ -976,7 +1159,8 @@ export default function GraphPage({ project }) {
       onNodeNameCommit: handleNodeNameCommit,
       onNodeOutputValueChange: handleNodeOutputValueChange,
       onNodeOutputValueCommit: handleNodeOutputValueCommit,
-      onToggleAction: openActionDraft,
+      onToggleAction: toggleActionDraft,
+      onBackToActionMenu: openActionDraft,
       onImageModeSelect: async (targetNodeId, mode) => {
         if (mode === 'local') {
           pendingUploadNodeIdRef.current = String(targetNodeId)
@@ -986,9 +1170,7 @@ export default function GraphPage({ project }) {
 
 				if (mode === 'assets') {
 					await ensureLibraryLoaded();
-					setActionDraftsByNodeId({
-						[String(targetNodeId)]: createImageNodeDraft('assets')
-					});
+					setActionDraft(targetNodeId, createImageNodeDraft('assets'));
 					handleOpenAssetSelector(targetNodeId, 'image');
 					return;
 				}
@@ -997,19 +1179,15 @@ export default function GraphPage({ project }) {
           const workflows = await ensureComfyWorkflowsLoaded()
           const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-          setActionDraftsByNodeId({
-            [String(targetNodeId)]: createImageNodeDraft('comfy', nodeInputSources, filterImageGenerationWorkflows(workflows || []))
-          })
+          setActionDraft(targetNodeId, createImageNodeDraft('comfy', nodeInputSources, filterImageGenerationWorkflows(workflows || [])))
           return
         }
 
         const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-        setActionDraftsByNodeId({
-          [String(targetNodeId)]: mode === 'comfy'
+        setActionDraft(targetNodeId, mode === 'comfy'
             ? createImageNodeDraft('comfy', nodeInputSources)
-            : createImageNodeDraft(mode, nodeInputSources)
-        })
+            : createImageNodeDraft(mode, nodeInputSources))
       },
       onImageEditModeSelect: async (targetNodeId, mode) => {
         if (mode === 'edit-api' || mode === 'api') {
@@ -1021,23 +1199,19 @@ export default function GraphPage({ project }) {
           const workflows = await ensureComfyWorkflowsLoaded()
           const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-          setActionDraftsByNodeId({
-            [String(targetNodeId)]: createImageEditNodeDraft(
+          setActionDraft(targetNodeId, createImageEditNodeDraft(
               mode,
               getConnectedInputAssetFrom(nodes, edges, targetNodeId),
               nodeInputSources,
               libraryImageOptions,
               filterImageEditWorkflows(workflows || [])
-            )
-          })
+            ))
           return
         }
 
         const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-        setActionDraftsByNodeId({
-          [String(targetNodeId)]: createImageEditNodeDraft(mode, getConnectedInputAssetFrom(nodes, edges, targetNodeId), nodeInputSources, libraryImageOptions)
-        })
+        setActionDraft(targetNodeId, createImageEditNodeDraft(mode, getConnectedInputAssetFrom(nodes, edges, targetNodeId), nodeInputSources, libraryImageOptions))
       },
       onMeshGenModeSelect: async (targetNodeId, mode) => {
         if (mode === 'local') {
@@ -1052,9 +1226,7 @@ export default function GraphPage({ project }) {
 				
 				if (mode === 'assets') {
 					await ensureLibraryLoaded();
-					setActionDraftsByNodeId({
-						[String(targetNodeId)]: createImageNodeDraft('assets')
-					});
+					setActionDraft(targetNodeId, createImageNodeDraft('assets'));
 					handleOpenAssetSelector(targetNodeId, 'mesh');
 					return;
 				}
@@ -1064,38 +1236,30 @@ export default function GraphPage({ project }) {
           const workflows = await ensureComfyWorkflowsLoaded()
           const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-          setActionDraftsByNodeId({
-            [String(targetNodeId)]: createMeshGenNodeDraft(
+          setActionDraft(targetNodeId, createMeshGenNodeDraft(
               mode,
               getConnectedInputAssetFrom(nodes, edges, targetNodeId),
               nodeInputSources,
               libraryImageOptions,
               filterMeshGenerationWorkflows(workflows || [])
-            )
-          })
+            ))
           return
         }
 
         const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-        setActionDraftsByNodeId({
-          [String(targetNodeId)]: createMeshGenNodeDraft(mode, getConnectedInputAssetFrom(nodes, edges, targetNodeId), nodeInputSources, libraryImageOptions)
-        })
+        setActionDraft(targetNodeId, createMeshGenNodeDraft(mode, getConnectedInputAssetFrom(nodes, edges, targetNodeId), nodeInputSources, libraryImageOptions))
       },
       onTextModeSelect: async (targetNodeId, mode) => {
         if (mode === 'comfy') {
           const workflows = await ensureComfyWorkflowsLoaded()
           const nodeInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
-          setActionDraftsByNodeId({
-            [String(targetNodeId)]: createTextNodeDraft('comfy', nodeInputSources, filterTextGenerationWorkflows(workflows || []))
-          })
+          setActionDraft(targetNodeId, createTextNodeDraft('comfy', nodeInputSources, filterTextGenerationWorkflows(workflows || [])))
           return
         }
 
-        setActionDraftsByNodeId({
-          [String(targetNodeId)]: createTextNodeDraft('select', buildNodeInputSources(targetNodeId, nodes, edges))
-        })
+        setActionDraft(targetNodeId, createTextNodeDraft('select', buildNodeInputSources(targetNodeId, nodes, edges)))
       },
       onDraftFieldChange: (targetNodeId, field, value) => {
         setActionDraftsByNodeId(currentDrafts => {
@@ -1169,6 +1333,7 @@ export default function GraphPage({ project }) {
           }
 
           return {
+            ...currentDrafts,
             [String(targetNodeId)]: nextDraft
           }
         })
@@ -1181,6 +1346,7 @@ export default function GraphPage({ project }) {
           }
 
           return {
+            ...currentDrafts,
             [String(targetNodeId)]: {
               ...nodeDraft,
               inputs: {
@@ -1199,6 +1365,7 @@ export default function GraphPage({ project }) {
           }
 
           return {
+            ...currentDrafts,
             [String(targetNodeId)]: {
               ...nodeDraft,
               inputBindings: {
@@ -1238,7 +1405,7 @@ export default function GraphPage({ project }) {
           }
         })
         replaceFlowNodeData(updatedNode)
-        setActionDraftsByNodeId({})
+        closeActionDraft(targetNodeId)
       },
       onRunNodeAction: async (targetNodeId) => {
         const targetNode = nodes.find(item => item.id === String(targetNodeId))
@@ -1385,7 +1552,6 @@ export default function GraphPage({ project }) {
 
           const promptId = createComfyExecutionId('graph-text-prompt')
           const clientId = createComfyExecutionId('graph-text-client')
-          setActionDraftsByNodeId({})
           registerJob({
             id: promptId,
             projectId: project.id,
@@ -1491,7 +1657,6 @@ export default function GraphPage({ project }) {
                     name: edit.name || targetDraft.name.trim()
                   })))
                 }
-                setActionDraftsByNodeId({})
               } catch (err) {
                 await setProcessingState('error', null, { error: err.message || 'Image edit failed', inputSource: editSourceReference })
                 pushExternalApiFailureNotification(
@@ -1520,7 +1685,6 @@ export default function GraphPage({ project }) {
                   ]
                 })
               })
-              setActionDraftsByNodeId({})
             } catch (err) {
               await setProcessingState('error', null, { error: err.message || 'Image generation failed' })
               pushExternalApiFailureNotification(
@@ -1584,7 +1748,6 @@ export default function GraphPage({ project }) {
             const saveAsEdit = Boolean(connectedInputAsset && workflowAcceptsImageInput)
             const promptId = createComfyExecutionId('graph-image-prompt')
             const clientId = createComfyExecutionId('graph-image-client')
-            setActionDraftsByNodeId({})
             registerJob({
               id: promptId,
               projectId: project.id,
@@ -1720,7 +1883,6 @@ export default function GraphPage({ project }) {
                   name: edit.name || targetDraft.name.trim()
                 })))
               }
-              setActionDraftsByNodeId({})
             } catch (err) {
               await setProcessingState('error', null, { error: err.message || 'Image edit failed', inputSource: sourceReference })
               pushExternalApiFailureNotification(
@@ -1773,7 +1935,6 @@ export default function GraphPage({ project }) {
 
             const promptId = createComfyExecutionId('graph-image-edit-prompt')
             const clientId = createComfyExecutionId('graph-image-edit-client')
-            setActionDraftsByNodeId({})
             registerJob({
               id: promptId,
               projectId: project.id,
@@ -1949,7 +2110,6 @@ export default function GraphPage({ project }) {
                   progressDetail: 'Tencent Cloud job submitted. Use GET RESULT to refresh status.',
                   currentNodeLabel: 'Tencent Cloud job is queued'
                 })
-                setActionDraftsByNodeId({})
               } catch (err) {
                 await setProcessingState('error', null, {
                   processingSource: 'Tencent Cloud',
@@ -2095,7 +2255,6 @@ export default function GraphPage({ project }) {
                   progressDetail: 'Tripo AI task submitted. Use GET RESULT to refresh status.',
                   currentNodeLabel: 'Tripo AI task is queued'
                 })
-                setActionDraftsByNodeId({})
               } catch (err) {
                 await setProcessingState('error', null, {
                   processingSource: 'Tripo AI',
@@ -2201,7 +2360,6 @@ export default function GraphPage({ project }) {
                   progressDetail: 'Hitem3D task submitted. Use GET RESULT to refresh status.',
                   currentNodeLabel: 'Hitem3D task is queued'
                 })
-                setActionDraftsByNodeId({})
               } catch (err) {
                 await setProcessingState('error', null, {
                   processingSource: 'Hitem3D',
@@ -2252,7 +2410,6 @@ export default function GraphPage({ project }) {
               if (savedMeshes.length > 1) {
                 await spawnAdditionalResultNodes('Mesh Gen', savedMeshes.slice(1))
               }
-              setActionDraftsByNodeId({})
             } catch (err) {
               await setProcessingState('error', null, { error: err.message || 'Mesh generation failed', inputSource: sourceReference })
               pushMeshGenerationFailureNotification(err.message || 'Mesh generation failed', 'Mesh generation API')
@@ -2301,7 +2458,6 @@ export default function GraphPage({ project }) {
 
             const promptId = createComfyExecutionId('graph-mesh-gen-prompt')
             const clientId = createComfyExecutionId('graph-mesh-gen-client')
-            setActionDraftsByNodeId({})
             registerJob({
               id: promptId,
               projectId: project.id,
@@ -2395,7 +2551,6 @@ export default function GraphPage({ project }) {
                 name: edit.name || targetDraft.name.trim()
               })))
             }
-            setActionDraftsByNodeId({})
           } catch (err) {
             await setProcessingState('error', null, { error: err.message || 'Image edit failed', inputSource: sourceReference })
             pushExternalApiFailureNotification(
@@ -2448,7 +2603,6 @@ export default function GraphPage({ project }) {
 
           const promptId = createComfyExecutionId('graph-image-edit-prompt')
           const clientId = createComfyExecutionId('graph-image-edit-client')
-          setActionDraftsByNodeId({})
           registerJob({
             id: promptId,
             projectId: project.id,
@@ -2677,7 +2831,6 @@ export default function GraphPage({ project }) {
           if (savedMeshes.length > 1) {
             await spawnAdditionalResultNodes('Mesh Gen', savedMeshes.slice(1))
           }
-          setActionDraftsByNodeId({})
         } catch (err) {
           const failureMessage = err.message || `Failed to fetch ${providerName} mesh result`
           await setProcessingState('error', null, {
@@ -2694,9 +2847,11 @@ export default function GraphPage({ project }) {
           pushMeshGenerationFailureNotification(failureMessage, notificationSource)
         }
       },
-      onCloseAction: () => setActionDraftsByNodeId({})
+      onCloseAction: (targetNodeId) => closeActionDraft(targetNodeId),
+      onToggleDraftCollapsed: toggleDraftCollapsed,
+      isDraftCollapsed: collapsedDraftNodeIds.has(String(node.id))
     }
-  })}), [actionDraftsByNodeId, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
+  })}), [actionDraftsByNodeId, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, toggleActionDraft, closeActionDraft, setActionDraft, toggleDraftCollapsed, collapsedDraftNodeIds, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
 
   const handleFileUpload = useCallback(async (event) => {
     const file = event.target.files?.[0]
@@ -2724,13 +2879,13 @@ export default function GraphPage({ project }) {
         }
       })
       replaceFlowNodeData(updatedNode)
-      setActionDraftsByNodeId({})
+      closeActionDraft(nodeId)
     } catch (err) {
       console.error('Failed to upload image to node:', err)
     } finally {
       pendingUploadNodeIdRef.current = null
     }
-  }, [project.id, replaceFlowNodeData, updateProjectNode, uploadAsset])
+  }, [closeActionDraft, project.id, replaceFlowNodeData, updateProjectNode, uploadAsset])
 
   const handleMeshFileUpload = useCallback(async (event) => {
     const file = event.target.files?.[0]
@@ -2767,13 +2922,13 @@ export default function GraphPage({ project }) {
         }
       })
       replaceFlowNodeData(updatedNode)
-      setActionDraftsByNodeId({})
+      closeActionDraft(nodeId)
     } catch (err) {
       console.error('Failed to upload mesh to node:', err)
     } finally {
       pendingMeshUploadNodeIdRef.current = null
     }
-  }, [project.id, replaceFlowNodeData, updateProjectNode, uploadAsset, uploadAssetThumbnail])
+  }, [closeActionDraft, project.id, replaceFlowNodeData, updateProjectNode, uploadAsset, uploadAssetThumbnail])
 
   const handleCanvasFileDragOver = useCallback((event) => {
     if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return

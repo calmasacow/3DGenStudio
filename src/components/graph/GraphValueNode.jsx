@@ -37,6 +37,9 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
 
   const draft = data.actionDraft
   const isProcessing = data.status === 'processing'
+  // The panel survives a run: locked while processing, never unmounted.
+  const isPanelLocked = isProcessing
+  const isDraftCollapsed = Boolean(data.isDraftCollapsed)
   const progressDetail = data.progressDetail || data.metadata?.detail || ''
   const currentNodeLabel = data.currentNodeLabel || data.metadata?.currentNodeLabel || ''
   const textWorkflows = data.textGenerationWorkflows || []
@@ -311,11 +314,38 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
             <div className="image-card__attributes graph-node__actions-panel">
               <div className="image-card__edit-actions">
                 <div className="graph-node__primary-actions">
-                  <button className="image-card__edit-action-btn nodrag" onClick={() => data.onToggleAction?.(data.id, data.nodeKind)} disabled={isProcessing}>
+                  <button
+                    className="image-card__edit-action-btn nodrag"
+                    onClick={() => data.onToggleAction?.(data.id, data.nodeKind)}
+                    disabled={isPanelLocked}
+                    title={draft ? 'Close the parameters' : 'Open the parameters'}
+                  >
                     <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>play_arrow</span>
                     Action
                   </button>
+                  {draft && (
+                    <button
+                      className="image-card__edit-action-btn nodrag"
+                      onClick={() => data.onToggleDraftCollapsed?.(data.id)}
+                      title={isDraftCollapsed ? 'Show the parameters' : 'Hide the parameters'}
+                      aria-expanded={!isDraftCollapsed}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                        {isDraftCollapsed ? 'expand_more' : 'expand_less'}
+                      </span>
+                      {isDraftCollapsed ? 'Params' : 'Hide'}
+                    </button>
+                  )}
                 </div>
+
+                {isPanelLocked && draft && (
+                  <div className="graph-node__panel-lock-note font-label">
+                    <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>lock</span>
+                    Parameters locked while running
+                  </div>
+                )}
+
+                {!isDraftCollapsed && (<>
 
                 {draft?.mode === 'select' && (
                   <div className="image-card__edit-action-menu">
@@ -326,7 +356,7 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
                 )}
 
                 {draft?.mode === 'comfy' && (
-                  <div className="image-card__edit-panel nodrag">
+                  <div className={`image-card__edit-panel nodrag${isPanelLocked ? ' image-card__edit-panel--locked' : ''}`}>
                     <span className="graph-node__panel-title font-label">COMFYUI WORKFLOW</span>
                     {data.comfyLoading ? (
                       <div className="image-card__asset-picker-empty">
@@ -397,6 +427,8 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
                     )}
                   </div>
                 )}
+
+                </>)}
               </div>
             </div>
           )}

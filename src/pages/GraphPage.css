@@ -988,3 +988,32 @@
   color: var(--on-surface-variant);
   font-style: italic;
 }
+
+/* --- Locked parameter panel -------------------------------------------- */
+/* A running node keeps its parameter panel mounted so nothing typed is lost.
+   Only the controls go inert — the panel itself stays scrollable, which is why
+   pointer-events is killed per control instead of on the container. */
+.image-card__edit-panel--locked {
+  opacity: 0.55;
+}
+
+.image-card__edit-panel--locked input,
+.image-card__edit-panel--locked select,
+.image-card__edit-panel--locked textarea,
+.image-card__edit-panel--locked button,
+.image-card__edit-panel--locked label,
+.image-card__edit-panel--locked .params-card__checkbox {
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.graph-node__panel-lock-note {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--primary);
+  background: rgba(143, 245, 255, 0.08);
+  border: 1px solid rgba(143, 245, 255, 0.2);
+}
