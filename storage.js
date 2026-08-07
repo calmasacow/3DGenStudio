@@ -1326,6 +1326,19 @@ export async function initializeStorage() {
       FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
     );
 
+    -- Batch Processing config. One per project (a "Batch" preset project holds a
+    -- single batch definition, reached straight from the workspace). stateJson is
+    -- the whole document: declared variables, the value groups that each become
+    -- one iteration, and the ordered workflow stages with their parameter
+    -- bindings. Results are not stored here — each one becomes a normal Card with
+    -- its asset, exactly like a Kanban/Graph generation.
+    CREATE TABLE IF NOT EXISTS BatchConfigs (
+      projectId INTEGER PRIMARY KEY,
+      stateJson TEXT NOT NULL DEFAULT '{}',
+      updatedAt INTEGER NOT NULL,
+      FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
+    );
+
     -- Asset <-> project membership. THE source of truth for "which project does
     -- this asset belong to". Cards_Assets is now only about PLACEMENT (which
     -- kanban card / graph node displays the asset), never about ownership.
@@ -2654,6 +2667,77 @@ export async function deleteProjectConnection(projectId, {
   );
 
   return { status: result.changes > 0 ? 'deleted' : 'not-found' };
+}
+
+// ---------------------------------------------------------------------------
+// Batch Processing
+// ---------------------------------------------------------------------------
+
+// Point a card at one existing asset, replacing whatever it held.
+//
+// A batch result may be an image edit or a mesh version, and those are created
+// by createAssetEditRecord / createAssetVersion, which deliberately do not
+// create a Cards_Assets row ("shows up in the project without needing a card").
+// The batch does want a card per result, so it links the asset here after the
+// run instead.
+export async function setCardAssetLink(projectId, cardKey, assetId) {
+  const normalizedProjectId = await ensureProjectExists(projectId);
+  const card = await resolveProjectCard(normalizedProjectId, cardKey);
+
+  if (!card) {
+    throw new Error('Card not found');
+  }
+
+  const asset = await getAssetRecordById(Number(assetId));
+  if (!asset) {
+    throw new Error('Asset not found');
+  }
+
+  const db = await getDb();
+  await run(db, 'DELETE FROM Cards_Assets WHERE cardId = ?', [card.id]);
+  await run(
+    db,
+    'INSERT INTO Cards_Assets (cardId, assetId, position) VALUES (?, ?, 0)',
+    [card.id, Number(assetId)]
+  );
+  await linkAssetToProject(db, Number(assetId), normalizedProjectId);
+
+  return await getAssetViewById(Number(assetId), { projectId: normalizedProjectId });
+}
+
+// One config row per project. The document shape is owned by the client
+// (src/utils/batchHelpers.js); storage only round-trips it as JSON. Results are
+// not stored here — each one becomes a normal Card carrying its asset.
+
+export async function getProjectBatchConfig(projectId) {
+  const normalizedProjectId = await ensureProjectExists(projectId);
+  const db = await getDb();
+  const row = await get(
+    db,
+    'SELECT stateJson, updatedAt FROM BatchConfigs WHERE projectId = ?',
+    [normalizedProjectId]
+  );
+
+  return {
+    projectId: normalizedProjectId,
+    state: row ? parseJson(row.stateJson, null) : null,
+    updatedAt: row?.updatedAt ?? null
+  };
+}
+
+export async function saveProjectBatchConfig(projectId, state) {
+  const normalizedProjectId = await ensureProjectExists(projectId);
+  const db = await getDb();
+  const updatedAt = Date.now();
+
+  await run(
+    db,
+    `INSERT INTO BatchConfigs (projectId, stateJson, updatedAt) VALUES (?, ?, ?)
+     ON CONFLICT(projectId) DO UPDATE SET stateJson = excluded.stateJson, updatedAt = excluded.updatedAt`,
+    [normalizedProjectId, JSON.stringify(state ?? {}), updatedAt]
+  );
+
+  return { projectId: normalizedProjectId, state: state ?? {}, updatedAt };
 }
 
 // ---------------------------------------------------------------------------
@@ -4295,7 +4379,8 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
   // association always lives in Cards_Assets (graph projects keep backing
   // "Images" cards per node asset). So we always export cards + card links, and
   // additionally export nodes + connections for graph projects.
-  const mode = String(project.preset || '').toLowerCase() === 'graph' ? 'graph' : 'kanban';
+  const presetKey = String(project.preset || '').toLowerCase();
+  const mode = presetKey === 'graph' ? 'graph' : presetKey === 'batch' ? 'batch' : 'kanban';
   const seedAssetIds = new Set();
 
   // Graph node-cards (Cards with a nodeTypeId). Each carries its single asset in

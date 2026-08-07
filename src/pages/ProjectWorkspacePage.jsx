@@ -3,9 +3,10 @@ import { Navigate, useParams } from 'react-router-dom'
 import { useProjects } from '../context/ProjectContext'
 import KanbanPage from './KanbanPage'
 import GraphPage from './GraphPage'
+import BatchPage from './BatchPage'
 
-function isGraphPreset(project) {
-  return String(project?.preset || '').trim().toLowerCase() === 'graph'
+function presetKey(project) {
+  return String(project?.preset || '').trim().toLowerCase()
 }
 
 export default function ProjectWorkspacePage() {
@@ -57,8 +58,12 @@ export default function ProjectWorkspacePage() {
     return <Navigate to="/projects" replace />
   }
 
-  if (isGraphPreset(project)) {
+  if (presetKey(project) === 'graph') {
     return <GraphPage project={project} />
+  }
+
+  if (presetKey(project) === 'batch') {
+    return <BatchPage project={project} />
   }
 
   return <KanbanPage />

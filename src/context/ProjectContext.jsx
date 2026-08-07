@@ -509,6 +509,38 @@ export function ProjectProvider({ children }) {
     return data
   }
 
+  // Batch Processing config: one document per project, round-tripped as JSON.
+  const getBatchConfig = async (projectId) => {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/batch-config`)
+    const data = await res.json()
+    if (!res.ok) throw new Error(data?.error || 'Failed to load batch config')
+    return data
+  }
+
+  const saveBatchConfig = async (projectId, state) => {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/batch-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state })
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data?.error || 'Failed to save batch config')
+    return data
+  }
+
+  // A batch result that is an image edit or a mesh version is created without a
+  // Cards_Assets row, so the batch links it to its result card here.
+  const setBatchCardAsset = async (projectId, cardKey, assetId) => {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/batch-cards/${encodeURIComponent(cardKey)}/asset`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId })
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data?.error || 'Failed to link the batch result to its card')
+    return data
+  }
+
   const getBoard = async (boardId) => {
     const res = await fetch(`${API_BASE}/boards/${boardId}`)
     const data = await res.json()
@@ -1332,6 +1364,9 @@ export function ProjectProvider({ children }) {
       getBoard,
       createBoard,
       updateBoard,
+      getBatchConfig,
+      saveBatchConfig,
+      setBatchCardAsset,
       saveBoardState,
       deleteBoard,
       getProjectAssets,

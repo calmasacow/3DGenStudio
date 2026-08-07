@@ -3,6 +3,7 @@ import { ProjectProvider } from './context/ProjectContext'
 import { SettingsProvider } from './context/SettingsContext'
 import { NotificationProvider } from './context/NotificationContext'
 import { WorkflowJobsProvider } from './context/WorkflowJobsContext'
+import { BatchRunProvider } from './context/BatchRunContext'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectWorkspacePage from './pages/ProjectWorkspacePage'
 import AssetsPage from './pages/AssetsPage'
@@ -36,7 +37,9 @@ export default function App() {
       <SettingsProvider>
         <ProjectProvider>
           <WorkflowJobsProvider>
-            <AppRoutes />
+            <BatchRunProvider>
+              <AppRoutes />
+            </BatchRunProvider>
           </WorkflowJobsProvider>
         </ProjectProvider>
       </SettingsProvider>

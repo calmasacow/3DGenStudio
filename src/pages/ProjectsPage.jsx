@@ -10,16 +10,19 @@ import ExportProjectDialog from '../components/ExportProjectDialog'
 import ImportProjectDialog from '../components/ImportProjectDialog'
 import graphPreview from '../assets/GraphPage.png'
 import kanbanPreview from '../assets/KanbanBoard.png'
+import batchPreview from '../assets/Batch.png'
 import './ProjectsPage.css'
 
 const PRESET_PREVIEWS = {
   Graph: graphPreview,
   Kanban: kanbanPreview,
+  Batch: batchPreview,
 }
 
 const PRESETS = [
   'Kanban',
   'Graph',
+  'Batch',
 ]
 
 const CHANGE_LOG_ENTRIES = [

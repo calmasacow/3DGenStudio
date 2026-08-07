@@ -1,0 +1,534 @@
+/* Batch Processing project.
+   Columns scroll horizontally (parameters, then one per workflow stage); the
+   results grid sits below on the same axes. Backgrounds are opaque on purpose —
+   backdrop-filter on a full-page surface is what drags the desktop build. */
+
+/* The page owns the viewport and the workspace scrolls inside it, so the
+   toolbar and the problems panel can never push the columns or the results
+   grid below the fold however long the problem list gets. */
+.batch-page {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--on-surface);
+}
+
+.batch-page__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.12);
+  background: rgba(13, 14, 16, 0.9);
+}
+
+.batch-page__toolbar-left,
+.batch-page__toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.batch-page__badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--primary);
+  background: rgba(143, 245, 255, 0.1);
+  border: 1px solid rgba(143, 245, 255, 0.25);
+  letter-spacing: 0.08em;
+}
+
+.batch-page__summary {
+  font-size: 0.8rem;
+  color: var(--on-surface-variant);
+}
+
+.batch-page__save {
+  font-size: 0.72rem;
+  color: var(--on-surface-variant);
+  min-width: 4rem;
+}
+
+.batch-page__save--error { color: #ff8a8a; }
+.batch-page__save--saved { color: rgba(143, 245, 255, 0.7); }
+
+/* Collapsed to a single row by default, and capped + scrollable when opened, so
+   a long list can never push the columns and results below the fold. */
+.batch-page__problems {
+  flex: 0 0 auto;
+  margin: 0.75rem 1.25rem 0;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid rgba(255, 176, 92, 0.3);
+  background: rgba(255, 176, 92, 0.07);
+  color: #ffcf9b;
+  font-size: 0.8rem;
+}
+
+.batch-page__problems-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.1rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.batch-page__problems-toggle .material-symbols-outlined { font-size: 18px; }
+.batch-page__problems-title { letter-spacing: 0.04em; }
+
+.batch-page__problems-list {
+  margin: 0.4rem 0 0.2rem;
+  padding-left: 1.6rem;
+  max-height: 8.5rem;
+  overflow-y: auto;
+}
+
+.batch-page__problems-list li { margin: 0.15rem 0; }
+
+/* The active tab's content fills this and does its own scrolling, so the
+   columns reach the bottom of the page instead of stopping at a fixed height. */
+.batch-page__main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.batch-page__loading {
+  padding: 3rem;
+  text-align: center;
+  color: var(--on-surface-variant);
+}
+
+.batch-page__columns {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+  /* Stretch, so every column is as tall as the workspace and each one scrolls
+     its own contents rather than the whole row growing. */
+  align-items: stretch;
+}
+
+/* --- Columns ------------------------------------------------------------ */
+
+.batch-column {
+  flex: 0 0 320px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid rgba(143, 245, 255, 0.14);
+  background: rgba(20, 22, 26, 0.95);
+  overflow: hidden;
+}
+
+.batch-column--add {
+  flex: 0 0 220px;
+  border-style: dashed;
+  background: transparent;
+}
+
+/* Full-height column, so make the whole dashed area the drop target rather
+   than leaving a small button stranded at the top. */
+.batch-column--add .batch-add-stage {
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.batch-column__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.12);
+  background: rgba(13, 14, 16, 0.6);
+}
+
+.batch-column__header-actions { display: flex; gap: 0.15rem; }
+
+.batch-column__title { color: var(--primary); letter-spacing: 0.08em; }
+.batch-column__subtitle { font-size: 0.7rem; color: var(--on-surface-variant); }
+
+.batch-column__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* --- Sections / fields -------------------------------------------------- */
+
+.batch-section { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.batch-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.batch-section__title { color: var(--on-surface-variant); letter-spacing: 0.08em; }
+
+.batch-empty {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--on-surface-variant);
+  opacity: 0.8;
+}
+
+.batch-field { display: flex; flex-direction: column; gap: 0.25rem; }
+.batch-field__label { color: var(--on-surface-variant); letter-spacing: 0.06em; }
+
+.batch-input,
+.batch-select,
+.batch-textarea {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(143, 245, 255, 0.18);
+  background: rgba(13, 14, 16, 0.7);
+  color: var(--on-surface);
+  font-size: 0.8rem;
+  font-family: inherit;
+}
+
+.batch-textarea { resize: vertical; }
+.batch-input--title { font-weight: 600; }
+.batch-select--compact { width: auto; min-width: 5.5rem; }
+
+.batch-input:disabled,
+.batch-select:disabled,
+.batch-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.batch-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+}
+
+/* --- Buttons ------------------------------------------------------------ */
+
+.batch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(143, 245, 255, 0.25);
+  background: rgba(143, 245, 255, 0.08);
+  color: var(--primary);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.batch-btn:hover:not(:disabled) { background: rgba(143, 245, 255, 0.16); }
+.batch-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.batch-btn .material-symbols-outlined { font-size: 16px; }
+
+.batch-btn--ghost { background: transparent; }
+
+.batch-btn--primary {
+  background: var(--primary);
+  color: var(--on-tertiary, #06202a);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.batch-btn--danger {
+  background: rgba(255, 122, 122, 0.14);
+  border-color: rgba(255, 122, 122, 0.4);
+  color: #ff9a9a;
+}
+
+.batch-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+}
+
+.batch-icon-btn:hover:not(:disabled) {
+  color: var(--primary);
+  background: rgba(143, 245, 255, 0.1);
+}
+
+.batch-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.batch-icon-btn .material-symbols-outlined { font-size: 16px; }
+
+/* --- Variables / groups ------------------------------------------------- */
+
+.batch-variable-list { display: flex; flex-direction: column; gap: 0.35rem; }
+
+.batch-variable-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.batch-group-list { display: flex; flex-direction: column; gap: 0.6rem; }
+
+.batch-group-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(143, 245, 255, 0.14);
+  background: rgba(13, 14, 16, 0.5);
+}
+
+.batch-group-card__header {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.batch-group-card__values { display: flex; flex-direction: column; gap: 0.45rem; }
+
+.batch-group-card__badge {
+  align-self: flex-start;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--primary);
+  background: rgba(143, 245, 255, 0.08);
+  letter-spacing: 0.06em;
+}
+
+/* --- Stage parameters --------------------------------------------------- */
+
+.batch-param-list { display: flex; flex-direction: column; gap: 0.7rem; }
+
+.batch-param {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.07);
+}
+
+.batch-param:last-child { border-bottom: none; padding-bottom: 0; }
+.batch-param__label { color: var(--primary); letter-spacing: 0.05em; }
+
+.batch-param__hint {
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--on-surface-variant);
+  opacity: 0.8;
+}
+
+.batch-param__warning {
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: #ffcf9b;
+}
+
+.batch-add-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 1.5rem 1rem;
+  border: none;
+  border-radius: var(--radius-md, 10px);
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  text-align: center;
+}
+
+.batch-add-stage:hover:not(:disabled) { color: var(--primary); }
+.batch-add-stage:disabled { opacity: 0.4; cursor: not-allowed; }
+.batch-add-stage .material-symbols-outlined { font-size: 26px; }
+.batch-add-stage__hint { font-size: 0.68rem; line-height: 1.35; opacity: 0.75; }
+
+/* --- Results grid ------------------------------------------------------- */
+
+.batch-results {
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid rgba(143, 245, 255, 0.14);
+  background: rgba(20, 22, 26, 0.95);
+  overflow: hidden;
+}
+
+.batch-results__header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.12);
+  background: rgba(13, 14, 16, 0.6);
+}
+
+.batch-results__scroll { overflow-x: auto; }
+
+.batch-results__table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: max-content;
+}
+
+.batch-results__corner { width: 8rem; }
+
+.batch-results__col-head,
+.batch-results__row-head {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--on-surface-variant);
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.1);
+}
+
+.batch-results__row-head {
+  border-right: 1px solid rgba(143, 245, 255, 0.1);
+  border-bottom: 1px solid rgba(143, 245, 255, 0.07);
+  position: sticky;
+  left: 0;
+  background: rgba(20, 22, 26, 0.98);
+}
+
+.batch-results__cell {
+  padding: 0.35rem;
+  border-bottom: 1px solid rgba(143, 245, 255, 0.07);
+  vertical-align: top;
+}
+
+.batch-results__cell-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  width: 8.5rem;
+  height: 8.5rem;
+  padding: 0.4rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(143, 245, 255, 0.12);
+  background: rgba(13, 14, 16, 0.55);
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.batch-results__cell-btn:disabled { cursor: default; }
+.batch-results__cell-btn:hover:not(:disabled) { border-color: rgba(143, 245, 255, 0.4); }
+
+.batch-results__thumb {
+  max-width: 100%;
+  max-height: 5.6rem;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.batch-results__icon { font-size: 26px; opacity: 0.5; }
+.batch-results__caption { font-size: 0.66rem; text-align: center; }
+.batch-results__extra { font-size: 0.6rem; opacity: 0.7; }
+
+.batch-results__cell--running .batch-results__cell-btn { border-color: rgba(143, 245, 255, 0.45); }
+.batch-results__cell--error .batch-results__cell-btn { border-color: rgba(255, 122, 122, 0.45); }
+.batch-results__cell--completed .batch-results__cell-btn { border-color: rgba(143, 245, 255, 0.28); }
+
+.batch-results__cell--running .batch-results__icon {
+  animation: batch-spin 1.2s linear infinite;
+  opacity: 0.9;
+}
+
+@keyframes batch-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* --- Tabs --------------------------------------------------------------- */
+/* Stages and results each want the full height, so they take turns. */
+
+.batch-tabs {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.15rem;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(13, 14, 16, 0.8);
+  border: 1px solid rgba(143, 245, 255, 0.14);
+}
+
+.batch-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--on-surface-variant);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.batch-tab:hover { color: var(--primary); }
+
+.batch-tab--active {
+  background: rgba(143, 245, 255, 0.12);
+  color: var(--primary);
+}
+
+.batch-tab__count {
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: rgba(143, 245, 255, 0.18);
+  color: var(--primary);
+  font-size: 0.62rem;
+  letter-spacing: 0;
+}
+
+/* On its own tab the grid gets the whole workspace. */
+.batch-page__main > .batch-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.batch-page__main > .batch-results .batch-results__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.batch-page__main > .batch-results .batch-results__col-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(20, 22, 26, 0.98);
+}

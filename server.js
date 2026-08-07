@@ -47,6 +47,9 @@ import {
   deleteProjectNode,
   deleteBoard,
   listProjectBoards,
+  getProjectBatchConfig,
+  setCardAssetLink,
+  saveProjectBatchConfig,
   getBoardById,
   createBoard,
   updateBoard,
@@ -5659,6 +5662,45 @@ app.delete('/api/graph/connections', async (req, res) => {
   } catch (err) {
     console.error('Failed to delete graph connection:', err);
     res.status(500).json({ error: err.message || 'Failed to delete graph connection' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Batch Processing
+// ---------------------------------------------------------------------------
+
+app.put('/api/projects/:projectId/batch-cards/:cardKey/asset', async (req, res) => {
+  try {
+    const asset = await setCardAssetLink(
+      Number(req.params.projectId),
+      req.params.cardKey,
+      Number(req.body?.assetId)
+    );
+    res.json(asset);
+  } catch (err) {
+    if (err.message === 'Card not found' || err.message === 'Asset not found') {
+      return res.status(404).json({ error: err.message });
+    }
+    console.error('Failed to link a batch result to its card:', err);
+    res.status(500).json({ error: err.message || 'Failed to link the batch result' });
+  }
+});
+
+app.get('/api/projects/:projectId/batch-config', async (req, res) => {
+  try {
+    res.json(await getProjectBatchConfig(Number(req.params.projectId)));
+  } catch (err) {
+    console.error('Failed to load batch config:', err);
+    res.status(500).json({ error: err.message || 'Failed to load batch config' });
+  }
+});
+
+app.put('/api/projects/:projectId/batch-config', async (req, res) => {
+  try {
+    res.json(await saveProjectBatchConfig(Number(req.params.projectId), req.body?.state ?? {}));
+  } catch (err) {
+    console.error('Failed to save batch config:', err);
+    res.status(500).json({ error: err.message || 'Failed to save batch config' });
   }
 });
 
