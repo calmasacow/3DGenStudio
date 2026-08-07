@@ -368,14 +368,30 @@ export function validateBatch({ config, workflowsById }) {
   return problems
 }
 
+// The types a workflow declares it will produce, e.g. ['mesh'].
+export function getWorkflowOutputTypes(workflow) {
+  return (workflow?.outputs || [])
+    .map(output => String(output?.valueType || '').toLowerCase())
+    .filter(Boolean)
+}
+
 // The upstream asset this stage consumes as a file input, if any. It is offered
 // to the server as `parentAssetId` so a derived result is stored under what it
 // came from: an image edited from an image becomes that image's edit, a mesh
-// derived from a mesh becomes that mesh's version. The server only adopts it
-// when the output type matches, so an image → mesh stage still makes a new root.
+// derived from a mesh becomes that mesh's version.
+//
+// It must be the input whose type MATCHES THE OUTPUT, not simply the first file
+// input. "Texture Mesh with Trellis2" takes [image, mesh] and returns a mesh:
+// offering the image makes the server reject the parent on type mismatch and the
+// result lands as a new root instead of a version. Parameter order is arbitrary,
+// so the declared output type is what decides.
 export function findParentAssetForStage({ stage, workflow, stageOutputs }) {
+  const outputTypes = getWorkflowOutputTypes(workflow)
+  const candidates = []
+
   for (const parameter of workflow?.parameters || []) {
-    if (!isFileWorkflowValueType(getWorkflowParameterValueType(parameter))) {
+    const valueType = getWorkflowParameterValueType(parameter)
+    if (!isFileWorkflowValueType(valueType)) {
       continue
     }
     const binding = getBinding(stage, parameter.id)
@@ -384,10 +400,33 @@ export function findParentAssetForStage({ stage, workflow, stageOutputs }) {
     }
     const upstream = stageOutputs?.[binding.stageId]
     if (upstream?.id) {
-      return upstream
+      candidates.push({ upstream, valueType })
     }
   }
-  return null
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  // Best: the produced asset's own type matches something this workflow outputs.
+  const byAssetType = candidates.find(candidate => (
+    outputTypes.includes(String(candidate.upstream.type || '').toLowerCase())
+  ))
+  if (byAssetType) {
+    return byAssetType.upstream
+  }
+
+  // Next best: the parameter's declared type matches, for when a run result came
+  // back without a usable `type`.
+  const byParameterType = candidates.find(candidate => outputTypes.includes(candidate.valueType))
+  if (byParameterType) {
+    return byParameterType.upstream
+  }
+
+  // The workflow declares no output type we can match on: fall back to the first
+  // file input. A genuine mismatch is still safe — the server compares types and
+  // creates a root asset instead of a wrongly-parented one.
+  return outputTypes.length === 0 ? candidates[0].upstream : null
 }
 
 export function describeCell(cell) {
