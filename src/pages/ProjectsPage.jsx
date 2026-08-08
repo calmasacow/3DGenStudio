@@ -27,6 +27,14 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.3.0',
+    date: '2026-08-08',
+    items: [
+			'Graph Page: Nodes keep the last parameters',
+			'New Project Type: Batch'
+    ],
+  },
+  {
     version: 'v2.2.2',
     date: '2026-08-07',
     items: [

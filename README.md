@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-08-08** | New project type: Batch<br>Graph page: nodes keep the last parameters |
 | **2026-08-07** | Fixed bugs<br>Support for Chinese computer<br>Updated managed ComfyUI and packages<br>SetupWizard: Added SAM 3.1 model<br>Updated all image workflows |
 | **2026-07-31** | Desktop App: Install ComfyUI<br>ImageEditor: Fixed alpha transparency<br>MultiView support with Trellis2 |
 | **2026-07-28** | Fixed Desktop App on Linux<br>ComfyUI: Added Enums<br>Wireframe mode in Mesh Previewer |
