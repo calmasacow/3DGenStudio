@@ -660,7 +660,7 @@
 				{ "Node": "1",  "Input": "max_tokens",  "Name": "Max Tokens",   "Type": "Number" },
 				{ "Node": "1",  "Input": "custom_prompt", "Name": "Custom Prompt", "Type": "String" },
 				{ "Node": "1",  "Input": "keep_model_loaded", "Name": "Keep Model Loaded", "Type": "Boolean" },
-				{ "Node": "1",  "Input": "model_name", "Name": "Model", "Type": "String", "Enums":["Qwen3-VL-2B-Instruct","Qwen3-VL-4B-Instruct","Qwen3-VL-8B-Instruct"] }
+				{ "Node": "1",  "Input": "model_name", "Name": "Model", "Type": "String", "Enums":["Qwen2.5-VL-3B-Instruct","Qwen2.5-VL-7B-Instruct","Qwen3-VL-2B-Instruct","Qwen3-VL-4B-Instruct","Qwen3-VL-8B-Instruct"] }
 			],
 			"Outputs": [
 				{ "Node": "3", "Name": "Output Text", "Type": "String" }
