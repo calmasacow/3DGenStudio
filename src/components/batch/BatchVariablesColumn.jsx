@@ -5,7 +5,8 @@ import {
   getGroupLabel,
   getVariableLabel,
   isBatchAssetValue,
-  isFileVariableType
+  isFileVariableType,
+  toBatchBoolean
 } from '../../utils/batchHelpers'
 import { getAssetPreviewUrl } from '../../utils/graphHelpers'
 
@@ -206,6 +207,26 @@ export default function BatchVariablesColumn({
                         </span>
                         {isFileVariableType(variable.type) ? (
                           renderAssetValue(group, variable)
+                        ) : variable.type === 'boolean' ? (
+                          // Three states, not a checkbox: `false` is a real value,
+                          // so an unticked box could not be told apart from "this
+                          // group doesn't set it" — which is what makes a group sparse.
+                          <select
+                            className="batch-select"
+                            value={group.values?.[variable.id] === undefined || group.values?.[variable.id] === ''
+                              ? ''
+                              : String(toBatchBoolean(group.values[variable.id]))}
+                            onChange={event => onSetGroupValue(
+                              group.id,
+                              variable.id,
+                              event.target.value === '' ? '' : event.target.value === 'true'
+                            )}
+                            disabled={locked}
+                          >
+                            <option value="">fallback to stage value</option>
+                            <option value="true">True</option>
+                            <option value="false">False</option>
+                          </select>
                         ) : variable.type === 'number' ? (
                           <input
                             type="number"

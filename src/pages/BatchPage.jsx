@@ -31,7 +31,7 @@ import {
   getGroupLabel,
   getRunIdFromCells,
   getStageLabel,
-  isFileVariableType,
+  variableValueKind,
   summarizeRunProgress,
   normalizeBatchConfig,
   validateBatch
@@ -201,15 +201,16 @@ export default function BatchPage({ project }) {
     patchConfig(current => ({ ...current, variables: [...current.variables, createVariable()] }))
   }, [patchConfig])
 
-  // Retyping between a file type and a scalar one makes every value that groups
-  // already hold meaningless — a typed-in prompt is not an image — so they are
-  // dropped rather than left to fail at run time. Any stage still bound to the
-  // variable reports the mismatch until it is repointed.
+  // Retyping across value kinds — file, boolean, scalar — makes every value that
+  // groups already hold meaningless (a typed-in prompt is not an image, and it
+  // would resolve to `true` as a boolean), so they are dropped rather than left
+  // to fail at run time. Any stage still bound to the variable reports the
+  // mismatch until it is repointed.
   const handleUpdateVariable = useCallback((variableId, patch) => {
     patchConfig(current => {
       const previous = current.variables.find(item => item.id === variableId)
       const kindChanged = patch.type !== undefined
-        && isFileVariableType(patch.type) !== isFileVariableType(previous?.type)
+        && variableValueKind(patch.type) !== variableValueKind(previous?.type)
 
       return {
         ...current,

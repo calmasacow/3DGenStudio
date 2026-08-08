@@ -23,12 +23,34 @@
 
 import { getWorkflowParameterValueType, isFileWorkflowValueType } from './graphHelpers'
 
-export const BATCH_VARIABLE_TYPES = ['string', 'number', 'image', 'mesh']
+export const BATCH_VARIABLE_TYPES = ['string', 'number', 'boolean', 'image', 'mesh']
+
+// Booleans travel through JSON and through form controls, so a stored value can
+// arrive as a real boolean or as text. `Boolean('false')` is `true`, which would
+// silently invert a workflow toggle — so parse rather than cast.
+export function toBatchBoolean(value) {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1') return true
+    if (normalized === 'false' || normalized === '0' || normalized === '') return false
+  }
+  return Boolean(value)
+}
 
 // image/mesh variables carry a picked asset rather than a typed-in value, which
 // is what lets a first stage receive a file input the batch supplies itself.
 export function isFileVariableType(type) {
   return type === 'image' || type === 'mesh'
+}
+
+// What shape a group's value takes for this variable type. Retyping within a
+// kind keeps the values (a number reads fine as text and back); crossing kinds
+// makes them meaningless, so they are dropped — carrying "a stone golem" into a
+// boolean would quietly resolve to `true`.
+export function variableValueKind(type) {
+  if (isFileVariableType(type)) return 'file'
+  if (type === 'boolean') return 'boolean'
+  return 'scalar'
 }
 
 export const BINDING_MANUAL = 'manual'
@@ -128,13 +150,23 @@ export function articleFor(word) {
 }
 
 // Can this variable feed a parameter of this type? A file parameter takes only a
-// variable of exactly its own type; anything else takes only a scalar variable.
+// variable of exactly its own type. A boolean is exclusive in both directions:
+// a checkbox cannot sensibly fill a prompt or a seed, and turning typed text into
+// a toggle is a trap, so a boolean input takes only a boolean variable and vice
+// versa. String and number stay interchangeable — a number reads fine as text,
+// and a numeric string coerces back.
 export function isVariableCompatibleWithValueType(variable, valueType) {
   const type = String(variable?.type || 'string')
   if (isFileWorkflowValueType(valueType)) {
     return type === valueType
   }
-  return !isFileVariableType(type)
+  if (isFileVariableType(type)) {
+    return false
+  }
+  if (valueType === 'boolean' || type === 'boolean') {
+    return valueType === 'boolean' && type === 'boolean'
+  }
+  return true
 }
 
 export function createStage(name = '') {
@@ -152,7 +184,7 @@ export function createStageDefaultInputs(workflow) {
       continue
     }
     if (valueType === 'boolean') {
-      inputs[parameter.id] = Boolean(parameter.defaultValue ?? false)
+      inputs[parameter.id] = toBatchBoolean(parameter.defaultValue ?? false)
       continue
     }
     const defaultValue = parameter.defaultValue
@@ -326,7 +358,7 @@ function coerceValue(parameter, rawValue) {
     return Number.isFinite(numeric) ? numeric : null
   }
   if (valueType === 'boolean') {
-    return Boolean(rawValue)
+    return toBatchBoolean(rawValue)
   }
   return rawValue
 }
@@ -435,7 +467,7 @@ export function resolveStageInputs({ stage, workflow, group, variables, stageOut
 
     const manualValue = stage?.inputs?.[parameter.id]
     if (valueType === 'boolean') {
-      inputs[parameter.id] = Boolean(manualValue)
+      inputs[parameter.id] = toBatchBoolean(manualValue)
       continue
     }
     if (manualValue === undefined || manualValue === null || String(manualValue).trim() === '') {
