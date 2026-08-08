@@ -73,26 +73,6 @@
       "title": "Set Latent Noise Mask"
     }
   },
-  "128": {
-    "inputs": {
-      "expand": 0,
-      "incremental_expandrate": 0,
-      "tapered_corners": true,
-      "flip_input": false,
-      "blur_radius": 31.3,
-      "lerp_alpha": 1,
-      "decay_factor": 1,
-      "fill_holes": false,
-      "mask": [
-        "161",
-        0
-      ]
-    },
-    "class_type": "GrowMaskWithBlur",
-    "_meta": {
-      "title": "Grow Mask With Blur"
-    }
-  },
   "129": {
     "inputs": {
       "pixels": [
@@ -165,7 +145,7 @@
       "upscale_method": "lanczos",
       "crop": "center",
       "mask": [
-        "128",
+        "161",
         0
       ]
     },
@@ -374,7 +354,7 @@
   "173": {
     "inputs": {
       "images": [
-        "172",
+        "176",
         0
       ]
     },
@@ -399,6 +379,27 @@
     "class_type": "KSamplerSelect",
     "_meta": {
       "title": "KSamplerSelect"
+    }
+  },
+  "176": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#222222",
+      "image": [
+        "172",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
     }
   }
 }

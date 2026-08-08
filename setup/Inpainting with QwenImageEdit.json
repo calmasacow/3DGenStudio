@@ -145,26 +145,6 @@
       "title": "Set Latent Noise Mask"
     }
   },
-  "128": {
-    "inputs": {
-      "expand": 0,
-      "incremental_expandrate": 0,
-      "tapered_corners": true,
-      "flip_input": false,
-      "blur_radius": 31.3,
-      "lerp_alpha": 1,
-      "decay_factor": 1,
-      "fill_holes": false,
-      "mask": [
-        "161",
-        0
-      ]
-    },
-    "class_type": "GrowMaskWithBlur",
-    "_meta": {
-      "title": "Grow Mask With Blur"
-    }
-  },
   "129": {
     "inputs": {
       "pixels": [
@@ -237,7 +217,7 @@
       "upscale_method": "lanczos",
       "crop": "center",
       "mask": [
-        "128",
+        "161",
         0
       ]
     },
