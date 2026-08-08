@@ -361,7 +361,21 @@
 					"Outputs": [
 						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
 					]
-				}
+				},
+				{
+					"Name": "Inpainting with Flux2Klein4B",
+					"File": "setup/Inpainting with Flux2Klein4B.json",
+					"Inputs": [
+						{ "Node": "11", "Input": "image",  "Name": "Source Image",    "Type": "Image"  },
+						{ "Node": "161",  "Input": "image", "Name": "Source Mask",            "Type": "Image" },
+						{ "Node": "164",  "Input": "text", "Name": "Prompt",            "Type": "String" },
+						{ "Node": "174", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "138", "Input": "largest_size",  "Name": "Image Scale To MaxDim",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "173", "Name": "Save Image", "Type": "Image" }
+					]
+				}				
 			]
 		},
 		{
@@ -455,7 +469,21 @@
 					"Outputs": [
 						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
 					]
-				}
+				},
+				{
+					"Name": "Inpainting with Flux2Klein9B",
+					"File": "setup/Inpainting with Flux2Klein9B.json",
+					"Inputs": [
+						{ "Node": "11", "Input": "image",  "Name": "Source Image",    "Type": "Image"  },
+						{ "Node": "161",  "Input": "image", "Name": "Source Mask",            "Type": "Image" },
+						{ "Node": "164",  "Input": "text", "Name": "Prompt",            "Type": "String" },
+						{ "Node": "174", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "138", "Input": "largest_size",  "Name": "Image Scale To MaxDim",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "173", "Name": "Save Image", "Type": "Image" }
+					]
+				}					
 			]
 		},
 		{
