@@ -40,8 +40,8 @@ export const EXPORT_FORMATS = [
     hint: 'Neutral FBX (meters, Y-up) with the skeleton and one take per animation clip. Suitable for Godot, Maya, 3ds Max and other DCC tools.'
   },
   {
-    value: 'obj', label: 'OBJ — geometry + .mtl + textures', extension: 'obj', multiFile: true, kind: 'local',
-    hint: 'OBJ saves geometry, materials and textures as separate files named after the mesh (e.g. mesh.obj, mesh.mtl, mesh_albedo.png).'
+    value: 'obj', label: 'OBJ — geometry + .mtl + PBR textures', extension: 'obj', multiFile: true, kind: 'local',
+    hint: 'OBJ saves geometry, materials and textures as separate files named after the mesh (e.g. mesh.obj, mesh.mtl, mesh_albedo.png). PBR materials are carried through the MTL extension — roughness (map_Pr), metallic (map_Pm), normal (norm) and AO (map_Ka); glTF meshes that pack occlusion/roughness/metalness into one texture are split into a greyscale file per channel. Import into Blender with File > Import > Wavefront (.obj).'
   },
   { value: 'ply', label: 'PLY — geometry only', extension: 'ply', multiFile: false, kind: 'local' },
   { value: 'stl', label: 'STL — geometry only', extension: 'stl', multiFile: false, kind: 'local' }
@@ -120,9 +120,19 @@ export async function loadObject3DFromUrl(url) {
   throw new Error('Unsupported mesh format')
 }
 
+// glTF packs occlusion/roughness/metalness into a single RGB texture, and
+// three.js samples one channel per material slot (.r = ao, .g = roughness,
+// .b = metalness). MTL's PBR extension instead expects a standalone greyscale
+// map per slot, so exports extract the channel the renderer actually reads.
+// Greyscale sources come through unchanged (r === g === b), so extracting is
+// always safe — no need to detect whether a map is packed.
+const TEXTURE_CHANNEL_OFFSET = { r: 0, g: 1, b: 2 }
+
 // Rasterize a THREE.Texture's image into a PNG blob. Handles HTMLImageElement,
 // HTMLCanvasElement and ImageBitmap sources (canvas.drawImage accepts all).
-async function textureToPngBlob(texture) {
+// Pass `channel` to broadcast one channel across RGB instead of copying it
+// verbatim.
+async function textureToPngBlob(texture, channel = null) {
   const image = texture?.image
   if (!image) {
     return null
@@ -147,6 +157,28 @@ async function textureToPngBlob(texture) {
   } catch (error) {
     console.warn('Failed to rasterize texture for export:', error)
     return null
+  }
+
+  if (channel) {
+    const offset = TEXTURE_CHANNEL_OFFSET[channel]
+    try {
+      const imageData = context.getImageData(0, 0, width, height)
+      const { data } = imageData
+      for (let i = 0; i < data.length; i += 4) {
+        const value = data[i + offset]
+        data[i] = value
+        data[i + 1] = value
+        data[i + 2] = value
+        data[i + 3] = 255
+      }
+      context.putImageData(imageData, 0, 0)
+    } catch (error) {
+      // Tainted canvas (cross-origin texture). Writing a packed ORM map as-is
+      // would have the importer read colour data as a roughness value, so drop
+      // the map rather than export something wrong.
+      console.warn('Failed to extract texture channel for export:', error)
+      return null
+    }
   }
 
   return await new Promise(resolve => canvas.toBlob(blob => resolve(blob), 'image/png'))
@@ -200,7 +232,10 @@ function exportStl(object, base) {
 // OBJExporter only emits geometry (+ `usemtl` when a material is named), so we
 // generate the companion .mtl ourselves and rasterize each referenced texture.
 // All companions are named after the mesh base name, e.g. dwarf.obj /
-// dwarf.mtl / dwarf_albedo.png / dwarf_normal.png.
+// dwarf.mtl / dwarf_albedo.png / dwarf_normal.png / dwarf_roughness.png.
+// Standard materials additionally emit the MTL PBR extension keywords
+// (Pr/Pm/map_Pr/map_Pm), which Blender, Substance and most modern DCC
+// importers read; legacy viewers fall back to Kd/Ks/Ns and ignore the rest.
 // Pick a material's primary texture to decide UV orientation.
 function getPrimaryMap(material) {
   if (!material) return null
@@ -278,38 +313,72 @@ async function exportObj(object, base) {
     const materialName = material.name || base
     const texturePrefix = singleMaterial ? base : materialName
 
+    // Rasterize the maps up front: whether an AO map survives decides the Ka
+    // (ambient) value written below, so the scalars can't be emitted first.
+    const mapLines = []
+    const addMap = async (texture, suffix, keywords, channel = null) => {
+      const blob = texture ? await textureToPngBlob(texture, channel) : null
+      if (!blob) {
+        return false
+      }
+      const filename = `${texturePrefix}_${suffix}.png`
+      textureFiles.push({ filename, blob })
+      keywords.forEach(keyword => mapLines.push(`${keyword} ${filename}`))
+      return true
+    }
+
+    await addMap(material.map, 'albedo', ['map_Kd'])
+    // `norm` is the PBR-extension keyword; `map_Bump` repeats it for importers
+    // that predate the extension.
+    await addMap(material.normalMap, 'normal', ['norm', 'map_Bump'])
+    await addMap(material.emissiveMap, 'emissive', ['map_Ke'])
+    await addMap(material.roughnessMap, 'roughness', ['map_Pr'], 'g')
+    await addMap(material.metalnessMap, 'metallic', ['map_Pm'], 'b')
+    // OBJ carries a single UV set, so an AO map bound to a second UV channel
+    // would be sampled against the wrong coordinates — skip it in that case.
+    const baseChannel = material.map?.channel ?? 0
+    const aoMap = material.aoMap && (material.aoMap.channel ?? 0) === baseChannel ? material.aoMap : null
+    const hasAoMap = await addMap(aoMap, 'ao', ['map_Ka'], 'r')
+
+    // Phong/Basic materials carry neither, and must keep the legacy-only
+    // output they had before — the PBR keywords would just add noise there.
+    const isPbr = typeof material.roughness === 'number' || typeof material.metalness === 'number'
+    const roughness = typeof material.roughness === 'number' ? material.roughness : 1
+    const metalness = typeof material.metalness === 'number' ? material.metalness : 0
+
     mtlLines.push(`newmtl ${materialName}`)
     const color = material.color && material.color.isColor ? material.color : null
     mtlLines.push(color
       ? `Kd ${color.r.toFixed(6)} ${color.g.toFixed(6)} ${color.b.toFixed(6)}`
       : 'Kd 0.800000 0.800000 0.800000')
-    mtlLines.push('Ka 0.000000 0.000000 0.000000')
-    mtlLines.push('Ks 0.000000 0.000000 0.000000')
+    // Ambient stays black unless an AO map is present, in which case Ka is the
+    // multiplier that map modulates.
+    mtlLines.push(hasAoMap ? 'Ka 1.000000 1.000000 1.000000' : 'Ka 0.000000 0.000000 0.000000')
+    // 0.5 grey is the dielectric specular a Principled BSDF assumes, and what
+    // Blender's OBJ importer reads back into its Specular input. Metals take
+    // their specular tint from the base colour via Pm, so this stays neutral.
+    mtlLines.push(isPbr ? 'Ks 0.500000 0.500000 0.500000' : 'Ks 0.000000 0.000000 0.000000')
+    if (isPbr) {
+      // Legacy specular exponent, mirroring the roughness = 1 - sqrt(Ns / 1000)
+      // conversion importers apply, so viewers that only understand Ns still
+      // land on the right shininess.
+      mtlLines.push(`Ns ${((1 - roughness) * (1 - roughness) * 1000).toFixed(6)}`)
+    }
     const opacity = typeof material.opacity === 'number' ? material.opacity : 1
     mtlLines.push(`d ${opacity.toFixed(6)}`)
     mtlLines.push('illum 2')
-
-    const albedoBlob = material.map ? await textureToPngBlob(material.map) : null
-    if (albedoBlob) {
-      const filename = `${texturePrefix}_albedo.png`
-      textureFiles.push({ filename, blob: albedoBlob })
-      mtlLines.push(`map_Kd ${filename}`)
+    if (isPbr) {
+      mtlLines.push(`Pr ${roughness.toFixed(6)}`)
+      mtlLines.push(`Pm ${metalness.toFixed(6)}`)
     }
-
-    const normalBlob = material.normalMap ? await textureToPngBlob(material.normalMap) : null
-    if (normalBlob) {
-      const filename = `${texturePrefix}_normal.png`
-      textureFiles.push({ filename, blob: normalBlob })
-      mtlLines.push(`norm ${filename}`)
-      mtlLines.push(`map_Bump ${filename}`)
+    const emissive = material.emissive && material.emissive.isColor ? material.emissive : null
+    if (emissive && (emissive.r || emissive.g || emissive.b)) {
+      const intensity = typeof material.emissiveIntensity === 'number' ? material.emissiveIntensity : 1
+      mtlLines.push(
+        `Ke ${(emissive.r * intensity).toFixed(6)} ${(emissive.g * intensity).toFixed(6)} ${(emissive.b * intensity).toFixed(6)}`
+      )
     }
-
-    const emissiveBlob = material.emissiveMap ? await textureToPngBlob(material.emissiveMap) : null
-    if (emissiveBlob) {
-      const filename = `${texturePrefix}_emissive.png`
-      textureFiles.push({ filename, blob: emissiveBlob })
-      mtlLines.push(`map_Ke ${filename}`)
-    }
+    mtlLines.push(...mapLines)
 
     mtlLines.push('')
   }
