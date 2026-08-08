@@ -6,7 +6,15 @@ import { getAssetPreviewUrl } from '../../utils/graphHelpers'
 //
 // A cell's asset comes from the Card the run created for it (keyed by
 // buildBatchCardKey); this grid only displays what those cards already hold.
-export default function BatchResultsGrid({ groups, stages, cells, assetsByCardKey, onOpenAsset }) {
+export default function BatchResultsGrid({
+  groups,
+  stages,
+  cells,
+  assetsByCardKey,
+  locked,
+  onOpenAsset,
+  onDeleteResult
+}) {
   if (groups.length === 0 || stages.length === 0) {
     return null
   }
@@ -17,6 +25,7 @@ export default function BatchResultsGrid({ groups, stages, cells, assetsByCardKe
         <span className="batch-column__title font-label">RESULTS</span>
         <span className="batch-column__subtitle">
           One card per result, in the project like any other generation
+          {onDeleteResult ? ' · delete one to run its stage again with Continue' : ''}
         </span>
       </div>
 
@@ -36,39 +45,66 @@ export default function BatchResultsGrid({ groups, stages, cells, assetsByCardKe
             {groups.map((group, groupIndex) => (
               <tr key={group.id}>
                 <th className="batch-results__row-head">{getGroupLabel(group, groupIndex)}</th>
-                {stages.map(stage => {
+                {stages.map((stage, stageIndex) => {
                   const cell = cells?.[`${group.id}:${stage.id}`] || null
                   const asset = cell?.cardKey ? assetsByCardKey?.[cell.cardKey] || null : null
                   const previewUrl = getAssetPreviewUrl(asset?.thumbnail || asset?.filename || null)
                   const status = cell?.status || 'idle'
+                  // Anything the run has already settled can be thrown away and
+                  // regenerated; a cell still in flight owns its card.
+                  const canDelete = Boolean(onDeleteResult)
+                    && !locked
+                    && status !== 'running'
+                    && status !== 'queued'
+                    && Boolean(asset?.id || cell?.assetId || cell?.cardKey)
 
                   return (
                     <td key={stage.id} className={`batch-results__cell batch-results__cell--${status}`}>
-                      <button
-                        type="button"
-                        className="batch-results__cell-btn"
-                        onClick={() => asset && onOpenAsset?.(asset)}
-                        disabled={!asset}
-                        title={cell?.error || (asset ? asset.name : describeCell(cell))}
-                      >
-                        {previewUrl ? (
-                          <img className="batch-results__thumb" src={previewUrl} alt={asset?.name || ''} />
-                        ) : (
-                          <span className="material-symbols-outlined batch-results__icon">
-                            {status === 'running' ? 'progress_activity'
-                              : status === 'error' ? 'error'
-                              : status === 'completed' ? 'check_circle'
-                              : status === 'cancelled' ? 'block'
-                              : 'schedule'}
-                          </span>
+                      <div className="batch-results__cell-wrap">
+                        {canDelete && (
+                          <button
+                            type="button"
+                            className="batch-results__delete"
+                            onClick={() => onDeleteResult({
+                              group,
+                              groupIndex,
+                              stage,
+                              stageIndex,
+                              cell,
+                              asset,
+                              cellKey: `${group.id}:${stage.id}`
+                            })}
+                            title="Delete this result so the stage can be run again for this group"
+                          >
+                            <span className="material-symbols-outlined">delete</span>
+                          </button>
                         )}
-                        <span className="batch-results__caption font-label">{describeCell(cell)}</span>
-                        {cell?.extraOutputs > 0 && (
-                          <span className="batch-results__extra font-label">
-                            +{cell.extraOutputs} more output{cell.extraOutputs === 1 ? '' : 's'}
-                          </span>
-                        )}
-                      </button>
+                        <button
+                          type="button"
+                          className="batch-results__cell-btn"
+                          onClick={() => asset && onOpenAsset?.(asset)}
+                          disabled={!asset}
+                          title={cell?.error || (asset ? asset.name : describeCell(cell))}
+                        >
+                          {previewUrl ? (
+                            <img className="batch-results__thumb" src={previewUrl} alt={asset?.name || ''} />
+                          ) : (
+                            <span className="material-symbols-outlined batch-results__icon">
+                              {status === 'running' ? 'progress_activity'
+                                : status === 'error' ? 'error'
+                                : status === 'completed' ? 'check_circle'
+                                : status === 'cancelled' ? 'block'
+                                : 'schedule'}
+                            </span>
+                          )}
+                          <span className="batch-results__caption font-label">{describeCell(cell)}</span>
+                          {cell?.extraOutputs > 0 && (
+                            <span className="batch-results__extra font-label">
+                              +{cell.extraOutputs} more output{cell.extraOutputs === 1 ? '' : 's'}
+                            </span>
+                          )}
+                        </button>
+                      </div>
                     </td>
                   )
                 })}

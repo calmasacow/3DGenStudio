@@ -3,19 +3,23 @@ import { useNavigate } from 'react-router-dom'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
 import SettingsModal from '../components/SettingsModal'
+import AssetSelectorModal from '../components/AssetSelectorModal'
 import BatchVariablesColumn from '../components/batch/BatchVariablesColumn'
 import BatchStageColumn from '../components/batch/BatchStageColumn'
 import BatchResultsGrid from '../components/batch/BatchResultsGrid'
 import { useProjects } from '../context/ProjectContext'
 import { useBatchRun } from '../context/BatchRunContext'
+import { createMeshThumbnailFile } from '../utils/meshThumbnail'
 import {
   buildImageEditorPath,
   buildMeshEditorPath,
   filterImageGenerationWorkflows,
   filterImageEditWorkflows,
-  filterMeshGenerationWorkflows
+  filterMeshGenerationWorkflows,
+  getWorkflowFileInputAccept
 } from '../utils/graphHelpers'
 import {
+  createBatchAssetValue,
   createEmptyBatchConfig,
   createGroup,
   createStage,
@@ -23,7 +27,11 @@ import {
   createStageDefaultInputs,
   createVariable,
   deriveCellsFromAssets,
+  getBatchAssetIds,
+  getGroupLabel,
   getRunIdFromCells,
+  getStageLabel,
+  isFileVariableType,
   summarizeRunProgress,
   normalizeBatchConfig,
   validateBatch
@@ -42,7 +50,13 @@ export default function BatchPage({ project }) {
     saveBatchConfig,
     getComfyWorkflows,
     getProjectAssets,
-    createProject
+    createProject,
+    linkAssetToProject,
+    uploadAsset,
+    uploadAssetThumbnail,
+    resolveAssetSourceReference,
+    deleteAsset,
+    deleteCard
   } = useProjects()
 
   const [config, setConfig] = useState(createEmptyBatchConfig)
@@ -60,10 +74,20 @@ export default function BatchPage({ project }) {
   const [duplicateName, setDuplicateName] = useState(null) // null = dialog closed
   const [duplicating, setDuplicating] = useState(false)
   const [duplicateError, setDuplicateError] = useState('')
+  // Filling an image/mesh variable: the library picker, the busy cell while the
+  // pick is being attached or uploaded, and whatever went wrong.
+  const [assetPicker, setAssetPicker] = useState(null) // { groupId, variableId, type }
+  const [pendingAssetKey, setPendingAssetKey] = useState(null) // `${groupId}:${variableId}`
+  const [assetError, setAssetError] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState(null) // null = dialog closed
+  const [deletingResult, setDeletingResult] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   const saveTimerRef = useRef(null)
   const lastSavedRef = useRef('')
   const hydratedRef = useRef(false)
+  const fileInputRef = useRef(null)
+  const uploadTargetRef = useRef(null)
 
   // Any workflow can be a stage: the chain mixes image generation, image edit
   // and mesh generation, so the union of the three filtered lists is offered
@@ -88,17 +112,22 @@ export default function BatchPage({ project }) {
     return map
   }, [stageWorkflows])
 
+  // Returns the fresh list as well as storing it, so a caller that has to reason
+  // about what survived (deleting a result) does not race the state update.
   const refreshAssets = useCallback(async () => {
     try {
-      setAssets(await getProjectAssets(project.id, { includeChildren: true }))
+      const next = await getProjectAssets(project.id, { includeChildren: true })
+      setAssets(next)
+      return next
     } catch (err) {
       console.error('Failed to refresh batch results:', err)
+      return null
     }
   }, [getProjectAssets, project.id])
 
   // The run lives above the router, so opening a result in an editor and coming
   // back finds the batch still going with its grid intact.
-  const { runState, resultsVersion, startBatch, cancelBatch } = useBatchRun(project.id)
+  const { runState, resultsVersion, startBatch, cancelBatch, clearCells } = useBatchRun(project.id)
   const isRunning = runState.status === 'running' || runState.status === 'cancelling'
 
   // Re-fetch as each cell settles so thumbnails appear while the batch runs, and
@@ -172,11 +201,28 @@ export default function BatchPage({ project }) {
     patchConfig(current => ({ ...current, variables: [...current.variables, createVariable()] }))
   }, [patchConfig])
 
+  // Retyping between a file type and a scalar one makes every value that groups
+  // already hold meaningless — a typed-in prompt is not an image — so they are
+  // dropped rather than left to fail at run time. Any stage still bound to the
+  // variable reports the mismatch until it is repointed.
   const handleUpdateVariable = useCallback((variableId, patch) => {
-    patchConfig(current => ({
-      ...current,
-      variables: current.variables.map(item => (item.id === variableId ? { ...item, ...patch } : item))
-    }))
+    patchConfig(current => {
+      const previous = current.variables.find(item => item.id === variableId)
+      const kindChanged = patch.type !== undefined
+        && isFileVariableType(patch.type) !== isFileVariableType(previous?.type)
+
+      return {
+        ...current,
+        variables: current.variables.map(item => (item.id === variableId ? { ...item, ...patch } : item)),
+        groups: kindChanged
+          ? current.groups.map(group => {
+            const values = { ...(group.values || {}) }
+            delete values[variableId]
+            return { ...group, values }
+          })
+          : current.groups
+      }
+    })
   }, [patchConfig])
 
   // Dropping a variable also drops its values and unbinds any stage that used
@@ -259,7 +305,7 @@ export default function BatchPage({ project }) {
           ...stage,
           ...patch,
           inputs: createStageDefaultInputs(nextWorkflow),
-          bindings: createStageDefaultBindings(nextWorkflow, current.stages, stageIndex)
+          bindings: createStageDefaultBindings(nextWorkflow, current.stages, stageIndex, current.variables)
         }
       })
     }))
@@ -330,6 +376,128 @@ export default function BatchPage({ project }) {
     }))
   }, [patchConfig])
 
+  // --- Image / mesh variables ----------------------------------------------
+
+  // Two ways to fill one: pick something already in the library, or upload a
+  // file. Both end at the same place — an asset reference stored in the group,
+  // which the run hands to ComfyUI exactly like an earlier stage's output.
+  const handlePickGroupAsset = useCallback((groupId, variable, mode) => {
+    setAssetError('')
+
+    if (mode === 'library') {
+      setAssetPicker({ groupId, variableId: variable.id, type: variable.type })
+      return
+    }
+
+    uploadTargetRef.current = { groupId, variableId: variable.id, type: variable.type }
+    const input = fileInputRef.current
+    if (input) {
+      input.value = ''
+      input.accept = getWorkflowFileInputAccept(variable.type)
+      input.click()
+    }
+  }, [])
+
+  const handleLibraryAssetSelected = useCallback(async (asset) => {
+    const target = assetPicker
+    setAssetPicker(null)
+    if (!target || !asset) {
+      return
+    }
+
+    const pendingKey = `${target.groupId}:${target.variableId}`
+    setPendingAssetKey(pendingKey)
+    try {
+      // Resolving the file rather than sending it straight through is what makes
+      // the batch's project a member of the asset, and what keeps an edit or a
+      // version referenced as one so results file under the right root.
+      const { sourceReference } = await resolveAssetSourceReference(
+        project.id,
+        target.type,
+        asset.filename || asset.filePath
+      )
+      const assetIdMatch = String(sourceReference || '').match(/^asset:(\d+)$/)
+
+      handleSetGroupValue(target.groupId, target.variableId, createBatchAssetValue({
+        source: sourceReference,
+        assetId: assetIdMatch ? Number(assetIdMatch[1]) : null,
+        name: asset.name || '',
+        // A mesh with no rendered thumbnail draws its icon instead — pointing an
+        // <img> at the .glb itself would just be a broken image.
+        thumbnail: target.type === 'mesh'
+          ? (asset.thumbnail || null)
+          : (asset.thumbnail || asset.filename || null),
+        type: target.type,
+        origin: 'library'
+      }))
+      await refreshAssets()
+    } catch (err) {
+      console.error('Failed to attach the selected asset:', err)
+      setAssetError(err?.message || 'Failed to attach the selected asset')
+    } finally {
+      setPendingAssetKey(null)
+    }
+  }, [assetPicker, handleSetGroupValue, project.id, refreshAssets, resolveAssetSourceReference])
+
+  const handleLocalFileSelected = useCallback(async (event) => {
+    const file = event.target.files?.[0]
+    const target = uploadTargetRef.current
+    uploadTargetRef.current = null
+    event.target.value = ''
+
+    if (!file || !target) {
+      return
+    }
+
+    const pendingKey = `${target.groupId}:${target.variableId}`
+    setPendingAssetKey(pendingKey)
+    try {
+      const uploaded = await uploadAsset(project.id, file, target.type, {
+        ...(target.type === 'image' ? { resolution: 'Unknown' } : {}),
+        format: (target.type === 'mesh'
+          ? file.name.split('.').pop()
+          : file.type.split('/')[1])?.toUpperCase() || target.type.toUpperCase(),
+        source: 'IMPORT'
+      })
+
+      if (!uploaded?.id) {
+        throw new Error(uploaded?.error || 'The upload returned no asset')
+      }
+
+      // A mesh has no preview of its own, so render one — otherwise the group
+      // shows a bare icon for something the user just picked out of a folder.
+      let thumbnail = target.type === 'mesh'
+        ? (uploaded.thumbnail || null)
+        : (uploaded.thumbnail || uploaded.filename || null)
+      if (target.type === 'mesh') {
+        try {
+          const thumbnailFile = await createMeshThumbnailFile(file)
+          if (thumbnailFile) {
+            const withThumbnail = await uploadAssetThumbnail(uploaded.id, thumbnailFile)
+            thumbnail = withThumbnail?.thumbnail || thumbnail
+          }
+        } catch (thumbErr) {
+          console.warn('Failed to generate a thumbnail for the uploaded mesh:', thumbErr)
+        }
+      }
+
+      handleSetGroupValue(target.groupId, target.variableId, createBatchAssetValue({
+        source: `asset:${uploaded.id}`,
+        assetId: uploaded.id,
+        name: uploaded.name || file.name,
+        thumbnail,
+        type: target.type,
+        origin: 'local'
+      }))
+      await refreshAssets()
+    } catch (err) {
+      console.error('Failed to upload the selected file:', err)
+      setAssetError(err?.message || 'Failed to upload the selected file')
+    } finally {
+      setPendingAssetKey(null)
+    }
+  }, [handleSetGroupValue, project.id, refreshAssets, uploadAsset, uploadAssetThumbnail])
+
   // --- Results -------------------------------------------------------------
 
   // Batch results are ordinary Cards; an asset carries the clientKey of the card
@@ -359,6 +527,66 @@ export default function BatchPage({ project }) {
       : buildImageEditorPath({ asset, projectId: project.id, returnTo: `/projects/${project.id}` })
     if (path) navigate(path)
   }, [navigate, project.id])
+
+  const handleRequestDeleteResult = useCallback((target) => {
+    setDeleteError('')
+    setDeleteTarget({
+      cellKey: target.cellKey,
+      cardKey: target.cell?.cardKey || null,
+      assetId: target.asset?.id ?? target.cell?.assetId ?? null,
+      groupId: target.group.id,
+      stageIndex: target.stageIndex,
+      label: `${getGroupLabel(target.group, target.groupIndex)} · ${getStageLabel(target.stage, target.stageIndex)}`
+    })
+  }, [])
+
+  // Emptying a cell is what makes it outstanding again, so Continue re-runs this
+  // one result and leaves the rest of the grid alone. The result card goes with
+  // it; the generated file itself stays in the asset library, exactly as
+  // removing a Kanban result does.
+  const handleConfirmDeleteResult = useCallback(async () => {
+    const target = deleteTarget
+    if (!target) return
+
+    setDeletingResult(true)
+    setDeleteError('')
+    try {
+      if (target.assetId) {
+        await deleteAsset(target.assetId, { projectId: project.id })
+      }
+      if (target.cardKey) {
+        // Unlinking the asset already prunes an emptied card; this also covers a
+        // cell that failed and left a card carrying nothing but its error.
+        await deleteCard(project.id, target.cardKey)
+      }
+
+      const remaining = await refreshAssets()
+      const cellKeys = [target.cellKey]
+
+      // A result that was filed as an edit/version of this one goes with it, so
+      // a later stage of the same group can be left pointing at something that
+      // is no longer in the project. Those cells are emptied too rather than
+      // left claiming a result nothing can open.
+      if (remaining) {
+        const liveCardKeys = new Set(remaining.filter(item => item?.cardKey).map(item => item.cardKey))
+        normalizeBatchConfig(config).stages.slice(target.stageIndex + 1).forEach(stage => {
+          const cellKey = `${target.groupId}:${stage.id}`
+          const cell = displayCells[cellKey]
+          if (cell?.cardKey && !liveCardKeys.has(cell.cardKey)) {
+            cellKeys.push(cellKey)
+          }
+        })
+      }
+
+      clearCells(cellKeys)
+      setDeleteTarget(null)
+    } catch (err) {
+      console.error('Failed to delete the batch result:', err)
+      setDeleteError(err?.message || 'Failed to delete the result')
+    } finally {
+      setDeletingResult(false)
+    }
+  }, [clearCells, config, deleteAsset, deleteCard, deleteTarget, displayCells, project.id, refreshAssets])
 
   // --- Duplicate -----------------------------------------------------------
 
@@ -391,6 +619,17 @@ export default function BatchPage({ project }) {
         lastRunId: null
       })
 
+      // The recipe travels, and so must the files it points at: a workflow only
+      // accepts an asset its own project is a member of, so a copied image/mesh
+      // variable would otherwise fail on the first run.
+      for (const assetId of getBatchAssetIds(source)) {
+        try {
+          await linkAssetToProject(newProject.id, assetId)
+        } catch (linkErr) {
+          console.error('Failed to carry a batch input asset into the copy:', linkErr)
+        }
+      }
+
       setDuplicateName(null)
       navigate(`/projects/${newProject.id}`)
     } catch (err) {
@@ -399,7 +638,7 @@ export default function BatchPage({ project }) {
     } finally {
       setDuplicating(false)
     }
-  }, [config, createProject, duplicateName, navigate, project.description, saveBatchConfig])
+  }, [config, createProject, duplicateName, linkAssetToProject, navigate, project.description, saveBatchConfig])
 
   // --- Run -----------------------------------------------------------------
 
@@ -416,7 +655,10 @@ export default function BatchPage({ project }) {
   // id so results land in the same cells, and skip whatever already finished.
   // Works after a reload too, because the derived cells carry their card keys.
   const progress = summarizeRunProgress(displayCells, normalized)
+  // Deleting results can empty every cell that carried the run id, so a live run
+  // falls back to its own — otherwise Continue would vanish mid-grid.
   const resumeRunId = getRunIdFromCells(displayCells)
+    || (runState.status !== 'idle' ? runState.runId : null)
   const canContinue = !isRunning
     && Boolean(resumeRunId)
     && progress.done > 0
@@ -432,6 +674,58 @@ export default function BatchPage({ project }) {
       />
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {assetPicker && (
+        <AssetSelectorModal
+          assetType={assetPicker.type}
+          showEdits
+          onSelect={handleLibraryAssetSelected}
+          onClose={() => setAssetPicker(null)}
+        />
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        style={{ display: 'none' }}
+        onChange={handleLocalFileSelected}
+      />
+
+      {deleteTarget && (
+        <div className="batch-modal__overlay" onClick={() => !deletingResult && setDeleteTarget(null)}>
+          <div className="batch-modal" onClick={event => event.stopPropagation()}>
+            <h2 className="batch-modal__title font-headline">Delete Result</h2>
+            <p className="batch-modal__desc">
+              Empties <strong>{deleteTarget.label}</strong>. The cell goes back to
+              {' '}<em>Not run</em>, so <strong>Continue</strong> generates just this one again —
+              every other result is left alone. The generated file itself stays in your asset
+              library.
+            </p>
+
+            {deleteError && <p className="batch-modal__error">{deleteError}</p>}
+
+            <div className="batch-modal__actions">
+              <button
+                type="button"
+                className="batch-btn batch-btn--ghost"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deletingResult}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="batch-btn batch-btn--danger"
+                onClick={handleConfirmDeleteResult}
+                disabled={deletingResult}
+              >
+                <span className="material-symbols-outlined">delete</span>
+                {deletingResult ? 'Deleting…' : 'Delete result'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {duplicateName !== null && (
         <div className="batch-modal__overlay" onClick={() => !duplicating && setDuplicateName(null)}>
@@ -583,6 +877,20 @@ export default function BatchPage({ project }) {
         </div>
       </div>
 
+      {assetError && (
+        <div className="batch-page__problems batch-page__problems--error">
+          <button
+            type="button"
+            className="batch-page__problems-toggle"
+            onClick={() => setAssetError('')}
+            title="Dismiss"
+          >
+            <span className="material-symbols-outlined">error</span>
+            <span className="batch-page__problems-title font-label">{assetError}</span>
+          </button>
+        </div>
+      )}
+
       {problems.length > 0 && !isRunning && (
         <div className="batch-page__problems">
           <button
@@ -617,6 +925,8 @@ export default function BatchPage({ project }) {
               variables={normalized.variables}
               groups={normalized.groups}
               locked={isRunning}
+              pendingAssetKey={pendingAssetKey}
+              onPickGroupAsset={handlePickGroupAsset}
               onAddVariable={handleAddVariable}
               onUpdateVariable={handleUpdateVariable}
               onRemoveVariable={handleRemoveVariable}
@@ -667,7 +977,9 @@ export default function BatchPage({ project }) {
             stages={normalized.stages}
             cells={displayCells}
             assetsByCardKey={assetsByCardKey}
+            locked={isRunning}
             onOpenAsset={handleOpenAsset}
+            onDeleteResult={handleRequestDeleteResult}
           />
         )}
       </main>

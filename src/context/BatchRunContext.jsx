@@ -38,6 +38,21 @@ export function BatchRunProvider({ children }) {
     }))
   }, [])
 
+  // Deleting a result has to drop its cell from the run as well: while a run is
+  // remembered the grid is drawn from these cells, so a deleted card would keep
+  // showing its old thumbnail until the page was reloaded.
+  const clearCells = useCallback((cellKeys) => {
+    const keys = new Set(cellKeys || [])
+    if (keys.size === 0) {
+      return
+    }
+    setRunState(current => ({
+      ...current,
+      cells: Object.fromEntries(Object.entries(current.cells || {}).filter(([key]) => !keys.has(key)))
+    }))
+    setResultsVersion(current => current + 1)
+  }, [])
+
   const cancelBatch = useCallback(() => {
     cancelRef.current = true
     setRunState(current => (current.status === 'running' ? { ...current, status: 'cancelling' } : current))
@@ -122,7 +137,7 @@ export function BatchRunProvider({ children }) {
           // The asset feeding this stage's file input. The server only adopts it
           // as a parent when the output is the same type, so an image → mesh
           // stage still produces a root mesh while mesh → mesh makes a version.
-          const parentAsset = findParentAssetForStage({ stage, workflow, stageOutputs })
+          const parentAsset = findParentAssetForStage({ stage, workflow, stageOutputs, group })
 
           patchCell(cellKey, { status: 'running', promptId, cardKey, progressPercent: 0, error: null })
 
@@ -204,8 +219,9 @@ export function BatchRunProvider({ children }) {
     runState,
     resultsVersion,
     startBatch,
-    cancelBatch
-  }), [runState, resultsVersion, startBatch, cancelBatch])
+    cancelBatch,
+    clearCells
+  }), [runState, resultsVersion, startBatch, cancelBatch, clearCells])
 
   return <BatchRunContext.Provider value={value}>{children}</BatchRunContext.Provider>
 }
@@ -222,7 +238,9 @@ export function useBatchRun(projectId) {
     runState: isThisProject ? context.runState : IDLE_STATE,
     resultsVersion: context.resultsVersion,
     startBatch: context.startBatch,
-    cancelBatch: context.cancelBatch
+    cancelBatch: context.cancelBatch,
+    // Only the project that owns the run may edit its cells.
+    clearCells: isThisProject ? context.clearCells : () => {}
   }
 }
 

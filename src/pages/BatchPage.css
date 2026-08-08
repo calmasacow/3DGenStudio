@@ -94,6 +94,12 @@
 
 .batch-page__problems-list li { margin: 0.15rem 0; }
 
+.batch-page__problems--error {
+  border-color: rgba(255, 122, 122, 0.4);
+  background: rgba(255, 122, 122, 0.08);
+  color: #ff9a9a;
+}
+
 /* The active tab's content fills this and does its own scrolling, so the
    columns reach the bottom of the page instead of stopping at a fixed height. */
 .batch-page__main {
@@ -313,6 +319,49 @@
 
 .batch-group-card__values { display: flex; flex-direction: column; gap: 0.45rem; }
 
+/* An image/mesh variable is filled by picking a file: a chip for what is set,
+   and the dropdown that opens the library picker or a file dialog. */
+.batch-asset-picker { display: flex; flex-direction: column; gap: 0.3rem; }
+
+.batch-asset-picker__chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.3rem;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(143, 245, 255, 0.18);
+  background: rgba(13, 14, 16, 0.7);
+}
+
+.batch-asset-picker__thumb {
+  width: 2rem;
+  height: 2rem;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+.batch-asset-picker__icon {
+  font-size: 20px;
+  color: var(--primary);
+  opacity: 0.75;
+}
+
+.batch-asset-picker__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-asset-picker__empty {
+  font-size: 0.72rem;
+  color: var(--on-surface-variant);
+  opacity: 0.8;
+}
+
 .batch-group-card__badge {
   align-self: flex-start;
   padding: 0.15rem 0.4rem;
@@ -423,6 +472,44 @@
   border-bottom: 1px solid rgba(143, 245, 255, 0.07);
   vertical-align: top;
 }
+
+/* The delete affordance floats over the cell, so a result keeps its full
+   thumbnail rather than shrinking to make room for a button.
+   The wrapper must shrink to the result box: as a plain block it filled the
+   whole table cell — which is as wide as the column header — and the button
+   anchored to that far edge instead of to the thumbnail. */
+.batch-results__cell-wrap {
+  position: relative;
+  display: flex;
+  width: fit-content;
+}
+
+.batch-results__delete {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid rgba(255, 122, 122, 0.3);
+  background: rgba(13, 14, 16, 0.85);
+  color: #ff9a9a;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.batch-results__delete .material-symbols-outlined { font-size: 15px; }
+
+.batch-results__cell-wrap:hover .batch-results__delete,
+.batch-results__delete:focus-visible { opacity: 1; }
+
+.batch-results__delete:hover { background: rgba(255, 122, 122, 0.2); }
 
 .batch-results__cell-btn {
   display: flex;

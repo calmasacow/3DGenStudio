@@ -2,11 +2,13 @@ import {
   BINDING_MANUAL,
   BINDING_STAGE,
   BINDING_VARIABLE,
+  articleFor,
   bindingToSelectValue,
   getBinding,
   getBindingOptionsForParameter,
   getStageLabel,
   getVariableLabel,
+  isVariableCompatibleWithValueType,
   resolveStageName,
   selectValueToBinding,
   variableToken
@@ -204,6 +206,10 @@ export default function BatchStageColumn({
                 : null
               const isDanglingBinding = (binding.source === BINDING_VARIABLE && !boundVariable)
                 || (binding.source === BINDING_STAGE && !boundStage)
+              // Retyping a variable (string → image, say) leaves the binding in
+              // place but pointing at something this parameter cannot take.
+              const isMistypedBinding = Boolean(boundVariable)
+                && !isVariableCompatibleWithValueType(boundVariable, valueType)
 
               return (
                 <div key={parameter.id} className="batch-param">
@@ -228,9 +234,18 @@ export default function BatchStageColumn({
                     </span>
                   )}
 
-                  {binding.source === BINDING_VARIABLE && boundVariable && (
+                  {isMistypedBinding && (
+                    <span className="batch-param__warning">
+                      {getVariableLabel(boundVariable, variables.indexOf(boundVariable))} is
+                      {' '}{articleFor(boundVariable.type)} {boundVariable.type} variable and cannot feed
+                      {' '}{articleFor(valueType)} {valueType} input — pick another.
+                    </span>
+                  )}
+
+                  {binding.source === BINDING_VARIABLE && boundVariable && !isMistypedBinding && (
                     <span className="batch-param__hint">
-                      Each group supplies {getVariableLabel(boundVariable, variables.indexOf(boundVariable))}.
+                      Each group supplies {getVariableLabel(boundVariable, variables.indexOf(boundVariable))}
+                      {isFileWorkflowValueType(valueType) ? `'s ${valueType}` : ''}.
                     </span>
                   )}
 
@@ -244,8 +259,8 @@ export default function BatchStageColumn({
                     isFileWorkflowValueType(valueType) ? (
                       <span className="batch-param__warning">
                         {stageIndex === 0
-                          ? 'A first stage cannot receive a file input — move this stage later or use a text-to-image workflow.'
-                          : 'Bind this to an earlier stage.'}
+                          ? `Declare ${articleFor(valueType)} ${valueType} variable and give each group one, or move this stage later so an earlier stage can feed it.`
+                          : `Bind this to an earlier stage or ${articleFor(valueType)} ${valueType} variable.`}
                       </span>
                     ) : (
                       <>

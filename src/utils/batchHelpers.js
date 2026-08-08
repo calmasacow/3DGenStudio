@@ -14,13 +14,22 @@
 //   { source: 'variable', variableId }        use the current group's value
 //   { source: 'stage', stageId, outputType }  use an earlier stage's output asset
 //
+// A group's value is a scalar for a string/number variable, and an asset
+// reference for an image/mesh one — see createBatchAssetValue.
+//
 // Results are NOT stored in this document. Each executed cell becomes a normal
 // Card carrying its asset, addressed by a deterministic clientKey — see
 // buildBatchCardKey below.
 
 import { getWorkflowParameterValueType, isFileWorkflowValueType } from './graphHelpers'
 
-export const BATCH_VARIABLE_TYPES = ['string', 'number']
+export const BATCH_VARIABLE_TYPES = ['string', 'number', 'image', 'mesh']
+
+// image/mesh variables carry a picked asset rather than a typed-in value, which
+// is what lets a first stage receive a file input the batch supplies itself.
+export function isFileVariableType(type) {
+  return type === 'image' || type === 'mesh'
+}
 
 export const BINDING_MANUAL = 'manual'
 export const BINDING_VARIABLE = 'variable'
@@ -65,6 +74,69 @@ export function createGroup(name = '') {
   return { id: createLocalId('grp'), name, values: {} }
 }
 
+// --- Asset values ---------------------------------------------------------
+
+// What an image/mesh variable holds for one group. `source` is the only part the
+// run uses: it is the same `asset:<id>` / `edit:<filePath>` reference a stage
+// binding produces, so a workflow cannot tell where its file came from. The rest
+// is display: the chip in the group card shows the name and the thumbnail
+// without another round trip to the server.
+export function createBatchAssetValue({ source, assetId = null, name = '', thumbnail = null, type = 'image', origin = 'library' }) {
+  return {
+    kind: 'asset',
+    source: String(source || ''),
+    assetId: assetId ?? null,
+    name: String(name || ''),
+    thumbnail: thumbnail || null,
+    type,
+    origin
+  }
+}
+
+export function isBatchAssetValue(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && value.source)
+}
+
+export function getBatchAssetSource(value) {
+  return isBatchAssetValue(value) ? value.source : ''
+}
+
+export function getBatchAssetLabel(value) {
+  return isBatchAssetValue(value) ? (value.name || value.source) : ''
+}
+
+// Every asset a batch's groups point at, by id. A run resolves `asset:<id>`
+// only for assets its own project is a member of, so anything that copies a
+// batch elsewhere (Duplicate Project) has to carry these links across.
+export function getBatchAssetIds(config) {
+  const ids = new Set()
+  for (const group of config?.groups || []) {
+    for (const value of Object.values(group?.values || {})) {
+      if (!isBatchAssetValue(value)) continue
+      const match = String(value.source).match(/^asset:(\d+)$/)
+      const id = Number(value.assetId) || (match ? Number(match[1]) : 0)
+      if (id) ids.add(id)
+    }
+  }
+  return [...ids]
+}
+
+// "an image", "a mesh" — the type names are mixed enough that hardcoding "a"
+// reads wrong half the time.
+export function articleFor(word) {
+  return /^[aeiou]/i.test(String(word || '')) ? 'an' : 'a'
+}
+
+// Can this variable feed a parameter of this type? A file parameter takes only a
+// variable of exactly its own type; anything else takes only a scalar variable.
+export function isVariableCompatibleWithValueType(variable, valueType) {
+  const type = String(variable?.type || 'string')
+  if (isFileWorkflowValueType(valueType)) {
+    return type === valueType
+  }
+  return !isFileVariableType(type)
+}
+
 export function createStage(name = '') {
   return { id: createLocalId('stg'), name, workflowId: '', inputs: {}, bindings: {} }
 }
@@ -91,18 +163,25 @@ export function createStageDefaultInputs(workflow) {
   return inputs
 }
 
-// A file parameter has exactly one legal source — an earlier stage — so bind it
-// to the immediately preceding one rather than leaving it in an invalid state.
-export function createStageDefaultBindings(workflow, stages, stageIndex) {
+// A file parameter cannot hold a typed-in value, so seed it with a source rather
+// than leaving it invalid: the immediately preceding stage, or — for a first
+// stage, which has nothing upstream — a declared variable of the same type.
+export function createStageDefaultBindings(workflow, stages, stageIndex, variables = []) {
   const previousStage = stageIndex > 0 ? stages[stageIndex - 1] : null
-  if (!previousStage) {
-    return {}
-  }
 
   const bindings = {}
   for (const parameter of workflow?.parameters || []) {
-    if (isFileWorkflowValueType(getWorkflowParameterValueType(parameter))) {
+    const valueType = getWorkflowParameterValueType(parameter)
+    if (!isFileWorkflowValueType(valueType)) {
+      continue
+    }
+    if (previousStage) {
       bindings[parameter.id] = { source: BINDING_STAGE, stageId: previousStage.id }
+      continue
+    }
+    const variable = (variables || []).find(item => item.type === valueType)
+    if (variable) {
+      bindings[parameter.id] = { source: BINDING_VARIABLE, variableId: variable.id }
     }
   }
   return bindings
@@ -148,7 +227,9 @@ export function resolveNameTemplate(template, { group, variables }) {
       return whole
     }
     const value = group?.values?.[variables[index].id]
-    return value === undefined || value === null ? '' : String(value)
+    if (value === undefined || value === null) return ''
+    // An image/mesh variable names the result after the asset it points at.
+    return isBatchAssetValue(value) ? getBatchAssetLabel(value) : String(value)
   })
 }
 
@@ -171,9 +252,9 @@ export function getUpstreamStages(stages, stageIndex) {
   return stages.slice(0, Math.max(0, stageIndex))
 }
 
-// Image/mesh/video parameters can only be fed by an earlier stage's output —
-// there is nothing else in a batch to point them at. Everything else can take a
-// manual value or a variable.
+// Image/mesh/video parameters cannot be typed in, so they are fed by an earlier
+// stage's output or by an image/mesh variable the groups fill in. Everything
+// else takes a manual value or a scalar variable.
 export function getBindingOptionsForParameter(parameter, { variables, stages, stageIndex }) {
   const valueType = getWorkflowParameterValueType(parameter)
   const isFileValue = isFileWorkflowValueType(valueType)
@@ -182,16 +263,21 @@ export function getBindingOptionsForParameter(parameter, { variables, stages, st
   const options = []
   if (!isFileValue) {
     options.push({ value: `${BINDING_MANUAL}:`, label: 'Manual value', source: BINDING_MANUAL })
-    for (const variable of variables) {
-      const index = variables.indexOf(variable)
-      options.push({
-        value: `${BINDING_VARIABLE}:${variable.id}`,
-        label: `Variable · ${getVariableLabel(variable, index)}`,
-        source: BINDING_VARIABLE,
-        variableId: variable.id
-      })
-    }
   }
+
+  // Only the variables that can actually carry this parameter's type: a mesh
+  // input takes a mesh variable, a prompt takes a string or a number.
+  ;(variables || []).forEach((variable, index) => {
+    if (!isVariableCompatibleWithValueType(variable, valueType)) {
+      return
+    }
+    options.push({
+      value: `${BINDING_VARIABLE}:${variable.id}`,
+      label: `Variable · ${getVariableLabel(variable, index)}`,
+      source: BINDING_VARIABLE,
+      variableId: variable.id
+    })
+  })
 
   for (const stage of upstream) {
     const index = stages.indexOf(stage)
@@ -203,7 +289,7 @@ export function getBindingOptionsForParameter(parameter, { variables, stages, st
     })
   }
 
-  if (isFileValue && upstream.length === 0) {
+  if (options.length === 0) {
     options.push({ value: `${BINDING_MANUAL}:`, label: 'No source available', source: BINDING_MANUAL })
   }
 
@@ -276,17 +362,56 @@ export function resolveStageInputs({ stage, workflow, group, variables, stageOut
     }
 
     if (binding.source === BINDING_VARIABLE) {
+      const variable = (variables || []).find(item => item.id === binding.variableId)
+      const variableIndex = (variables || []).indexOf(variable)
+      const parameterLabel = parameter.name || parameter.label || parameter.id
+
+      if (!variable) {
+        missing.push({
+          parameterId: parameter.id,
+          label: parameterLabel,
+          reason: 'The bound variable no longer exists'
+        })
+        continue
+      }
+
+      // Retyping a variable can leave a binding pointing at something it can no
+      // longer feed, which must be reported rather than sent to ComfyUI.
+      if (!isVariableCompatibleWithValueType(variable, valueType)) {
+        missing.push({
+          parameterId: parameter.id,
+          label: parameterLabel,
+          reason: `${getVariableLabel(variable, variableIndex)} is ${articleFor(variable.type)} ${variable.type} variable and cannot feed ${articleFor(valueType)} ${valueType} input`
+        })
+        continue
+      }
+
       const rawValue = group?.values?.[binding.variableId]
+
+      // An image/mesh variable has no manual fallback to fall back to — the
+      // stage cannot hold a file value — so an unset one is simply missing.
+      if (isFileValue) {
+        const source = getBatchAssetSource(rawValue)
+        if (!source) {
+          missing.push({
+            parameterId: parameter.id,
+            label: parameterLabel,
+            reason: `${getVariableLabel(variable, variableIndex)} has no ${valueType} picked for this group`
+          })
+          continue
+        }
+        inputs[parameter.id] = source
+        continue
+      }
+
       // A group that leaves the variable blank falls back to the stage's manual
       // value — that is what makes groups sparse.
       if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') {
         const fallback = stage?.inputs?.[parameter.id]
         if (fallback === undefined || fallback === null || String(fallback).trim() === '') {
-          const variable = (variables || []).find(item => item.id === binding.variableId)
-          const variableIndex = (variables || []).indexOf(variable)
           missing.push({
             parameterId: parameter.id,
-            label: parameter.name || parameter.label || parameter.id,
+            label: parameterLabel,
             reason: `${getVariableLabel(variable, variableIndex)} is empty and no manual fallback is set`
           })
           continue
@@ -303,7 +428,7 @@ export function resolveStageInputs({ stage, workflow, group, variables, stageOut
       missing.push({
         parameterId: parameter.id,
         label: parameter.name || parameter.label || parameter.id,
-        reason: 'Bind this input to an earlier stage'
+        reason: `Bind this input to an earlier stage or ${articleFor(valueType)} ${valueType} variable`
       })
       continue
     }
@@ -385,7 +510,12 @@ export function getWorkflowOutputTypes(workflow) {
 // offering the image makes the server reject the parent on type mismatch and the
 // result lands as a new root instead of a version. Parameter order is arbitrary,
 // so the declared output type is what decides.
-export function findParentAssetForStage({ stage, workflow, stageOutputs }) {
+//
+// A file input fed by an image/mesh variable counts too, so a first stage run
+// over a list of picked meshes files its results under them exactly as a
+// mid-chain stage does. Only `asset:<id>` references can be a parent — an
+// `edit:` reference names a file, not an asset id, so those results stay roots.
+export function findParentAssetForStage({ stage, workflow, stageOutputs, group }) {
   const outputTypes = getWorkflowOutputTypes(workflow)
   const candidates = []
 
@@ -395,6 +525,16 @@ export function findParentAssetForStage({ stage, workflow, stageOutputs }) {
       continue
     }
     const binding = getBinding(stage, parameter.id)
+
+    if (binding.source === BINDING_VARIABLE) {
+      const value = group?.values?.[binding.variableId]
+      const assetId = isBatchAssetValue(value) ? Number(value.assetId) : 0
+      if (assetId) {
+        candidates.push({ upstream: { id: assetId, type: value.type || valueType }, valueType })
+      }
+      continue
+    }
+
     if (binding.source !== BINDING_STAGE) {
       continue
     }

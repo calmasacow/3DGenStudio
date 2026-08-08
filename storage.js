@@ -4754,16 +4754,6 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
       [newProjectId, projectName, proj.description || '', proj.preset || '', createdAt, proj.status || 'active']
     );
 
-    // Batch Processing recipe. Optional: only Batch projects carry one, and
-    // bundles written before Batch existed have none.
-    if (manifest.batchConfig && typeof manifest.batchConfig === 'object') {
-      await run(
-        db,
-        'INSERT INTO BatchConfigs (projectId, stateJson, updatedAt) VALUES (?, ?, ?)',
-        [newProjectId, JSON.stringify(manifest.batchConfig), createdAt]
-      );
-    }
-
     const assetIdMap = new Map();   // original refId -> new asset id
     const editPathMap = new Map();  // original stored filePath -> new stored filePath
     const insertedAssets = [];      // { newId, metadata } for the post-remap pass
@@ -4878,6 +4868,20 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
     for (const entry of insertedAssets) {
       const remapped = remapReferencesDeep(entry.metadata, assetIdMap, editPathMap);
       await run(db, 'UPDATE Assets SET metadata = ? WHERE id = ?', [JSON.stringify(remapped), entry.newId]);
+    }
+
+    // Batch Processing recipe. Optional: only Batch projects carry one, and
+    // bundles written before Batch existed have none. Written here rather than
+    // with the project row because an image/mesh variable holds an `asset:` /
+    // `edit:` reference per group, which is only meaningful once the imported
+    // assets have their new ids.
+    if (manifest.batchConfig && typeof manifest.batchConfig === 'object') {
+      const batchConfig = remapReferencesDeep(manifest.batchConfig, assetIdMap, editPathMap);
+      await run(
+        db,
+        'INSERT INTO BatchConfigs (projectId, stateJson, updatedAt) VALUES (?, ?, ?)',
+        [newProjectId, JSON.stringify(batchConfig), createdAt]
+      );
     }
 
     // --- Phase C: recreate cards + Cards_Assets (the asset↔project links used

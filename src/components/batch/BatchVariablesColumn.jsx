@@ -1,8 +1,13 @@
 import {
   BATCH_VARIABLE_TYPES,
+  articleFor,
+  getBatchAssetLabel,
   getGroupLabel,
-  getVariableLabel
+  getVariableLabel,
+  isBatchAssetValue,
+  isFileVariableType
 } from '../../utils/batchHelpers'
+import { getAssetPreviewUrl } from '../../utils/graphHelpers'
 
 // Column 1: the batch's declared variables, and the groups that fill them.
 // A group is one iteration — one full pass through every stage.
@@ -10,6 +15,7 @@ export default function BatchVariablesColumn({
   variables,
   groups,
   locked,
+  pendingAssetKey,
   onAddVariable,
   onUpdateVariable,
   onRemoveVariable,
@@ -17,8 +23,67 @@ export default function BatchVariablesColumn({
   onUpdateGroup,
   onRemoveGroup,
   onDuplicateGroup,
-  onSetGroupValue
+  onSetGroupValue,
+  onPickGroupAsset
 }) {
+  // An image/mesh variable is filled by picking a file, not by typing one: the
+  // dropdown is the only control, and it stays on its placeholder so choosing
+  // the same source twice still opens the picker.
+  const renderAssetValue = (group, variable) => {
+    const value = group.values?.[variable.id]
+    const assetValue = isBatchAssetValue(value) ? value : null
+    const previewUrl = assetValue ? getAssetPreviewUrl(assetValue.thumbnail) : null
+    const isPending = pendingAssetKey === `${group.id}:${variable.id}`
+
+    return (
+      <div className="batch-asset-picker">
+        {assetValue ? (
+          <div className="batch-asset-picker__chip">
+            {previewUrl ? (
+              <img className="batch-asset-picker__thumb" src={previewUrl} alt="" />
+            ) : (
+              <span className="material-symbols-outlined batch-asset-picker__icon">
+                {variable.type === 'mesh' ? 'deployed_code' : 'image'}
+              </span>
+            )}
+            <span className="batch-asset-picker__name" title={getBatchAssetLabel(assetValue)}>
+              {getBatchAssetLabel(assetValue)}
+            </span>
+            <button
+              type="button"
+              className="batch-icon-btn"
+              onClick={() => onSetGroupValue(group.id, variable.id, null)}
+              disabled={locked || isPending}
+              title="Clear"
+            >
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          </div>
+        ) : (
+          <span className="batch-asset-picker__empty">
+            {isPending ? 'Adding…' : `No ${variable.type} selected`}
+          </span>
+        )}
+
+        <select
+          className="batch-select"
+          value=""
+          onChange={event => {
+            if (!event.target.value) return
+            onPickGroupAsset?.(group.id, variable, event.target.value)
+          }}
+          disabled={locked || isPending}
+        >
+          <option value="">
+            {assetValue ? 'Change…' : `Select ${articleFor(variable.type)} ${variable.type}…`}
+          </option>
+          <option value="library">From Assets</option>
+          <option value="local">Local Computer</option>
+        </select>
+      </div>
+    )
+  }
+
   return (
     <div className="batch-column batch-column--variables">
       <div className="batch-column__header">
@@ -130,12 +195,18 @@ export default function BatchVariablesColumn({
                   </div>
 
                   <div className="batch-group-card__values">
-                    {variables.map((variable, variableIndex) => (
-                      <label key={variable.id} className="batch-field">
+                    {variables.map((variable, variableIndex) => {
+                      // A picked file is a chip plus its own controls, so it is
+                      // not wrapped in a label the way a single input is.
+                      const Wrapper = isFileVariableType(variable.type) ? 'div' : 'label'
+                      return (
+                      <Wrapper key={variable.id} className="batch-field">
                         <span className="batch-field__label font-label">
                           {getVariableLabel(variable, variableIndex)}
                         </span>
-                        {variable.type === 'number' ? (
+                        {isFileVariableType(variable.type) ? (
+                          renderAssetValue(group, variable)
+                        ) : variable.type === 'number' ? (
                           <input
                             type="number"
                             className="batch-input"
@@ -154,8 +225,9 @@ export default function BatchVariablesColumn({
                             disabled={locked}
                           />
                         )}
-                      </label>
-                    ))}
+                      </Wrapper>
+                      )
+                    })}
                   </div>
 
                   <span className="batch-group-card__badge font-label">
