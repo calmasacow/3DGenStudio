@@ -9,10 +9,6 @@
       "vae": [
         "10",
         0
-      ],
-      "image1": [
-        "158",
-        0
       ]
     },
     "class_type": "TextEncodeQwenImageEditPlus",
@@ -101,10 +97,6 @@
       ],
       "vae": [
         "10",
-        0
-      ],
-      "image1": [
-        "158",
         0
       ]
     },
@@ -213,9 +205,9 @@
         "132",
         1
       ],
-      "keep_proportions": true,
+      "keep_proportions": false,
       "upscale_method": "lanczos",
-      "crop": "center",
+      "crop": "disabled",
       "mask": [
         "161",
         0
@@ -239,15 +231,15 @@
         0
       ],
       "positive": [
-        "1",
+        "171",
         0
       ],
       "negative": [
-        "39",
+        "173",
         0
       ],
       "latent_image": [
-        "126",
+        "174",
         0
       ]
     },
@@ -267,7 +259,7 @@
         "132",
         1
       ],
-      "crop": "center",
+      "crop": "disabled",
       "image": [
         "11",
         0
@@ -307,6 +299,67 @@
     "class_type": "PreviewImage",
     "_meta": {
       "title": "Preview Image"
+    }
+  },
+  "171": {
+    "inputs": {
+      "conditioning": [
+        "1",
+        0
+      ],
+      "latent": [
+        "126",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "173": {
+    "inputs": {
+      "conditioning": [
+        "39",
+        0
+      ],
+      "latent": [
+        "126",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "174": {
+    "inputs": {
+      "width": [
+        "175",
+        0
+      ],
+      "height": [
+        "175",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "175": {
+    "inputs": {
+      "image": [
+        "158",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
     }
   }
 }
