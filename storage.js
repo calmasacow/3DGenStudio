@@ -1395,6 +1395,8 @@ export async function initializeStorage() {
     await backfillAssetProjectLinks(db);
   }
 
+  await backfillBatchInputAssetLinks(db);
+
   await seedReferenceTables(db);
   await migrateGraphNodeTypes(db);
   return db;
@@ -2148,6 +2150,12 @@ export async function resolveEditableSourceReference(projectId, type, filePathOr
     [stored, normalizedType]
   );
   if (editRow) {
+    // Make the project a member, exactly as the root branches below do. Without
+    // this an edit / version picked into a project is referenced but not owned
+    // by it, so it is invisible to anything that works from membership — most
+    // visibly the exporter, which would leave the reference dangling in the
+    // bundle and silently point the import back at the original file.
+    await linkAssetToProject(db, editRow.id, normalizedProjectId);
     return { sourceReference: `edit:${stored}`, isEdit: true };
   }
 
@@ -2667,6 +2675,61 @@ export async function deleteProjectConnection(projectId, {
   );
 
   return { status: result.changes > 0 ? 'deleted' : 'not-found' };
+}
+
+// Repair membership for images/meshes a batch already points at. Picking one now
+// links it (resolveEditableSourceReference / createProjectAsset both do), but
+// picks made before that fix left the asset referenced-but-not-owned, so it was
+// invisible to everything that works from Assets_Projects — the exporter most of
+// all. Idempotent: linkAssetToProject is an INSERT OR IGNORE, so this is a no-op
+// once every reference is already linked.
+async function backfillBatchInputAssetLinks(db) {
+  const rows = await all(db, 'SELECT projectId, stateJson FROM BatchConfigs');
+  let linked = 0;
+
+  for (const row of rows) {
+    const config = parseJson(row.stateJson, null);
+    for (const group of config?.groups || []) {
+      for (const value of Object.values(group?.values || {})) {
+        if (!value || typeof value !== 'object' || Array.isArray(value) || !value.source) {
+          continue;
+        }
+
+        const source = String(value.source);
+        const assetMatch = source.match(/^asset:(\d+)$/);
+        const editMatch = assetMatch ? null : source.match(/^edit:([\s\S]+)$/);
+
+        let assetId = null;
+        if (assetMatch) {
+          const exists = await get(db, 'SELECT id FROM Assets WHERE id = ?', [Number(assetMatch[1])]);
+          assetId = exists ? exists.id : null;
+        } else if (editMatch) {
+          const found = await get(db, 'SELECT id FROM Assets WHERE filePath = ? LIMIT 1', [editMatch[1].replace(/\\/g, '/')]);
+          assetId = found ? found.id : null;
+        }
+
+        if (assetId == null) {
+          continue;
+        }
+
+        const already = await get(
+          db,
+          'SELECT 1 AS found FROM Assets_Projects WHERE assetId = ? AND projectId = ?',
+          [assetId, row.projectId]
+        );
+        if (already) {
+          continue;
+        }
+
+        await linkAssetToProject(db, assetId, row.projectId);
+        linked += 1;
+      }
+    }
+  }
+
+  if (linked > 0) {
+    console.log(`Batch input assets: linked ${linked} image/mesh parameter${linked === 1 ? '' : 's'} to their project.`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4346,6 +4409,48 @@ function collectAssetIdsFromValue(value, out) {
   }
 }
 
+// Every asset a batch's groups point at, added to the export's seed set.
+// collectAssetIdsFromValue only understands `asset:<id>`; a batch variable may
+// just as well hold `edit:<filePath>` (an edit or a version), which has to be
+// looked up by path. Seeding from the document itself means a referenced file
+// travels with the bundle even if project membership was never recorded — which
+// is the difference between an import that owns its inputs and one that silently
+// points back at the exporter's originals.
+async function collectBatchConfigAssetIds(db, config, out) {
+  const editPaths = new Set();
+
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      const assetMatch = value.match(/^asset:(\d+)$/);
+      if (assetMatch) {
+        out.add(Number(assetMatch[1]));
+        return;
+      }
+      const editMatch = value.match(/^edit:([\s\S]+)$/);
+      if (editMatch) {
+        editPaths.add(editMatch[1].replace(/\\/g, '/'));
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      Object.values(value).forEach(walk);
+    }
+  };
+
+  walk(config);
+
+  for (const filePath of editPaths) {
+    const row = await get(db, 'SELECT id FROM Assets WHERE filePath = ? LIMIT 1', [filePath]);
+    if (row) {
+      out.add(row.id);
+    }
+  }
+}
+
 // Order assets so a parent always precedes its children (needed to remap
 // parentId during import). Assets whose parent is absent from the set are
 // treated as roots.
@@ -4441,6 +4546,16 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     [project.id]
   );
   memberAssetRows.forEach(row => seedAssetIds.add(row.assetId));
+
+  // Batch Processing recipe (variables / groups / stages). Absent for other
+  // presets, and absent from bundles written before Batch existed — the import
+  // side treats it as optional. Without it a Batch bundle would carry only the
+  // generated results and lose the whole configuration that produced them.
+  const batchConfigRow = await get(db, 'SELECT stateJson FROM BatchConfigs WHERE projectId = ?', [project.id]);
+  const batchConfig = batchConfigRow ? parseJson(batchConfigRow.stateJson, null) : null;
+  if (batchConfig) {
+    await collectBatchConfigAssetIds(db, batchConfig, seedAssetIds);
+  }
 
   // Expand the seed set: include every ancestor (up the parentId chain) and
   // every descendant so the full version/edit tree travels with the project.
@@ -4561,13 +4676,6 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     });
   }
 
-  // Batch Processing recipe (variables / groups / stages). Absent for other
-  // presets, and absent from bundles written before Batch existed — the import
-  // side treats it as optional. Without it a Batch bundle would carry only the
-  // generated results and lose the whole configuration that produced them.
-  const batchConfigRow = await get(db, 'SELECT stateJson FROM BatchConfigs WHERE projectId = ?', [project.id]);
-  const batchConfig = batchConfigRow ? parseJson(batchConfigRow.stateJson, null) : null;
-
   const manifest = {
     schemaVersion: PROJECT_EXPORT_SCHEMA_VERSION,
     app: '3DGenStudio',
@@ -4686,7 +4794,7 @@ function remapReferencesDeep(value, assetIdMap, editPathMap) {
 // string, which would leave the cached fields pointing at the EXPORTER's asset —
 // a different asset here, or none at all. Recompute them from the reference the
 // remap just fixed.
-async function repairBatchAssetValues(db, config) {
+async function repairBatchAssetValues(db, config, projectId) {
   for (const group of config?.groups || []) {
     for (const [variableId, value] of Object.entries(group?.values || {})) {
       if (!value || typeof value !== 'object' || Array.isArray(value) || !value.source) {
@@ -4710,6 +4818,12 @@ async function repairBatchAssetValues(db, config) {
         group.values[variableId] = { ...value, assetId: null, thumbnail: null };
         continue;
       }
+
+      // The imported project must OWN what its batch points at, whatever the
+      // exporter's membership records looked like — an `edit:` reference is
+      // resolved by path, so it would otherwise resolve fine while the project
+      // showed none of its own inputs.
+      await linkAssetToProject(db, row.id, projectId);
 
       group.values[variableId] = {
         ...value,
@@ -4925,7 +5039,8 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
     if (manifest.batchConfig && typeof manifest.batchConfig === 'object') {
       const batchConfig = await repairBatchAssetValues(
         db,
-        remapReferencesDeep(manifest.batchConfig, assetIdMap, editPathMap)
+        remapReferencesDeep(manifest.batchConfig, assetIdMap, editPathMap),
+        newProjectId
       );
       await run(
         db,
