@@ -4680,6 +4680,53 @@ function remapReferencesDeep(value, assetIdMap, editPathMap) {
   return value;
 }
 
+// A batch's image/mesh variable stores its asset as a reference AND caches that
+// asset's numeric id, name and thumbnail so the group card can draw a chip
+// without another round trip. remapReferencesDeep only rewrites the reference
+// string, which would leave the cached fields pointing at the EXPORTER's asset —
+// a different asset here, or none at all. Recompute them from the reference the
+// remap just fixed.
+async function repairBatchAssetValues(db, config) {
+  for (const group of config?.groups || []) {
+    for (const [variableId, value] of Object.entries(group?.values || {})) {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || !value.source) {
+        continue;
+      }
+
+      const source = String(value.source);
+      const assetMatch = source.match(/^asset:(\d+)$/);
+      const editMatch = assetMatch ? null : source.match(/^edit:([\s\S]+)$/);
+
+      let row = null;
+      if (assetMatch) {
+        row = await get(db, 'SELECT id, name, filePath, thumbnail FROM Assets WHERE id = ?', [Number(assetMatch[1])]);
+      } else if (editMatch) {
+        row = await get(db, 'SELECT id, name, filePath, thumbnail FROM Assets WHERE filePath = ?', [editMatch[1]]);
+      }
+
+      if (!row) {
+        // The asset did not travel with the bundle. Clear the cache so the chip
+        // reads as unresolved instead of showing someone else's picture.
+        group.values[variableId] = { ...value, assetId: null, thumbnail: null };
+        continue;
+      }
+
+      group.values[variableId] = {
+        ...value,
+        assetId: row.id,
+        name: row.name || value.name || '',
+        // A mesh with no rendered thumbnail draws an icon; pointing an <img> at
+        // the .glb itself would just be a broken image.
+        thumbnail: row.thumbnail
+          ? toAssetUrlPath(row.thumbnail)
+          : (String(value.type || '') === 'mesh' ? null : toAssetUrlPath(row.filePath))
+      };
+    }
+  }
+
+  return config;
+}
+
 // Workflows are per-user library items and are never exported, so an imported
 // project must not carry the exporter's workflow references or live run state.
 // This strips the transient `processing` block and nulls any `workflowId`
@@ -4876,7 +4923,10 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
     // `edit:` reference per group, which is only meaningful once the imported
     // assets have their new ids.
     if (manifest.batchConfig && typeof manifest.batchConfig === 'object') {
-      const batchConfig = remapReferencesDeep(manifest.batchConfig, assetIdMap, editPathMap);
+      const batchConfig = await repairBatchAssetValues(
+        db,
+        remapReferencesDeep(manifest.batchConfig, assetIdMap, editPathMap)
+      );
       await run(
         db,
         'INSERT INTO BatchConfigs (projectId, stateJson, updatedAt) VALUES (?, ?, ?)',

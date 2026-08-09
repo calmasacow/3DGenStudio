@@ -135,8 +135,11 @@ export function getBatchAssetIds(config) {
   for (const group of config?.groups || []) {
     for (const value of Object.values(group?.values || {})) {
       if (!isBatchAssetValue(value)) continue
+      // `source` is the reference a run actually resolves, so it wins over the
+      // cached `assetId` — the cache can go stale (an imported bundle rewrites
+      // the reference), and linking the wrong asset is worse than linking none.
       const match = String(value.source).match(/^asset:(\d+)$/)
-      const id = Number(value.assetId) || (match ? Number(match[1]) : 0)
+      const id = (match ? Number(match[1]) : 0) || Number(value.assetId) || 0
       if (id) ids.add(id)
     }
   }
