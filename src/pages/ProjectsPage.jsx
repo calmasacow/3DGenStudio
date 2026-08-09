@@ -27,6 +27,15 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.3.1',
+    date: '2026-08-09',
+    items: [
+			'Batch project: Added image,mesh and boolean types. Can delete a result.',
+			'Mesh Export: Fixed PBR material when exporting in OBJ file',
+			'Inpainting: Added inpainting workflows with Flux2Klein'
+    ],
+  },
+  {
     version: 'v2.3.0',
     date: '2026-08-08',
     items: [

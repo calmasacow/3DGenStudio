@@ -1,4 +1,4 @@
 {
-	"version": "2.3.0",
-	"message": "New project type: Batch"
+	"version": "2.3.1",
+	"message": "Improved batch project - Fixed PBR when exported in OBJ - Inpainting with Flux2Klein"
 }

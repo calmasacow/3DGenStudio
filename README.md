@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-08-09** | Batch project: Added image,mesh and boolean types. Can delete a result<br>Mesh Export: Fixed PBR material when exporting in OBJ file<br>Inpainting: Added inpainting workflows with Flux2Klein |
 | **2026-08-08** | New project type: Batch<br>Graph page: nodes keep the last parameters |
 | **2026-08-07** | Fixed bugs<br>Support for Chinese computer<br>Updated managed ComfyUI and packages<br>SetupWizard: Added SAM 3.1 model<br>Updated all image workflows |
 | **2026-07-31** | Desktop App: Install ComfyUI<br>ImageEditor: Fixed alpha transparency<br>MultiView support with Trellis2 |
