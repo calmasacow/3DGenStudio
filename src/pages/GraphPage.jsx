@@ -26,6 +26,7 @@ import '@xyflow/react/dist/style.css'
 import './KanbanPage.css'
 import './GraphPage.css'
 import AssetSelectorModal from '../components/AssetSelectorModal';
+import MeshPreviewDialog from '../components/MeshPreviewDialog'
 import {
   CONNECTOR_TYPE_META,
   DEFAULT_CUSTOM_API_TYPE,
@@ -176,6 +177,9 @@ export default function GraphPage({ project }) {
 	const [assetSelectorType, setAssetSelectorType] = useState('image');
 	const [pendingAssetNodeId, setPendingAssetNodeId] = useState(null);
 	const [assetSelectorShowEdits, setAssetSelectorShowEdits] = useState(true);
+  // Mesh nodes preview their asset in a page-level dialog: a viewer rendered
+  // inside the node would live under React Flow's transformed canvas.
+  const [meshPreviewAsset, setMeshPreviewAsset] = useState(null)
 
   const fileInputRef = useRef(null)
   const pendingUploadNodeIdRef = useRef(null)
@@ -1122,6 +1126,17 @@ export default function GraphPage({ project }) {
 		}
 	}, [attachExistingAsset, assetSelectorType, pendingAssetNodeId, project.id, updateProjectNode, replaceFlowNodeData, setActionDraftsByNodeId]);
 
+  const handleOpenMeshPreview = useCallback((asset) => {
+    if (!asset?.filename) {
+      return
+    }
+
+    setMeshPreviewAsset({
+      name: asset.name,
+      url: getAssetPreviewUrl(asset.filename)
+    })
+  }, [])
+
   const renderedNodes = useMemo(() => nodes.map(node => {
     const nodeInputConnectors = buildInputConnectors(node.id, nodes, edges)
     const nodeInputSources = buildNodeInputSources(node.id, nodes, edges)
@@ -1142,6 +1157,7 @@ export default function GraphPage({ project }) {
         type: getNodeOutputType(node)
       },
 			onOpenAssetSelector: (nodeId, type) => handleOpenAssetSelector(nodeId, type),
+      onOpenMeshPreview: handleOpenMeshPreview,
       actionDraft: actionDraftsByNodeId[node.id] || null,
       connectedInputAsset: getConnectedInputAssetFrom(nodes, edges, node.id),
       imageGenerationApis,
@@ -2851,7 +2867,7 @@ export default function GraphPage({ project }) {
       onToggleDraftCollapsed: toggleDraftCollapsed,
       isDraftCollapsed: collapsedDraftNodeIds.has(String(node.id))
     }
-  })}), [actionDraftsByNodeId, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, toggleActionDraft, closeActionDraft, setActionDraft, toggleDraftCollapsed, collapsedDraftNodeIds, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
+  })}), [actionDraftsByNodeId, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, handleOpenMeshPreview, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, toggleActionDraft, closeActionDraft, setActionDraft, toggleDraftCollapsed, collapsedDraftNodeIds, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
 
   const handleFileUpload = useCallback(async (event) => {
     const file = event.target.files?.[0]
@@ -3420,7 +3436,15 @@ export default function GraphPage({ project }) {
 					}}
 					showEdits={assetSelectorShowEdits}
 				/>
-			)}			
+			)}
+
+      {meshPreviewAsset && (
+        <MeshPreviewDialog
+          asset={meshPreviewAsset}
+          titleId="graph-mesh-preview-dialog-title"
+          onClose={() => setMeshPreviewAsset(null)}
+        />
+      )}
 
       <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileUpload} />
       <input ref={meshFileInputRef} type="file" accept={getWorkflowFileInputAccept('mesh')} style={{ display: 'none' }} onChange={handleMeshFileUpload} />

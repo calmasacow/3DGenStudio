@@ -1,7 +1,6 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react'
-import Viewer from '../Viewer'
 import {
   DEFAULT_INPUT_ID,
   DEFAULT_OUTPUT_ID,
@@ -53,24 +52,20 @@ import {
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import LastActionInfo from './LastActionInfo'
 
-// Image / mesh asset node. Handles preview (incl. 3D mesh viewer), generation
-// and edit action panels (local / assets / API / ComfyUI), and async mesh polling.
+// Image / mesh asset node. Handles the thumbnail preview (a mesh thumbnail opens
+// the page-level 3D preview dialog), generation and edit action panels
+// (local / assets / API / ComfyUI), and async mesh polling.
 const GraphAssetNode = memo(function GraphAssetNode({ data }) {
   const navigate = useNavigate()
   const updateNodeInternals = useUpdateNodeInternals()
   const isMeshGen = data.nodeKind === 'meshGen'
   const previewFilename = data.asset?.thumbnail || data.asset?.filename || null
   const previewUrl = getAssetPreviewUrl(previewFilename)
-  const meshModelUrl = isMeshGen && data.asset?.filename ? getAssetPreviewUrl(data.asset.filename) : null
+  const hasMeshAsset = Boolean(isMeshGen && data.asset?.filename)
   const dimensions = formatAssetDimensions(data.asset?.width, data.asset?.height)
   const isProcessing = data.status === 'processing'
   const progressDetail = data.progressDetail || data.metadata?.detail || ''
   const currentNodeLabel = data.currentNodeLabel || data.metadata?.currentNodeLabel || ''
-  const [showNormals, setShowNormals] = useState(false)
-  const [showGrid, setShowGrid] = useState(true)
-  const [showLightSlider, setShowLightSlider] = useState(false)
-  const [lightIntensity, setLightIntensity] = useState(2.2)
-  const [showMeshPreview, setShowMeshPreview] = useState(false)
   const draft = data.actionDraft
   // The panel outlives a run: it stays mounted and its controls go inert until
   // the node leaves 'processing', so the parameters are still there afterwards.
@@ -130,6 +125,14 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
   useEffect(() => {
     updateNodeInternals(String(data.id))
   }, [data.id, inputConnectors, outputConnector.id, updateNodeInternals])
+
+  // The mesh is shown in the page-level preview dialog: a viewer inside the node
+  // would sit under React Flow's transformed canvas.
+  const openMeshPreview = () => {
+    if (hasMeshAsset) {
+      data.onOpenMeshPreview?.(data.asset)
+    }
+  }
 
   const renderWorkflowField = (parameter) => {
     const valueType = getWorkflowParameterValueType(parameter)
@@ -293,69 +296,8 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
         </div>
 
         <div className="image-card__thumb graph-node__thumb">
-          {meshModelUrl && showMeshPreview ? (
-            <div className="graph-node__mesh-preview">
-              <div className="graph-node__mesh-toolbar nodrag">
-                <button
-                  type="button"
-                  className={`graph-node__mesh-tool ${showNormals ? 'graph-node__mesh-tool--active' : ''}`}
-                  onClick={() => setShowNormals(current => !current)}
-                  aria-pressed={showNormals}
-                  title="Toggle normal material"
-                >
-                  N
-                </button>
-                <button
-                  type="button"
-                  className={`graph-node__mesh-tool ${showGrid ? 'graph-node__mesh-tool--active' : ''}`}
-                  onClick={() => setShowGrid(current => !current)}
-                  aria-pressed={showGrid}
-                  title="Toggle grid"
-                >
-                  G
-                </button>
-                <button
-                  type="button"
-                  className={`graph-node__mesh-tool ${showLightSlider ? 'graph-node__mesh-tool--active' : ''}`}
-                  onClick={() => setShowLightSlider(current => !current)}
-                  aria-pressed={showLightSlider}
-                  title="Adjust light"
-                >
-                  L
-                </button>
-                <button
-                  type="button"
-                  className="graph-node__mesh-tool"
-                  onClick={() => setShowMeshPreview(false)}
-                  title="Close 3D preview (use static thumbnail)"
-                >
-                  ×
-                </button>
-                {showLightSlider && (
-                  <div className="graph-node__mesh-light-panel">
-                    <input
-                      type="range"
-                      min="0.4"
-                      max="4"
-                      step="0.1"
-                      value={lightIntensity}
-                      onChange={event => setLightIntensity(Number(event.target.value))}
-                    />
-                  </div>
-                )}
-              </div>
-              <Viewer
-                height="100%"
-                modelUrl={meshModelUrl}
-                showNormals={showNormals}
-                showGrid={showGrid}
-                showShadows={false}
-                lightIntensity={lightIntensity}
-                fitMode="center"
-              />
-            </div>
-          ) : meshModelUrl ? (
-            <div className="image-card__thumb-item" style={{ position: 'relative', cursor: 'pointer' }} onClick={() => setShowMeshPreview(true)}>
+          {hasMeshAsset ? (
+            <div className="image-card__thumb-item nodrag" style={{ position: 'relative', cursor: 'pointer' }} onClick={openMeshPreview}>
               {previewUrl ? (
                 <img src={previewUrl} alt={data.asset?.name || data.name || sourceLabel} className="image-card__thumb-image" />
               ) : (
@@ -367,8 +309,8 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                 type="button"
                 className="image-card__edit-action-btn nodrag"
                 style={{ position: 'absolute', bottom: '8px', right: '8px' }}
-                onClick={event => { event.stopPropagation(); setShowMeshPreview(true) }}
-                title="Load 3D preview"
+                onClick={event => { event.stopPropagation(); openMeshPreview() }}
+                title="Open 3D preview"
               >
                 <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>play_arrow</span>
                 3D
