@@ -135,6 +135,54 @@ export function convertMesh(meshBlob, opts = {}) {
   return callMeshTool('/meshes/convert', meshBlob, { ...opts, format: 'fbx' })
 }
 
+// Auto Rig option defaults + the bone-naming conventions the service supports.
+// Shared by every Auto Rig surface (the Mesh Editor panel and the graph's Rig
+// Mesh node) so they cannot drift apart.
+export const DEFAULT_AUTO_RIG_OPTIONS = {
+  use_transfer: true,
+  use_postprocess: false,
+  rename_bones: 'mixamo',
+  keep_loaded: true,
+  top_k: 5,
+  top_p: 0.95,
+  temperature: 1.0,
+  repetition_penalty: 2.0,
+  num_beams: 10,
+}
+
+export const AUTO_RIG_BONE_NAME_OPTIONS = [
+  { value: 'mixamo', label: 'Mixamo' },
+  { value: 'ue5', label: 'Unreal Engine 5' },
+  { value: 'original', label: 'Keep model names' },
+]
+
+// Keep only the keys the rigging service understands — the graph node stores its
+// options inside a parameter draft that also carries UI-only fields (name, mode).
+// Values are coerced back to the type of their default, so a cleared number field
+// falls back instead of sending "" to the service.
+export function pickAutoRigOptions(source = {}) {
+  return Object.fromEntries(
+    Object.entries(DEFAULT_AUTO_RIG_OPTIONS).map(([key, defaultValue]) => {
+      const value = source?.[key]
+
+      if (value === undefined || value === null || value === '') {
+        return [key, defaultValue]
+      }
+
+      if (typeof defaultValue === 'number') {
+        const numericValue = Number(value)
+        return [key, Number.isFinite(numericValue) ? numericValue : defaultValue]
+      }
+
+      if (typeof defaultValue === 'boolean') {
+        return [key, Boolean(value)]
+      }
+
+      return [key, value]
+    })
+  )
+}
+
 // Auto Rig (SkinTokens/TokenRig). Proxies to the dedicated rigging service; the
 // returned blob is a SKINNED GLB (mesh + skeleton + skin weights) — unlike the
 // tools above it must NOT be flattened into editable geometry. Same SSE contract;

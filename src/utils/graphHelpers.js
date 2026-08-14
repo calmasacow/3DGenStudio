@@ -11,6 +11,7 @@ import {
 export const DEFAULT_OUTPUT_ID = 'output-0'
 export const DEFAULT_INPUT_ID = 'input-0'
 export const IMAGE_COMPARE_NODE_TYPE_NAME = 'Image Compare'
+export const RIG_MESH_NODE_TYPE_NAME = 'Rig Mesh'
 export const IMAGE_COMPARE_INPUT_IDS = ['input-0', 'input-1']
 export const LEGACY_INPUT_ID = 'image-input'
 export const DEFAULT_CUSTOM_API_TYPE = 'image-generation'
@@ -54,7 +55,7 @@ export const IMAGE_API_LIST = [
   { id: 'openai_gpt_image_1_5', name: 'OpenAI · gpt-image-1.5' },
   { id: 'openai_gpt_image_2', name: 'OpenAI · gpt-image-2' }
 ]
-export const GRAPH_NODE_TYPE_OPTIONS = ['Image', 'Mesh', IMAGE_COMPARE_NODE_TYPE_NAME, 'Number', 'Text', 'Boolean']
+export const GRAPH_NODE_TYPE_OPTIONS = ['Image', 'Mesh', RIG_MESH_NODE_TYPE_NAME, IMAGE_COMPARE_NODE_TYPE_NAME, 'Number', 'Text', 'Boolean']
 export const CONNECTOR_TYPE_META = {
   image: { key: 'image', label: 'Image', letter: 'I', color: '#8ff5ff', background: 'rgba(143, 245, 255, 0.14)' },
   mesh: { key: 'mesh', label: 'Mesh', letter: 'M', color: '#ac89ff', background: 'rgba(172, 137, 255, 0.14)' },
@@ -116,6 +117,10 @@ export function getNodeKind(nodeTypeName = '') {
     return 'imageCompare'
   }
 
+  if (normalizedNodeType === 'rig mesh') {
+    return 'rigMesh'
+  }
+
   if (['mesh', 'mesh gen'].includes(normalizedNodeType)) {
     return 'meshGen'
   }
@@ -134,7 +139,7 @@ export function getDefaultNodeOutputType(nodeTypeName = '') {
     return null
   }
 
-  if (nodeKind === 'meshGen') {
+  if (['meshGen', 'rigMesh'].includes(nodeKind)) {
     return 'mesh'
   }
 
@@ -188,6 +193,11 @@ export function canNodeTypeAcceptIncomingConnection(nodeTypeName = '', outputTyp
 
   if (getNodeKind(nodeTypeName) === 'imageCompare') {
     return normalizeConnectorType(outputType) === 'image'
+  }
+
+  // Auto Rig only knows how to rig a mesh, so its single input is mesh-only.
+  if (getNodeKind(nodeTypeName) === 'rigMesh') {
+    return normalizeConnectorType(outputType) === 'mesh'
   }
 
   return true
@@ -246,7 +256,7 @@ export function getNodeOutputType(node) {
 
   const nodeKind = node?.data?.nodeKind || node?.type
 
-  if (nodeKind === 'meshGen') {
+  if (['meshGen', 'rigMesh'].includes(nodeKind)) {
     return 'mesh'
   }
 
@@ -300,6 +310,15 @@ export function buildInputConnectors(nodeId, currentNodes, currentEdges) {
       type: 'image',
       isConnected: currentEdges.some(edge => edge.target === String(nodeId) && (edge.targetHandle || DEFAULT_INPUT_ID) === handleId)
     }))
+  }
+
+  // Auto Rig takes exactly one mesh — no extra open connector to wire.
+  if (targetNode?.data?.nodeKind === 'rigMesh') {
+    return [{
+      id: DEFAULT_INPUT_ID,
+      type: 'mesh',
+      isConnected: currentEdges.some(edge => edge.target === String(nodeId) && (edge.targetHandle || DEFAULT_INPUT_ID) === DEFAULT_INPUT_ID)
+    }]
   }
 
   const incomingEdges = currentEdges

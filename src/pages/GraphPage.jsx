@@ -103,7 +103,9 @@ import {
 import GraphAssetNode from '../components/graph/GraphAssetNode'
 import GraphDeleteEdge from '../components/graph/GraphDeleteEdge'
 import GraphImageCompareNode from '../components/graph/GraphImageCompareNode'
+import GraphRigMeshNode from '../components/graph/GraphRigMeshNode'
 import GraphValueNode from '../components/graph/GraphValueNode'
+import { autoRig as runAutoRigService, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, pickAutoRigOptions } from '../utils/meshTools'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
 import {
   WORKFLOW_INPUT_NONE,
@@ -116,6 +118,7 @@ const flowNodeTypes = {
   imageEdit: GraphAssetNode,
   imageCompare: GraphImageCompareNode,
   meshGen: GraphAssetNode,
+  rigMesh: GraphRigMeshNode,
   number: GraphValueNode,
   text: GraphValueNode,
   boolean: GraphValueNode
@@ -146,6 +149,7 @@ export default function GraphPage({ project }) {
     runImageEditApi,
     runImageEditComfy,
     runMeshGenerationApi,
+    saveMeshEdit,
     queryTencentMeshGenerationResult,
     queryTripoMeshGenerationResult,
     queryHitemMeshGenerationResult,
@@ -465,6 +469,15 @@ export default function GraphPage({ project }) {
       hitemPbr: false
     }
   }, [meshGenerationApis, meshGenerationWorkflows])
+
+  // Rig Mesh nodes have a single mode, so their draft is just the Auto Rig option
+  // set plus the name the rigged version is saved under. It is created up front
+  // (see the effect below) so the parameters are always on the node.
+  const createRigMeshNodeDraft = useCallback((sourceAsset = null) => ({
+    mode: 'rig',
+    name: sourceAsset?.name ? `${sourceAsset.name} (rigged)` : '',
+    ...DEFAULT_AUTO_RIG_OPTIONS
+  }), [])
 
   const replaceFlowNodeData = useCallback((updatedNode) => {
     setNodes(currentNodes => currentNodes.map(node => (
@@ -888,7 +901,8 @@ export default function GraphPage({ project }) {
     }
 
     const needsWorkflows = openDrafts.some(draft => String(draft.mode || '').includes('comfy'))
-    const needsLibrary = openDrafts.some(draft => draft.mode && draft.mode !== 'select')
+    // A rig panel picks its mesh from the wired input alone, so it needs neither.
+    const needsLibrary = openDrafts.some(draft => draft.mode && !['select', 'rig'].includes(draft.mode))
 
     if (needsWorkflows) {
       ensureComfyWorkflowsLoaded().catch(err => {
@@ -1028,14 +1042,43 @@ export default function GraphPage({ project }) {
 
   const buildSelectDraft = useCallback((nodeId, nodeKind) => {
     const inputSources = buildNodeInputSources(nodeId, nodes, edges)
-    return nodeKind === 'meshGen'
+    return nodeKind === 'rigMesh'
+      ? createRigMeshNodeDraft(getInputSource(nodes, edges, nodeId, 'mesh').asset)
+      : nodeKind === 'meshGen'
       ? createMeshGenNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
       : nodeKind === 'imageEdit'
       ? createImageEditNodeDraft('select', getConnectedInputAssetFrom(nodes, edges, nodeId), inputSources, libraryImageOptions)
       : nodeKind === 'text'
       ? createTextNodeDraft('select', inputSources)
       : createImageNodeDraft('select', inputSources)
-  }, [createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, edges, getConnectedInputAssetFrom, libraryImageOptions, nodes])
+  }, [createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createRigMeshNodeDraft, createTextNodeDraft, edges, getConnectedInputAssetFrom, libraryImageOptions, nodes])
+
+  // A Rig Mesh node shows its Auto Rig parameters permanently (there is no mode
+  // menu to open them from), so seed a draft for any rig node that has none yet —
+  // freshly created ones, and older ones saved before this ran.
+  useEffect(() => {
+    if (loading) {
+      return
+    }
+
+    const seededNodes = nodes.filter(node => (
+      node.data.nodeKind === 'rigMesh' && !actionDraftsByNodeId[String(node.id)]
+    ))
+
+    if (seededNodes.length === 0) {
+      return
+    }
+
+    setActionDraftsByNodeId(currentDrafts => {
+      const nextDrafts = { ...currentDrafts }
+      for (const node of seededNodes) {
+        if (!nextDrafts[String(node.id)]) {
+          nextDrafts[String(node.id)] = createRigMeshNodeDraft(getInputSource(nodes, edges, node.id, 'mesh').asset)
+        }
+      }
+      return nextDrafts
+    })
+  }, [actionDraftsByNodeId, createRigMeshNodeDraft, edges, loading, nodes])
 
   // BACK: rewind an open panel to the mode menu without closing it.
   const openActionDraft = useCallback((nodeId, nodeKind) => {
@@ -2014,6 +2057,120 @@ export default function GraphPage({ project }) {
 
         const targetInputSources = buildNodeInputSources(targetNodeId, nodes, edges)
 
+        // Rig Mesh: run the connected mesh through the rigging service (same
+        // Auto Rig as the Mesh Editor) and save the skinned GLB as a new version
+        // of that mesh. The node then displays / outputs the rigged version.
+        if (targetNode.data.nodeKind === 'rigMesh') {
+          const sourceAsset = getInputSource(nodes, edges, targetNodeId, 'mesh').asset
+
+          if (!sourceAsset?.id || !sourceAsset?.filename) {
+            return
+          }
+
+          const versionName = String(targetDraft.name || '').trim() || `${sourceAsset.name || 'Mesh'} (rigged)`
+          const rigOptions = pickAutoRigOptions(targetDraft)
+
+          await setProcessingState('processing', 0, {
+            processingSource: 'Auto Rig',
+            parentAssetId: sourceAsset.id,
+            inputSource: getAssetSourceReference(sourceAsset),
+            error: null,
+            detail: 'Starting the rigging service'
+          }, {
+            progressDetail: 'Starting the rigging service',
+            currentNodeLabel: 'Auto Rig'
+          })
+
+          try {
+            // Desktop: start the rigging service on demand (no-op elsewhere).
+            await ensureDesktopService('rigging')
+
+            const meshResponse = await fetch(getAssetPreviewUrl(sourceAsset.filename))
+            if (!meshResponse.ok) {
+              throw new Error(`Failed to download the connected mesh (${meshResponse.status})`)
+            }
+            const meshBlob = await meshResponse.blob()
+
+            const { blob, stats } = await runAutoRigService(meshBlob, {
+              options: rigOptions,
+              fileName: sourceAsset.filename.split('/').pop() || 'mesh.glb',
+              onProgress: evt => setNodeTransientData(targetNodeId, {
+                status: 'processing',
+                progress: Number.isFinite(Number(evt?.frac))
+                  ? Math.round(Math.max(0, Math.min(1, Number(evt.frac))) * 100)
+                  : null,
+                progressDetail: evt?.message || evt?.stage || 'Rigging…',
+                currentNodeLabel: 'Auto Rig'
+              })
+            })
+
+            setNodeTransientData(targetNodeId, {
+              status: 'processing',
+              progress: 100,
+              progressDetail: 'Saving the rigged mesh',
+              currentNodeLabel: 'Auto Rig'
+            })
+
+            const meshFile = new File([blob], `${versionName}.glb`, { type: 'model/gltf-binary' })
+            const savedAsset = await saveMeshEdit({
+              assetId: sourceAsset.id,
+              filePath: '',
+              name: versionName,
+              saveMode: 'version',
+              meshFile
+            })
+
+            if (!savedAsset?.id) {
+              throw new Error('Auto Rig did not return a saved mesh version')
+            }
+
+            await ensureGeneratedMeshThumbnails([savedAsset])
+
+            const rigStats = stats?.tool || {}
+            await applyNodeResult(savedAsset, {
+              lastAction: 'auto-rig',
+              parentAssetId: sourceAsset.id,
+              error: null,
+              detail: null,
+              lastActionParams: buildLastActionParams({
+                source: 'Auto Rig',
+                label: 'SkinTokens rigging service',
+                params: [
+                  { label: 'Input mesh', type: 'mesh', value: sourceAsset.name, boundFrom: sourceAsset.name },
+                  { label: 'Version name', type: 'string', value: versionName },
+                  ...(rigStats.bones != null ? [{ label: 'Bones', type: 'number', value: rigStats.bones }] : []),
+                  { label: 'Bone names', type: 'string', value: rigOptions.rename_bones },
+                  { label: 'Preserve texture & scale', type: 'boolean', value: rigOptions.use_transfer },
+                  { label: 'Voxel-skin postprocess', type: 'boolean', value: rigOptions.use_postprocess },
+                  { label: 'Top-k', type: 'number', value: rigOptions.top_k },
+                  { label: 'Top-p', type: 'number', value: rigOptions.top_p },
+                  { label: 'Temperature', type: 'number', value: rigOptions.temperature },
+                  { label: 'Repetition penalty', type: 'number', value: rigOptions.repetition_penalty },
+                  { label: 'Beams', type: 'number', value: rigOptions.num_beams }
+                ]
+              })
+            })
+          } catch (err) {
+            const failureMessage = err.message || 'Auto Rig failed'
+            await setProcessingState('error', null, {
+              processingSource: 'Auto Rig',
+              parentAssetId: sourceAsset.id,
+              error: failureMessage,
+              detail: failureMessage
+            }, {
+              progressDetail: failureMessage,
+              currentNodeLabel: 'Auto Rig failed'
+            })
+            addNotification({
+              title: 'Auto Rig failed',
+              message: failureMessage,
+              source: 'Rigging service',
+              tone: 'error'
+            })
+          }
+          return
+        }
+
         if (targetNode.data.nodeKind === 'meshGen') {
           // When a mesh is connected to (and therefore used to edit) this node, the
           // generated mesh should become a version (child) of that connected mesh
@@ -2867,7 +3024,7 @@ export default function GraphPage({ project }) {
       onToggleDraftCollapsed: toggleDraftCollapsed,
       isDraftCollapsed: collapsedDraftNodeIds.has(String(node.id))
     }
-  })}), [actionDraftsByNodeId, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, handleOpenMeshPreview, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, toggleActionDraft, closeActionDraft, setActionDraft, toggleDraftCollapsed, collapsedDraftNodeIds, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
+  })}), [actionDraftsByNodeId, addNotification, saveMeshEdit, attachExistingAsset, comfyLoading, completeJob, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createTextNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, handleOpenAssetSelector, handleOpenMeshPreview, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, libraryMeshOptions, meshGenerationApis, meshGenerationWorkflows, textGenerationWorkflows, nodes, openActionDraft, toggleActionDraft, closeActionDraft, setActionDraft, toggleDraftCollapsed, collapsedDraftNodeIds, project.id, project.name, pushExternalApiFailureNotification, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, queryTripoMeshGenerationResult, queryHitemMeshGenerationResult, registerJob, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, persistWorkflowDefaultsIfRequested, setEdges, setNodeTransientData, setNodes, updateProjectNode])
 
   const handleFileUpload = useCallback(async (event) => {
     const file = event.target.files?.[0]
@@ -3049,6 +3206,13 @@ export default function GraphPage({ project }) {
       }
     }
 
+    // Auto Rig takes a single mesh and nothing else.
+    if (targetNode.data.nodeKind === 'rigMesh') {
+      if (targetHandleId !== DEFAULT_INPUT_ID || getNodeOutputType(sourceNode) !== 'mesh') {
+        return
+      }
+    }
+
     if (edges.some(edge => edge.target === String(connection.target) && (edge.targetHandle || DEFAULT_INPUT_ID) === targetHandleId)) {
       return
     }
@@ -3089,6 +3253,10 @@ export default function GraphPage({ project }) {
 
     if (targetNode.data.nodeKind === 'imageCompare') {
       return IMAGE_COMPARE_INPUT_IDS.includes(targetHandleId) && getNodeOutputType(sourceNode) === 'image'
+    }
+
+    if (targetNode.data.nodeKind === 'rigMesh') {
+      return targetHandleId === DEFAULT_INPUT_ID && getNodeOutputType(sourceNode) === 'mesh'
     }
 
     return true
@@ -3404,6 +3572,7 @@ export default function GraphPage({ project }) {
     if (node.type === 'boolean') return '#ff7fc8'
     if (node.type === 'number') return '#79e388'
     if (node.type === 'imageEdit') return '#ac89ff'
+    if (node.type === 'rigMesh') return '#ac89ff'
     return '#8ff5ff'
   }, [])
 

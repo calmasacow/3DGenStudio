@@ -40,7 +40,8 @@ const NODE_TYPES = [
   { id: 4, name: 'Number' },
   { id: 5, name: 'Text' },
   { id: 6, name: 'Boolean' },
-  { id: 7, name: 'Image Compare' }
+  { id: 7, name: 'Image Compare' },
+  { id: 8, name: 'Rig Mesh' }
 ];
 
 export const DEFAULT_SETTINGS = {

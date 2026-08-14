@@ -9,6 +9,7 @@
 // Save/Download instead of Keep/Revert.
 import { RangeField, ToggleField, SelectField } from './MeshToolField'
 import MeshToolProgress from './MeshToolProgress'
+import { AUTO_RIG_BONE_NAME_OPTIONS } from '../../utils/meshTools'
 
 export default function AutoRigToolsPanel({
   options,
@@ -117,11 +118,7 @@ export default function AutoRigToolsPanel({
         <span className="mesh-editor-panel__section-title">Skeleton</span>
         <SelectField label="Bone names" value={o.rename_bones}
           onChange={v => setOption('rename_bones', v)} disabled={fieldsDisabled}
-          options={[
-            { value: 'mixamo', label: 'Mixamo' },
-            { value: 'ue5', label: 'Unreal Engine 5' },
-            { value: 'original', label: 'Keep model names' },
-          ]}
+          options={AUTO_RIG_BONE_NAME_OPTIONS}
           hint="Rename the generated bones to a standard humanoid convention for retargeting" />
         <ToggleField label="Preserve texture & scale" value={o.use_transfer}
           onChange={v => setOption('use_transfer', v)} disabled={fieldsDisabled}

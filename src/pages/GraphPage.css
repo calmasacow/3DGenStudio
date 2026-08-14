@@ -319,6 +319,14 @@
   border-color: rgba(255, 154, 98, 0.26);
 }
 
+.graph-node--rigMesh {
+  border-color: rgba(172, 137, 255, 0.24);
+}
+
+.graph-node__error {
+  color: #ff8a80;
+}
+
 .graph-node__card.image-card {
   width: 360px;
   cursor: grab;

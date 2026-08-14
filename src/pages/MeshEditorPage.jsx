@@ -157,7 +157,7 @@ import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
-import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, ensureDesktopService } from '../utils/meshTools'
+import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS } from '../utils/meshTools'
 
 // Default option sets for the Python mesh-tools panels. These mirror the
 // defaults of autouv.unwrap() and autoretopo.RetopoConfig 1:1 (see
@@ -201,18 +201,6 @@ const DEFAULT_AUTO_RETOPO_OPTIONS = {
   relax_strength: 0.4,
   device: 'auto',
   seed: 0,
-}
-
-const DEFAULT_AUTO_RIG_OPTIONS = {
-  use_transfer: true,
-  use_postprocess: false,
-  rename_bones: 'mixamo',
-  keep_loaded: true,
-  top_k: 5,
-  top_p: 0.95,
-  temperature: 1.0,
-  repetition_penalty: 2.0,
-  num_beams: 10,
 }
 
 // Non-manifold / topology repair (see python-server/app/schemas.py RepairOptions).
