@@ -7,6 +7,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
+import SkeletonOverlay from './meshEditor/SkeletonOverlay'
+import { extractSkeletonFromObject } from '../utils/skeleton'
 
 function PlaceholderMesh() {
   return (
@@ -280,10 +282,19 @@ export default function Viewer({
   showShadows = true,
   showAlbedo = false,
   showWireframe = false,
+  showSkeleton = false,
+  onModelLoaded = null,
   lightIntensity = 2.2,
   fitMode = 'ground'
 }) {
   const [modelState, setModelState] = useState(null)
+  // Kept in a ref so an inline `onModelLoaded` arrow from the parent doesn't
+  // re-fire the notify effect on every render.
+  const onModelLoadedRef = useRef(onModelLoaded)
+
+  useEffect(() => {
+    onModelLoadedRef.current = onModelLoaded
+  }, [onModelLoaded])
 
   useEffect(() => {
     let active = true
@@ -329,6 +340,31 @@ export default function Viewer({
     return modelClone
   }, [modelState, modelUrl, showNormals, showShadows, showAlbedo, showWireframe])
 
+  // Bone data for the optional skeleton overlay. Read from the loaded object
+  // rather than the display clone: three's `clone()` leaves a SkinnedMesh
+  // pointing at the *original* skeleton, and both share the same rest pose and
+  // world space anyway, so the overlay lines up either way.
+  const skeleton = useMemo(() => {
+    if (!modelState?.object || modelState.modelUrl !== modelUrl) {
+      return null
+    }
+
+    try {
+      return extractSkeletonFromObject(modelState.object)
+    } catch (err) {
+      console.error('Failed to extract skeleton for preview:', err)
+      return null
+    }
+  }, [modelState, modelUrl])
+
+  useEffect(() => {
+    if (!modelState?.object || modelState.modelUrl !== modelUrl) {
+      return
+    }
+
+    onModelLoadedRef.current?.({ modelUrl, isRigged: Boolean(skeleton?.jointCount) })
+  }, [modelState, modelUrl, skeleton])
+
   const cameraTarget = modelState?.modelUrl === modelUrl ? modelState.target : new THREE.Vector3(0, 0.75, 0)
   const cameraPosition = modelState?.modelUrl === modelUrl ? modelState.cameraPosition : new THREE.Vector3(3, 3, 5)
 
@@ -358,6 +394,7 @@ export default function Viewer({
           <directionalLight position={[-5, 3, -4]} intensity={Math.max(lightIntensity * 0.4, 0.15)} color="#8ff5ff" />
         <Suspense fallback={null}>
           {renderedModel ? <primitive object={renderedModel} /> : <PlaceholderMesh />}
+            {skeleton && <SkeletonOverlay skeleton={skeleton} visible={showSkeleton} />}
             {showGrid && (
               <Grid
                 infiniteGrid

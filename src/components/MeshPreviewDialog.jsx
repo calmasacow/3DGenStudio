@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import Viewer from './Viewer'
 import ExportMeshDialog from './ExportMeshDialog'
 import './MeshPreviewDialog.css'
@@ -9,13 +9,25 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
   const [showShadows, setShowShadows] = useState(false)
   const [showAlbedo, setShowAlbedo] = useState(false)
   const [showWireframe, setShowWireframe] = useState(false)
+  const [skeletonEnabled, setSkeletonEnabled] = useState(false)
   const [showLightSlider, setShowLightSlider] = useState(false)
   const [lightIntensity, setLightIntensity] = useState(2.2)
   const [showExport, setShowExport] = useState(false)
+  // Whether a rig was found is only known once the mesh has loaded, so it is
+  // tracked as the url it was found for — switching assets then invalidates it
+  // (and the skeleton overlay) without needing a reset effect.
+  const [riggedUrl, setRiggedUrl] = useState(null)
+
+  const handleModelLoaded = useCallback(({ modelUrl, isRigged }) => {
+    setRiggedUrl(isRigged ? modelUrl : null)
+  }, [])
 
   if (!asset) {
     return null
   }
+
+  const isRigged = Boolean(asset.url) && riggedUrl === asset.url
+  const showSkeleton = isRigged && skeletonEnabled
 
   return (
     <div className="mesh-preview-dialog-overlay" role="presentation" onClick={onClose}>
@@ -83,6 +95,17 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
               >
                 S
               </button>
+              {isRigged && (
+                <button
+                  type="button"
+                  className={`mesh-preview-dialog__tool ${showSkeleton ? 'mesh-preview-dialog__tool--active' : ''}`}
+                  onClick={() => setSkeletonEnabled(current => !current)}
+                  aria-pressed={showSkeleton}
+                  title="Toggle skeleton"
+                >
+                  R
+                </button>
+              )}
               {showLightSlider && (
                 <div className="mesh-preview-dialog__light-panel">
                   <input
@@ -104,6 +127,8 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
               showShadows={showShadows}
               showAlbedo={showAlbedo}
               showWireframe={showWireframe}
+              showSkeleton={showSkeleton}
+              onModelLoaded={handleModelLoaded}
               lightIntensity={lightIntensity}
               fitMode="center"
             />
