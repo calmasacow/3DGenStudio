@@ -9,7 +9,7 @@ import {
   getConnectorPosition,
   getConnectorTypeMeta
 } from '../../utils/graphHelpers'
-import { AUTO_RIG_BONE_NAME_OPTIONS } from '../../utils/meshTools'
+import AutoRigParameterFields from '../AutoRigParameterFields'
 import LastActionInfo from './LastActionInfo'
 
 // Rig Mesh node: takes a single connected mesh, runs it through the SkinTokens /
@@ -64,38 +64,6 @@ const GraphRigMeshNode = memo(function GraphRigMeshNode({ data }) {
       data.onOpenMeshPreview?.(data.asset)
     }
   }
-
-  const renderToggle = (field, label, hint) => (
-    <div className="params-card__field">
-      <label className="params-card__checkbox-label nodrag">
-        <div
-          className={`params-card__checkbox ${draft?.[field] ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
-          onClick={() => !fieldsDisabled && setField(field, !draft?.[field])}
-        >
-          {draft?.[field] && <span className="material-symbols-outlined" style={{ fontSize: '10px', color: 'var(--on-tertiary)', fontWeight: 700 }}>check</span>}
-        </div>
-        <span>{label}</span>
-      </label>
-      {hint && <span className="image-card__param-hint">{hint}</span>}
-    </div>
-  )
-
-  const renderNumber = (field, label, { min, max, step, hint }) => (
-    <div className="params-card__field">
-      <label className="params-card__label font-label">{label}</label>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        className="params-card__input nodrag"
-        value={draft?.[field] ?? ''}
-        disabled={fieldsDisabled}
-        onChange={event => setField(field, event.target.value === '' ? '' : Number(event.target.value))}
-      />
-      {hint && <span className="image-card__param-hint">{hint}</span>}
-    </div>
-  )
 
   return (
     <div className="graph-node graph-node--rigMesh">
@@ -278,31 +246,12 @@ const GraphRigMeshNode = memo(function GraphRigMeshNode({ data }) {
                     <span className="image-card__param-hint">Name of the version saved on the input mesh</span>
                   </div>
 
-                  <div className="params-card__field">
-                    <label className="params-card__label font-label">Bone names</label>
-                    <select
-                      className="params-card__select nodrag"
-                      value={draft.rename_bones || 'mixamo'}
-                      disabled={fieldsDisabled}
-                      onChange={event => setField('rename_bones', event.target.value)}
-                    >
-                      {AUTO_RIG_BONE_NAME_OPTIONS.map(option => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                    <span className="image-card__param-hint">Rename the generated bones to a standard humanoid convention for retargeting</span>
-                  </div>
-
-                  {renderToggle('use_transfer', 'Preserve texture & scale', 'Transfer the rig onto the original mesh (keeps its texture and scale). Recommended.')}
-                  {renderToggle('use_postprocess', 'Voxel-skin postprocess', 'Clean up skin weights with a voxel pass to reduce bleed across disconnected parts')}
-                  {renderToggle('keep_loaded', 'Keep model loaded in memory', 'Keep the rig model in (GPU) memory for fast repeat rigs')}
-
-                  <span className="graph-node__panel-title font-label">GENERATION (ADVANCED)</span>
-                  {renderNumber('top_k', 'Top-k', { min: 1, max: 200, step: 1, hint: 'Top-k sampling' })}
-                  {renderNumber('top_p', 'Top-p', { min: 0.1, max: 1, step: 0.01, hint: 'Nucleus (top-p) sampling' })}
-                  {renderNumber('temperature', 'Temperature', { min: 0.1, max: 2, step: 0.1 })}
-                  {renderNumber('repetition_penalty', 'Repetition penalty', { min: 0.5, max: 3, step: 0.1 })}
-                  {renderNumber('num_beams', 'Beams', { min: 1, max: 20, step: 1, hint: 'Beam-search width' })}
+                  <AutoRigParameterFields
+                    options={draft}
+                    onChange={setField}
+                    disabled={fieldsDisabled}
+                    controlClassName="nodrag"
+                  />
 
                   <div className="graph-node__linked-input font-label">
                     {sourceAsset

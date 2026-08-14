@@ -55,6 +55,12 @@ import {
   normalizeCustomApiType
 } from '../utils/kanbanHelpers'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
+import {
+  autoRig as runAutoRigService,
+  ensureDesktopService,
+  DEFAULT_AUTO_RIG_OPTIONS,
+  pickAutoRigOptions
+} from '../utils/meshTools'
 import { getWorkflowEnumOptions, resolveWorkflowEnumValue } from '../utils/workflowEnums'
 import {
   WORKFLOW_INPUT_NONE,
@@ -109,6 +115,7 @@ export default function KanbanPage() {
     runMeshEditApi,
     runMeshTexturingApi,
     runMeshRiggingApi,
+    saveMeshEdit,
     runImageEditComfy,
     generateImage,
     getComfyWorkflows,
@@ -1656,6 +1663,27 @@ export default function KanbanPage() {
     ? getCardMeshSourceGroups(card)
     : getCardImageSourceGroups(card)
 
+  // Resolve a mesh dropdown selection ("asset:<id>" for a root mesh, "edit:<filePath>"
+  // for one of its versions) back to the asset record behind it. Auto Rig runs in
+  // the browser, so it needs the file to download and the asset to version — the
+  // API/ComfyUI paths hand the raw selection to the server instead.
+  const resolveCardMeshSource = (card, sourceValue) => {
+    const selection = String(sourceValue || '')
+
+    for (const asset of (card.meshAssets || [])) {
+      if (selection === `asset:${asset.id}`) {
+        return { assetId: asset.id, filename: asset.filename, name: asset.name }
+      }
+
+      const version = getAssetChildren(asset).find(child => `edit:${child.filePath}` === selection)
+      if (version) {
+        return { assetId: version.id, filename: version.filename, name: version.name?.trim() || asset.name }
+      }
+    }
+
+    return null
+  }
+
   const getWorkflowSourceOptionLabel = (valueType, option) => {
     const assetTypeLabel = valueType === 'mesh' ? 'Mesh' : 'Image'
     return option.isEdit ? `Edit • ${option.label}` : `${assetTypeLabel} • ${option.label}`
@@ -1866,7 +1894,11 @@ export default function KanbanPage() {
       promptSource: defaultPromptOption.id,
       customPrompt: isCustomPrompt ? '' : defaultPromptOption.value,
       promptValue: isCustomPrompt ? '' : defaultPromptOption.value,
-      ...getMeshGenApiDefaults()
+      ...getMeshGenApiDefaults(),
+      // Auto Rig runs the local rigging service instead of an API / workflow, so
+      // it carries its own option set (same parameters as the Mesh Editor panel
+      // and the graph's Rig Mesh node).
+      ...DEFAULT_AUTO_RIG_OPTIONS
     }
   }
 
@@ -2484,6 +2516,86 @@ export default function KanbanPage() {
             existingChildCount: existingSourceChildCount
           })
         }
+      } else if (imageEditDraft.mode === 'autorig') {
+        // Auto Rig: the browser sends the selected mesh to the local rigging
+        // service (SkinTokens/TokenRig) and saves the skinned GLB it returns as a
+        // new version of that mesh — the same flow as the Mesh Editor's Auto Rig
+        // and the graph's Rig Mesh node.
+        const meshSource = resolveCardMeshSource(card, imageEditDraft.selectedAssetId)
+
+        if (!meshSource?.filename) {
+          showStatusMessage('Select a mesh to rig.', 'error')
+          return
+        }
+
+        const versionName = name || `${meshSource.name || 'Mesh'} (rigged)`
+        const rigOptions = pickAutoRigOptions(imageEditDraft)
+
+        setImageEditProgressByCardId(prev => ({
+          ...prev,
+          [card.id]: {
+            status: 'processing',
+            source: 'Auto Rig',
+            detail: 'Starting the rigging service…',
+            currentNodeLabel: 'Auto Rig',
+            progressPercent: 0
+          }
+        }))
+
+        // Desktop: start the rigging service on demand (no-op elsewhere).
+        await ensureDesktopService('rigging')
+
+        const meshResponse = await fetch(getAssetPreviewUrl(meshSource.filename))
+        if (!meshResponse.ok) {
+          throw new Error(`Failed to download the selected mesh (${meshResponse.status})`)
+        }
+
+        const { blob } = await runAutoRigService(await meshResponse.blob(), {
+          options: rigOptions,
+          fileName: meshSource.filename.split('/').pop() || 'mesh.glb',
+          onProgress: evt => setImageEditProgressByCardId(prev => ({
+            ...prev,
+            [card.id]: {
+              status: 'processing',
+              source: 'Auto Rig',
+              detail: evt?.message || evt?.stage || 'Rigging…',
+              currentNodeLabel: 'Auto Rig',
+              progressPercent: Number.isFinite(Number(evt?.frac))
+                ? Math.round(Math.max(0, Math.min(1, Number(evt.frac))) * 100)
+                : null
+            }
+          }))
+        })
+
+        setImageEditProgressByCardId(prev => ({
+          ...prev,
+          [card.id]: {
+            status: 'processing',
+            source: 'Auto Rig',
+            detail: 'Saving the rigged mesh',
+            currentNodeLabel: 'Auto Rig',
+            progressPercent: 100
+          }
+        }))
+
+        const savedAsset = await saveMeshEdit({
+          assetId: meshSource.assetId,
+          filePath: '',
+          name: versionName,
+          saveMode: 'version',
+          meshFile: new File([blob], `${versionName}.glb`, { type: 'model/gltf-binary' })
+        })
+
+        if (!savedAsset?.id) {
+          throw new Error('Auto Rig did not return a saved mesh version')
+        }
+
+        await ensureGeneratedMeshThumbnails(savedAsset)
+        queueResultFocus({
+          type: 'mesh-result',
+          cardId: card.id,
+          existingMeshAssetIds
+        })
       } else if (imageEditDraft.mode === 'comfy') {
         if (!imageEditDraft.workflowId) {
           showStatusMessage('Select a ComfyUI workflow.', 'error')
@@ -2720,7 +2832,13 @@ export default function KanbanPage() {
         completeJob(comfyEditPromptId, { status: 'error', error: failureMessage })
       }
 
-      if (imageEditDraft?.mode === 'api') {
+      if (imageEditDraft?.mode === 'autorig') {
+        pushExternalApiFailureNotification(
+          'Auto Rig failed',
+          failureMessage,
+          'Rigging service'
+        )
+      } else if (imageEditDraft?.mode === 'api') {
         if (isMeshGenCard) {
           pushExternalApiFailureNotification(
             'Mesh generation failed',

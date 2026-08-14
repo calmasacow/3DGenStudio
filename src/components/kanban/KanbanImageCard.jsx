@@ -1,5 +1,6 @@
 import Viewer from '../Viewer'
 import MeshGenApiOptions from './MeshGenApiOptions'
+import AutoRigParameterFields from '../AutoRigParameterFields'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import {
   buildMeshEditorPath,
@@ -432,6 +433,13 @@ export default function KanbanImageCard({
                   <button className="image-card__edit-action-option" onClick={() => openImageEditActionMenu(card, 'comfy')}>
                     ComfyUI
                   </button>
+                  {/* The rigging service runs locally (Settings → Rigging), so it is
+                      offered only where rigging belongs: the Rigging column. */}
+                  {isRiggingCard && (
+                    <button className="image-card__edit-action-option" onClick={() => openImageEditActionMenu(card, 'autorig')}>
+                      Auto Rig
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -444,7 +452,7 @@ export default function KanbanImageCard({
                       className="params-card__input"
                       value={imageEditDraft.name}
                       onChange={event => handleImageEditDraftChange(card, 'name', event.target.value)}
-                      placeholder="Enter edit name"
+                      placeholder={imageEditDraft.mode === 'autorig' ? 'Enter the rigged version name' : 'Enter edit name'}
                       required
                     />
                   </div>
@@ -544,6 +552,39 @@ export default function KanbanImageCard({
                           onChange={(field, value) => handleImageEditDraftChange(card, field, value)}
                         />
                       )}
+                    </>
+                  ) : imageEditDraft.mode === 'autorig' ? (
+                    <>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Mesh</label>
+                        <select
+                          className="image-card__attribute-select"
+                          value={imageEditDraft.selectedAssetId}
+                          onChange={event => handleImageEditDraftChange(card, 'selectedAssetId', event.target.value)}
+                        >
+                          {meshSourceGroups.length === 0 && <option value="">No meshes available</option>}
+                          {meshSourceGroups.map(group => (
+                            <optgroup key={group.asset.id} label={group.asset.name}>
+                              {group.options.map(option => (
+                                <option key={option.value} value={option.value}>
+                                  {getWorkflowSourceOptionLabel('mesh', option)}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                        <span className="image-card__param-hint">The rigged mesh is saved as a new version of this mesh</span>
+                      </div>
+
+                      <AutoRigParameterFields
+                        options={imageEditDraft}
+                        onChange={(field, value) => handleImageEditDraftChange(card, field, value)}
+                        selectClassName="image-card__attribute-select"
+                      />
+
+                      <span className="image-card__param-hint">
+                        Auto Rig runs on the SkinTokens rigging service (Settings → Rigging). Needs an NVIDIA GPU.
+                      </span>
                     </>
                   ) : (
                     <>
@@ -704,12 +745,16 @@ export default function KanbanImageCard({
                     <button
                       className="gen-btn"
                       onClick={() => handleRunImageEdit(card)}
-                      disabled={imageEditPendingCardId === card.id || !imageEditDraft.name?.trim()}
+                      disabled={imageEditPendingCardId === card.id
+                        || !imageEditDraft.name?.trim()
+                        || (imageEditDraft.mode === 'autorig' && !imageEditDraft.selectedAssetId)}
                     >
-                      <span className="material-symbols-outlined">bolt</span>
+                      <span className="material-symbols-outlined">
+                        {imageEditDraft.mode === 'autorig' ? 'accessibility_new' : 'bolt'}
+                      </span>
                       {imageEditPendingCardId === card.id
                         ? `${imageEditProgressByCardId[card.id]?.progressPercent || 0}%`
-                        : 'RUN ACTION'}
+                        : imageEditDraft.mode === 'autorig' ? 'RUN AUTO RIG' : 'RUN ACTION'}
                     </button>
                     <button className="kanban-sidebar__nav-item" onClick={closeImageEditActionMenu} style={{ justifyContent: 'center' }}>
                       CANCEL
