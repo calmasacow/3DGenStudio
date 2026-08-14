@@ -10,21 +10,6 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import SkeletonOverlay from './meshEditor/SkeletonOverlay'
 import { extractSkeletonFromObject } from '../utils/skeleton'
 
-function PlaceholderMesh() {
-  return (
-    <mesh castShadow receiveShadow>
-      <torusKnotGeometry args={[1, 0.3, 128, 32]} />
-      <meshPhysicalMaterial 
-        color="#AC89FF" 
-        roughness={0.1} 
-        metalness={1} 
-        emissive="#AC89FF"
-        emissiveIntensity={0.2}
-      />
-    </mesh>
-  )
-}
-
 function createDefaultMaterial() {
   return new THREE.MeshStandardMaterial({
     color: '#cfd8ff',
@@ -393,7 +378,7 @@ export default function Viewer({
           />
           <directionalLight position={[-5, 3, -4]} intensity={Math.max(lightIntensity * 0.4, 0.15)} color="#8ff5ff" />
         <Suspense fallback={null}>
-          {renderedModel ? <primitive object={renderedModel} /> : <PlaceholderMesh />}
+          {renderedModel && <primitive object={renderedModel} />}
             {skeleton && <SkeletonOverlay skeleton={skeleton} visible={showSkeleton} />}
             {showGrid && (
               <Grid
