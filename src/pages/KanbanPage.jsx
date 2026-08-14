@@ -1808,14 +1808,64 @@ export default function KanbanPage() {
     })
   }
 
+  // Mirrors KanbanImageCard's preview derivation (carousel page, image-edit arrows,
+  // 4-per-page grid) so the asset the card is actually showing can be preselected in
+  // the AI panel. Returns a source dropdown value, or null when the visible asset is
+  // not of the requested type.
+  const getCardDisplayedSourceValue = (card, valueType) => {
+    const carouselItems = getCardPreviewItems(card, true)
+
+    if (carouselItems.length > 0) {
+      const page = Math.min(Math.max(0, imageCardPages[card.id] || 0), carouselItems.length - 1)
+      const item = carouselItems[page]
+
+      if (!item || item.assetType !== valueType) {
+        return null
+      }
+
+      // Mesh carousel keys are namespaced (`mesh:` / `mesh-version:`) to stay unique
+      // next to the image ones; the dropdowns use `asset:` / `edit:` for both types.
+      if (item.key.startsWith('mesh-version:')) return `edit:${item.key.slice('mesh-version:'.length)}`
+      if (item.key.startsWith('mesh:')) return `asset:${item.key.slice('mesh:'.length)}`
+      return item.key
+    }
+
+    const previewAssets = [3, 4, 5, 6].includes(card.kanbanColumnId) && (card.meshAssets?.length || 0) > 0
+      ? card.meshAssets
+      : (card.allAssets?.length ? card.allAssets : (card.assets || []))
+    const totalPages = Math.max(1, Math.ceil(previewAssets.length / 4))
+    const currentPage = Math.min(imageCardPages[card.id] || 0, totalPages - 1)
+    const visibleAsset = previewAssets
+      .slice(currentPage * 4, currentPage * 4 + 4)
+      .find(asset => asset.type === valueType)
+
+    if (!visibleAsset) {
+      return null
+    }
+
+    if (valueType === 'image') {
+      const displayItems = getAssetEditDisplayItems(visibleAsset)
+      const previewIndex = Math.min(imageEditPreviewIndexes[visibleAsset.id] || 0, Math.max(0, displayItems.length - 1))
+      return displayItems[previewIndex]?.key || `asset:${visibleAsset.id}`
+    }
+
+    return `asset:${visibleAsset.id}`
+  }
+
   const createImageEditInputBindings = (card, workflow) => {
     return Object.fromEntries((workflow?.parameters || []).map(parameter => {
       const valueType = getWorkflowParameterValueType(parameter)
 
       if (['image', 'mesh'].includes(valueType)) {
-        // With no asset of that type on the card there is nothing to preselect, so
-        // the parameter starts on "None" — the one source that is always valid.
-        const defaultSource = getCardFileSourceGroups(card, valueType)[0]?.options?.[0]?.value || WORKFLOW_INPUT_NONE
+        // Preselect the asset the card is currently displaying; fall back to its
+        // first asset of that type. With no asset of that type on the card there is
+        // nothing to preselect, so the parameter starts on "None" — the one source
+        // that is always valid.
+        const sourceGroups = getCardFileSourceGroups(card, valueType)
+        const displayedSource = getCardDisplayedSourceValue(card, valueType)
+        const isSelectable = displayedSource
+          && sourceGroups.some(group => group.options.some(option => option.value === displayedSource))
+        const defaultSource = (isSelectable ? displayedSource : sourceGroups[0]?.options?.[0]?.value) || WORKFLOW_INPUT_NONE
         return [parameter.id, {
           source: defaultSource,
           customValue: ''
