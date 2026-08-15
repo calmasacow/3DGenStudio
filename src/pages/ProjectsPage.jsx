@@ -27,6 +27,17 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.3.2',
+    date: '2026-08-15',
+    items: [
+			'MeshPreviewer: Can see skeleton for rigged mesh.',
+			'Graph project: Added new node type "Rig Mesh"',
+			'Graph project: Display the mesh previewer instead of the mesh in the node',
+			'Kanban project: Rigging column can run "Auto Rig"',
+			'Kanban project: ComfyUI workflow default inputs image/mesh are the current displayed image/mesh'
+    ],
+  },
+  {
     version: 'v2.3.1',
     date: '2026-08-09',
     items: [

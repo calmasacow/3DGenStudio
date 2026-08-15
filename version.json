@@ -1,4 +1,4 @@
 {
-	"version": "2.3.1",
-	"message": "Improved batch project - Fixed PBR when exported in OBJ - Inpainting with Flux2Klein"
+	"version": "2.3.2",
+	"message": "Graph: new node type 'Rig Mesh', Kanban: can 'Auto Rig' from Rigging column, MeshPreviewer: can see skeleton"
 }
