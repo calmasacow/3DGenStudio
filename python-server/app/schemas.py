@@ -124,12 +124,21 @@ class RepairOptions(BaseModel):
         description="How to resolve non-manifold edges. 'remove' deletes the "
                     "offending faces (small holes can then be closed); 'split' "
                     "detaches the sheets, keeping all faces but leaving boundary edges.")
+    preserve_uv: bool = Field(
+        default=True,
+        description="Repair surgically so UVs (and therefore the texture) survive: "
+                    "only the faces forming the defect are touched, and vertices "
+                    "keep their indices. Turn off to fall back to the pymeshlab "
+                    "rebuild, which is more aggressive on badly broken meshes but "
+                    "welds across UV seams and discards all UVs.")
     close_holes: bool = Field(default=True,
                               description="Close the small holes that face removal opens (also runs a trimesh fill pass).")
     max_hole_size: int = Field(default=30, ge=0, le=5000,
                                description="Largest hole (in boundary edges) to close; bigger openings are left intact.")
     weld: bool = Field(default=True,
-                       description="Weld coincident vertices by position before repairing (matches the editor's check).")
+                       description="Weld coincident vertices by position before repairing (matches the editor's check). "
+                                   "Ignored when preserve_uv is on — that path welds only as an analysis view and "
+                                   "never writes the merge back, since welding is what destroys UV seams.")
 
 
 class ConvertOptions(BaseModel):
@@ -152,6 +161,72 @@ class ConvertOptions(BaseModel):
                           description="Frame rate animation takes are baked at.")
     anim_simplify: float = Field(default=1.0, ge=0.0, le=10.0,
                                  description="Baked curve simplification (0 = lossless, larger = smaller files).")
+
+
+class InspectOptions(BaseModel):
+    """Options for the Game-Ready check (`/meshes/inspect`).
+
+    The check is read-only: it never modifies or returns a mesh, only a report.
+    The budgets below are what turns a raw measurement into a pass/warn/fail, so
+    they are exposed to the UI rather than hard-coded — a hero prop and a
+    background rock have very different definitions of "too many triangles".
+    """
+
+    tri_budget: int = Field(default=50_000, ge=1, le=100_000_000,
+                            description="Triangle budget. Over it warns; 2x over fails.")
+    texture_resolution: int = Field(default=2048, ge=16, le=16384,
+                                    description="Atlas resolution texel density is measured against (px).")
+    max_material_count: int = Field(default=4, ge=1, le=1000,
+                                    description="Material count above which the asset costs extra draw calls.")
+    uv_overlap_grid: int = Field(default=512, ge=64, le=4096,
+                                 description="Raster grid used to estimate UV island overlap (px).")
+    uv_scan_max_faces: int = Field(default=60_000, ge=1000, le=2_000_000,
+                                   description="Face cap for the UV overlap raster; bigger meshes are sampled.")
+    max_extent: float = Field(default=50.0, gt=0.0,
+                              description="Largest bbox dimension expected, in metres (bigger suggests a cm/mm unit mix-up).")
+    min_extent: float = Field(default=0.01, gt=0.0,
+                              description="Smallest bbox dimension expected, in metres.")
+    expect_ground_pivot: bool = Field(default=False,
+                                      description="Check that the mesh sits on Y=0 with its pivot at the origin (props/characters).")
+
+
+class CollisionOptions(BaseModel):
+    """Options for collision-hull generation (`/meshes/collision`).
+
+    'convex_hull' is the default because it is instantaneous and never fails, and
+    for the many props that are broadly convex it is the right answer.
+    'decomposition' runs CoACD to approximate a concave shape with several convex
+    parts — the shape an engine actually wants, since a single hull swallows every
+    cavity — but it costs tens of seconds regardless of triangle count: the work
+    is in its Monte-Carlo search over cut planes, not in the geometry. The search
+    parameters below are therefore tuned well below CoACD's own defaults, trading
+    fidelity a collider does not need for a wait a user will accept.
+    """
+
+    method: Literal["decomposition", "convex_hull", "box", "sphere"] = Field(
+        default="convex_hull",
+        description="Hull strategy. 'decomposition' = CoACD convex decomposition; the rest are single primitives.")
+    max_hulls: int = Field(default=16, ge=1, le=256,
+                           description="Upper bound on parts produced by the decomposition.")
+    threshold: float = Field(default=0.25, ge=0.01, le=1.0,
+                             description="CoACD concavity threshold. Lower = more parts, tighter fit, much slower.")
+    input_faces: int = Field(default=1000, ge=0, le=1_000_000,
+                             description="Decimate the mesh to this many faces before decomposing. "
+                                         "A collider needs volume, not surface detail (0 disables).")
+    max_hull_vertices: int = Field(default=64, ge=4, le=255,
+                                   description="Per-hull vertex budget — the limit physics engines "
+                                               "actually impose (PhysX caps at 255). 0 disables.")
+    resolution: int = Field(default=1000, ge=100, le=10000,
+                            description="CoACD sampling resolution (its own default is 2000).")
+    mcts_nodes: int = Field(default=6, ge=2, le=40,
+                            description="CoACD search width (its own default is 20).")
+    mcts_iterations: int = Field(default=40, ge=10, le=500,
+                                 description="CoACD search iterations (its own default is 150).")
+    mcts_max_depth: int = Field(default=2, ge=1, le=7,
+                                description="CoACD search depth (its own default is 3).")
+    preprocess_resolution: int = Field(default=50, ge=20, le=200,
+                                       description="CoACD manifold preprocessing resolution.")
+    seed: int = Field(default=0, ge=0, description="RNG seed for reproducible decompositions.")
 
 
 class MeshStats(BaseModel):

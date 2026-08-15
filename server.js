@@ -6504,12 +6504,80 @@ async function proxyMeshTool(operationPath, req, res, { baseUrlBuilder = buildMe
   return source.pipe(res);
 }
 
+// Same forwarding as proxyMeshTool, for the mesh-tools endpoints that answer with
+// a single JSON body instead of an SSE stream (/meshes/inspect, /meshes/thumbnail).
+// Those produce no mesh and finish in seconds, so there is nothing to stream.
+async function proxyMeshToolJson(operationPath, req, res, { baseUrlBuilder = buildMeshToolsBaseUrl, serviceLabel = 'Mesh Tools' } = {}) {
+  const meshFile = req.file;
+  if (!meshFile?.buffer?.length) {
+    return res.status(400).json({ error: 'meshFile is required' });
+  }
+
+  const settings = await getSettings();
+  const baseUrl = baseUrlBuilder(settings);
+
+  const form = new FormData();
+  form.append(
+    'meshFile',
+    new Blob([meshFile.buffer], { type: meshFile.mimetype || 'model/gltf-binary' }),
+    meshFile.originalname || 'mesh.glb',
+  );
+  if (typeof req.body?.options === 'string' && req.body.options.length) {
+    form.append('options', req.body.options);
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(`${baseUrl}${operationPath}`, { method: 'POST', body: form });
+  } catch (err) {
+    console.error(`Mesh tool proxy (${operationPath}) could not reach the Python service:`, err);
+    return res.status(502).json({
+      error: `Could not reach the ${serviceLabel} (Python) service at ${baseUrl}. Is it running?`,
+    });
+  }
+
+  const text = await upstream.text().catch(() => '');
+  if (!upstream.ok) {
+    return res.status(upstream.status).json({
+      error: `Mesh tool failed (${upstream.status})`,
+      detail: text.slice(0, 2000),
+    });
+  }
+
+  try {
+    return res.json(JSON.parse(text));
+  } catch {
+    return res.status(502).json({ error: 'The mesh service returned a malformed response.' });
+  }
+}
+
 app.post('/api/meshes/auto-uv', meshToolsUpload.single('meshFile'), async (req, res) => {
   try {
     await proxyMeshTool('/meshes/auto-uv', req, res);
   } catch (err) {
     console.error('Auto UV proxy failed:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message || 'Auto UV failed' });
+  }
+});
+
+// Game-Ready check — read-only analysis, returns a JSON report (no mesh).
+app.post('/api/meshes/inspect', meshToolsUpload.single('meshFile'), async (req, res) => {
+  try {
+    await proxyMeshToolJson('/meshes/inspect', req, res);
+  } catch (err) {
+    console.error('Game-Ready check proxy failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Game-Ready check failed' });
+  }
+});
+
+// Convex collision hulls (CoACD decomposition). Returns a GLB scene with one
+// node per hull; engine-specific naming happens client-side at export time.
+app.post('/api/meshes/collision', meshToolsUpload.single('meshFile'), async (req, res) => {
+  try {
+    await proxyMeshTool('/meshes/collision', req, res);
+  } catch (err) {
+    console.error('Collision proxy failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Collision generation failed' });
   }
 });
 
@@ -6578,8 +6646,131 @@ function resolveGltfpackPath() {
   throw new Error(`Unsupported platform for gltfpack: ${platform}`);
 }
 
+// One gltfpack invocation. `aggressive` adds -sa; see runSimplify for why.
+// Returns { buffer, triangles, inputTriangles } — the counts come from the -v
+// report, which gltfpack only prints when asked.
+async function spawnGltfpack(inputBuffer, ratio, aggressive) {
+  const binaryPath = resolveGltfpackPath();
+  if (!existsSync(binaryPath)) {
+    throw new Error(`gltfpack binary not found at ${binaryPath}`);
+  }
+  // git-checked-out unix binaries may lack the execute bit.
+  if (process.platform !== 'win32') {
+    try { await fs.chmod(binaryPath, 0o755); } catch { /* best effort */ }
+  }
+
+  const id = randomUUID();
+  const inputPath = path.join(os.tmpdir(), `meshopt-${id}-in.glb`);
+  const outputPath = path.join(os.tmpdir(), `meshopt-${id}-out.glb`);
+  try {
+    await fs.writeFile(inputPath, inputBuffer);
+
+    // -kv keeps source vertex attributes (UVs, normals) even when they look
+    // "unused" — the editor exports meshes with an untextured placeholder
+    // material, so without -kv gltfpack strips TEXCOORD_0 and the reloaded mesh
+    // loses its UVs (disabling the texture/paint/projection modes).
+    // -v makes gltfpack report the triangle counts we parse below; its output is
+    // captured, never shown.
+    const args = ['-i', inputPath, '-o', outputPath, '-si', String(ratio), '-noq', '-kv', '-v'];
+    if (aggressive) args.push('-sa');
+
+    const report = await new Promise((resolve, reject) => {
+      const proc = spawn(binaryPath, args, { windowsHide: true });
+      let out = '';
+      proc.stderr.on('data', chunk => { out += chunk.toString(); });
+      proc.stdout.on('data', chunk => { out += chunk.toString(); });
+      proc.on('error', reject);
+      proc.on('close', code => {
+        if (code === 0) resolve(out);
+        else reject(new Error(out.trim() || `gltfpack exited with code ${code}`));
+      });
+    });
+
+    const buffer = await fs.readFile(outputPath);
+
+    // "input:  1 mesh primitives (12846 triangles, 17130 vertices)"
+    // "output: 1 mesh primitives (3097 triangles, 1332 vertices)"
+    const count = label => {
+      const match = report.match(new RegExp(`^${label}:.*?\\((\\d+) triangles`, 'm'));
+      return match ? Number(match[1]) : null;
+    };
+
+    return { buffer, triangles: count('output'), inputTriangles: count('input') };
+  } finally {
+    await Promise.all([inputPath, outputPath].map(f => fs.rm(f, { force: true }).catch(() => {})));
+  }
+}
+
+// Does this GLB carry UVs? Read straight from the JSON chunk — cheap, and it
+// decides whether breaking attribute seams is allowed to happen silently.
+function glbHasUvs(buffer) {
+  try {
+    if (buffer.length < 20 || buffer.readUInt32LE(0) !== 0x46546c67) return false; // 'glTF'
+    const jsonLength = buffer.readUInt32LE(12);
+    const json = JSON.parse(buffer.subarray(20, 20 + jsonLength).toString('utf8'));
+    return (json.meshes || []).some(mesh =>
+      (mesh.primitives || []).some(primitive => primitive?.attributes?.TEXCOORD_0 !== undefined));
+  } catch {
+    return false;
+  }
+}
+
+// Simplify a GLB to `ratio` of its triangle count.
+//
+// gltfpack's simplifier will not collapse edges across attribute seams, and on a
+// UV-mapped mesh every island boundary is one. Past a certain reduction it
+// therefore stalls: a 12.8k-triangle textured mesh comes back at 11.7k whether
+// you ask for 50% or 12%. Its -sa flag lifts the restriction and hits the target
+// — by welding seams, which scrambles the texture across the whole model.
+//
+// There is no third option. pymeshlab's texture-aware decimator was measured on
+// the same mesh: it preserves UVs beautifully and stalls at 12.7k, i.e. it hits
+// exactly the same wall. So the choice is real, and it belongs to the caller:
+//
+//   * no UVs            -> nothing to protect, use -sa and hit the target.
+//   * UVs, not allowed  -> stop at whatever the seam-preserving pass reached and
+//                          report `seamLimited` so the UI can say why.
+//   * UVs, allowed      -> the caller opted in with eyes open.
+//
+// Falling back to -sa automatically (as this did) trades a silently
+// under-simplified mesh for a silently ruined texture. Both are silent; the
+// second is worse, because it looks like it worked.
+async function runGltfpack(inputBuffer, ratio, { allowSeamBreaking = false } = {}) {
+  const first = await spawnGltfpack(inputBuffer, ratio, false);
+  const achieved = (result) => ({
+    ...result,
+    achievedRatio: result.inputTriangles && result.triangles
+      ? result.triangles / result.inputTriangles
+      : null,
+  });
+
+  if (ratio >= 1 || !first.inputTriangles || !first.triangles) {
+    return achieved({ ...first, seamLimited: false });
+  }
+
+  const target = first.inputTriangles * ratio;
+  // 1.5x leaves room for the simplifier landing a little above target, which is
+  // normal, while still catching the "barely moved" case.
+  if (first.triangles <= target * 1.5) {
+    return achieved({ ...first, seamLimited: false });
+  }
+
+  if (glbHasUvs(inputBuffer) && !allowSeamBreaking) {
+    return achieved({ ...first, seamLimited: true });
+  }
+
+  const aggressive = await spawnGltfpack(inputBuffer, ratio, true);
+  const best = aggressive.triangles && aggressive.triangles < first.triangles ? aggressive : first;
+  return achieved({ ...best, seamLimited: false, seamsBroken: best === aggressive });
+}
+
+function clampSimplifyRatio(value, fallback = 1) {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio)) return fallback;
+  return Math.min(1, Math.max(0.001, ratio));
+}
+
 app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req, res) => {
-  const tmpFiles = [];
   try {
     const meshFile = req.file;
     if (!meshFile?.buffer?.length) {
@@ -6590,60 +6781,82 @@ app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req,
     if (typeof req.body?.options === 'string' && req.body.options.length) {
       try { options = JSON.parse(req.body.options); } catch { options = {}; }
     }
-    let ratio = Number(options.simplify_ratio);
-    if (!Number.isFinite(ratio)) ratio = 1;
-    ratio = Math.min(1, Math.max(0.001, ratio));
+    const ratio = clampSimplifyRatio(options.simplify_ratio);
+    const allowSeamBreaking = !!options.allow_seam_breaking;
 
-    const binaryPath = resolveGltfpackPath();
-    if (!existsSync(binaryPath)) {
-      return res.status(500).json({ error: `gltfpack binary not found at ${binaryPath}` });
-    }
-    // git-checked-out unix binaries may lack the execute bit.
-    if (process.platform !== 'win32') {
-      try { await fs.chmod(binaryPath, 0o755); } catch { /* best effort */ }
-    }
-
-    const id = randomUUID();
-    const inputPath = path.join(os.tmpdir(), `meshopt-${id}-in.glb`);
-    const outputPath = path.join(os.tmpdir(), `meshopt-${id}-out.glb`);
-    tmpFiles.push(inputPath, outputPath);
-    await fs.writeFile(inputPath, meshFile.buffer);
-
-    // -kv keeps source vertex attributes (UVs, normals) even when they look
-    // "unused" — the editor exports meshes with an untextured placeholder
-    // material, so without -kv gltfpack strips TEXCOORD_0 and the reloaded mesh
-    // loses its UVs (disabling the texture/paint/projection modes).
-    const args = ['-i', inputPath, '-o', outputPath, '-si', String(ratio), '-noq', '-kv'];
-    const stderr = await new Promise((resolve, reject) => {
-      const proc = spawn(binaryPath, args, { windowsHide: true });
-      let err = '';
-      proc.stderr.on('data', chunk => { err += chunk.toString(); });
-      proc.stdout.on('data', chunk => { err += chunk.toString(); });
-      proc.on('error', reject);
-      proc.on('close', code => {
-        if (code === 0) resolve(err);
-        else reject(new Error(err.trim() || `gltfpack exited with code ${code}`));
-      });
-    });
-
-    const outBuffer = await fs.readFile(outputPath);
-
-    // Best-effort: pull the output triangle count from gltfpack's report.
-    let triangles = null;
-    const triMatch = [...stderr.matchAll(/([\d,]+)\s+triangles/gi)];
-    if (triMatch.length) {
-      triangles = Number(triMatch[triMatch.length - 1][1].replace(/,/g, ''));
-    }
+    const result = await runGltfpack(meshFile.buffer, ratio, { allowSeamBreaking });
 
     res.json({
-      mesh_b64: outBuffer.toString('base64'),
-      stats: { simplify_ratio: ratio, triangles: Number.isFinite(triangles) ? triangles : null },
+      mesh_b64: result.buffer.toString('base64'),
+      stats: {
+        simplify_ratio: ratio,
+        triangles: result.triangles,
+        input_triangles: result.inputTriangles,
+        achieved_ratio: result.achievedRatio,
+        seam_limited: !!result.seamLimited,
+        seams_broken: !!result.seamsBroken,
+      },
     });
   } catch (err) {
     console.error('Mesh optimize failed:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message || 'Mesh optimize failed' });
-  } finally {
-    await Promise.all(tmpFiles.map(f => fs.rm(f, { force: true }).catch(() => {})));
+  }
+});
+
+// LOD chain — the same simplifier as /optimize, run once per requested ratio.
+// Each level is simplified from the ORIGINAL mesh rather than from the previous
+// level: chaining compounds the error, so LOD3 built off LOD2 off LOD1 drifts
+// visibly further from the source than one built directly from it.
+app.post('/api/meshes/lods', meshToolsUpload.single('meshFile'), async (req, res) => {
+  try {
+    const meshFile = req.file;
+    if (!meshFile?.buffer?.length) {
+      return res.status(400).json({ error: 'meshFile is required' });
+    }
+
+    let options = {};
+    if (typeof req.body?.options === 'string' && req.body.options.length) {
+      try { options = JSON.parse(req.body.options); } catch { options = {}; }
+    }
+
+    const requested = Array.isArray(options.ratios) ? options.ratios : [];
+    if (!requested.length) {
+      return res.status(400).json({ error: 'options.ratios must be a non-empty array.' });
+    }
+    if (requested.length > 8) {
+      return res.status(400).json({ error: 'At most 8 LOD levels can be generated at once.' });
+    }
+    const ratios = requested.map(value => clampSimplifyRatio(value));
+    const allowSeamBreaking = !!options.allow_seam_breaking;
+
+    const lods = [];
+    for (let level = 0; level < ratios.length; level += 1) {
+      const ratio = ratios[level];
+      // Ratio 1 means "the source, untouched" — skip gltfpack entirely so LOD0
+      // keeps the original bytes (textures and rig included). No mesh is sent
+      // back for those levels: the caller already holds what it uploaded, and
+      // echoing a large GLB just to have it thrown away is pure waste.
+      if (ratio >= 1) {
+        lods.push({ level, ratio, mesh_b64: null, triangles: null, passthrough: true });
+        continue;
+      }
+      const result = await runGltfpack(meshFile.buffer, ratio, { allowSeamBreaking });
+      lods.push({
+        level,
+        ratio,
+        mesh_b64: result.buffer.toString('base64'),
+        triangles: result.triangles,
+        achieved_ratio: result.achievedRatio,
+        seam_limited: !!result.seamLimited,
+        seams_broken: !!result.seamsBroken,
+        passthrough: false,
+      });
+    }
+
+    res.json({ lods });
+  } catch (err) {
+    console.error('LOD generation failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'LOD generation failed' });
   }
 });
 

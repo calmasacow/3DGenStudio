@@ -413,6 +413,74 @@ export async function exportObject3D(object, { format, baseName }) {
   throw new Error(`Unsupported export format: ${format}`)
 }
 
+// Load a GLB Blob into an Object3D. Same job as loadObject3DFromUrl, for the
+// in-memory blobs the LOD and collision services hand back — an object URL keeps
+// GLTFLoader on its normal path (it resolves buffer views relative to the URL)
+// and is revoked as soon as parsing finishes.
+export async function loadGlbBlob(blob) {
+  const url = URL.createObjectURL(blob)
+  try {
+    const gltf = await loadWithLoader(new GLTFLoader(), url)
+    const scene = gltf.scene || (Array.isArray(gltf.scenes) ? gltf.scenes[0] : null)
+    if (!scene) {
+      throw new Error('The generated glTF contained no scene.')
+    }
+    scene.animations = Array.isArray(gltf.animations) ? gltf.animations : []
+    return scene
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+// Suffix a base name with its LOD level, e.g. "crate" + 2 -> "crate_LOD2".
+// Unity's LODGroup and Unreal's auto-LOD import both key off this convention.
+export function lodFileName(baseName, level) {
+  return `${sanitizeBaseName(baseName)}_LOD${level}`
+}
+
+// Merge collision hulls into the render mesh as Unreal-convention UCX nodes.
+//
+// Unreal only recognises collision that ships INSIDE the same file as the render
+// mesh, under a node named `UCX_<RenderMeshName>_##`. So this renames the render
+// mesh to the export base name, renames each hull to match, and returns a single
+// GLB — which the Unreal preset then converts to FBX like any other source.
+//
+// Hull materials are dropped: Unreal ignores them, and leaving them in adds
+// meaningless material slots to the imported asset.
+export async function mergeCollisionForUnreal(sourceGlbBlob, collisionGlbBlob, baseName) {
+  const base = sanitizeBaseName(baseName)
+  const [source, collision] = await Promise.all([
+    loadGlbBlob(sourceGlbBlob),
+    loadGlbBlob(collisionGlbBlob),
+  ])
+
+  // Name the render mesh — UCX matching is by name, so an unnamed or
+  // auto-numbered mesh silently breaks the association.
+  let renamed = false
+  source.traverse(child => {
+    if (!renamed && child.isMesh) {
+      child.name = base
+      renamed = true
+    }
+  })
+
+  const hulls = []
+  collision.traverse(child => {
+    if (child.isMesh) hulls.push(child)
+  })
+  hulls.forEach((hull, index) => {
+    hull.name = `UCX_${base}_${String(index + 1).padStart(2, '0')}`
+    // Detach from the collision scene graph but keep world placement.
+    hull.updateWorldMatrix(true, false)
+    hull.matrix.copy(hull.matrixWorld)
+    hull.matrix.decompose(hull.position, hull.quaternion, hull.scale)
+    source.add(hull)
+  })
+
+  const files = await exportGlb(source, base)
+  return { blob: files[0].blob, hullCount: hulls.length }
+}
+
 // POST the generated files to the server, which writes them into the
 // user-chosen folder on disk.
 export async function writeExportedFiles(folder, files) {

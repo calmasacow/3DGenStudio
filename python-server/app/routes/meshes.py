@@ -29,11 +29,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from ..config import MAX_UPLOAD_BYTES
-from ..meshio import export_mesh, load_mesh, mesh_stats
-from ..schemas import AutoRetopoOptions, AutoUvOptions, ConvertOptions, RepairOptions
+from ..meshio import export_mesh, load_mesh, load_scene, mesh_stats, scene_to_mesh
+from ..schemas import (AutoRetopoOptions, AutoUvOptions, CollisionOptions, ConvertOptions,
+                       InspectOptions, RepairOptions)
 from ..services.auto_retopo import run_auto_retopo
 from ..services.auto_uv import run_auto_uv
+from ..services.collision import run_collision
 from ..services.convert_fbx import run_convert_fbx
+from ..services.inspect import run_inspect
 from ..services.mesh_thumbnail import render_mesh_thumbnail
 from ..services.repair import run_repair
 
@@ -216,6 +219,66 @@ async def convert(
         }
 
     return _stream_payload(run, "Convert to FBX")
+
+
+@router.post("/collision")
+async def collision(
+    meshFile: UploadFile = File(...),
+    options: str | None = Form(None),
+    format: str = Form("glb"),
+) -> StreamingResponse:
+    """Generate a convex collision proxy (CoACD decomposition or a primitive).
+
+    Returns a GLB *scene* — one node per hull — rather than a single mesh, so the
+    parts stay separable for engines that key off per-hull names. That is why it
+    builds its own envelope instead of going through `_stream_tool`, whose
+    `mesh_stats` assumes one Trimesh.
+    """
+    opts = _parse_options(options, CollisionOptions)
+    data = await _read_upload(meshFile)
+    mesh = load_mesh(data, meshFile.filename or "mesh.glb")
+    fmt = (format or "glb").lstrip(".").lower()
+
+    def run(emit):
+        scene, tool_stats = run_collision(mesh, opts, progress=emit)
+        payload = scene.export(file_type=fmt)
+        if not isinstance(payload, (bytes, bytearray)):
+            payload = str(payload).encode("utf-8")
+        return {
+            "format": fmt,
+            "mesh_b64": base64.b64encode(payload).decode("ascii"),
+            "stats": {
+                "vertex_count": tool_stats.get("vertices"),
+                "face_count": tool_stats.get("faces"),
+                "has_uv": False,
+                "tool": tool_stats,
+            },
+            "preview_b64": None,
+        }
+
+    return _stream_payload(run, "Collision")
+
+
+@router.post("/inspect")
+async def inspect(
+    meshFile: UploadFile = File(...),
+    options: str | None = Form(None),
+) -> dict:
+    """Game-Ready check — analyse the mesh and return a pass/warn/fail report.
+
+    Single-artifact endpoint (no SSE, like /thumbnail): nothing is generated, so
+    there is no mesh to stream back and the analysis finishes in seconds. It runs
+    in a threadpool because the UV raster and topology walk are CPU-bound and
+    would otherwise stall the event loop.
+    """
+    opts = _parse_options(options, InspectOptions)
+    data = await _read_upload(meshFile)
+    scene = load_scene(data, meshFile.filename or "mesh.glb")
+    mesh = scene_to_mesh(scene)
+    try:
+        return await run_in_threadpool(run_inspect, scene, mesh, opts)
+    except Exception as exc:  # noqa: BLE001 — surface as a clean HTTP error
+        raise HTTPException(status_code=500, detail=f"Game-Ready check failed: {exc}") from exc
 
 
 @router.post("/thumbnail")

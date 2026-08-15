@@ -94,6 +94,28 @@ export function extractSkeletonFromObject(object) {
   }
 }
 
+// Shift extracted skeleton data by a world-space offset.
+//
+// The overlay is baked world-space positions, not live bones, so anything that
+// moves the editable geometry (recentring the pivot, for one) has to move this
+// too — otherwise the rig visibly detaches and hangs where the mesh used to be.
+export function translateSkeleton(skeleton, offsetX, offsetY, offsetZ) {
+  if (!skeleton) return skeleton
+
+  const shift = source => {
+    if (!source?.length) return source
+    const out = new Float32Array(source.length)
+    for (let i = 0; i < source.length; i += 3) {
+      out[i] = source[i] + offsetX
+      out[i + 1] = source[i + 1] + offsetY
+      out[i + 2] = source[i + 2] + offsetZ
+    }
+    return out
+  }
+
+  return { ...skeleton, joints: shift(skeleton.joints), segments: shift(skeleton.segments) }
+}
+
 // Parse an in-memory GLB (ArrayBuffer) and extract its skeleton overlay data.
 // Used for the rigged result returned by the rig service. Returns null on no rig.
 export function extractSkeletonFromGlbBuffer(arrayBuffer) {

@@ -135,6 +135,126 @@ export function convertMesh(meshBlob, opts = {}) {
   return callMeshTool('/meshes/convert', meshBlob, { ...opts, format: 'fbx' })
 }
 
+// Convex collision hulls (CoACD decomposition in the mesh-tools service). Same
+// SSE contract as the tools above; the returned blob is a GLB *scene* with one
+// node per hull (named collision_01, collision_02, …) and stats.tool carries
+// { method, parts, faces, volume_ratio, fallback }.
+export function generateCollision(meshBlob, opts = {}) {
+  return callMeshTool('/meshes/collision', meshBlob, opts)
+}
+
+// Mirrors CollisionOptions in python-server/app/schemas.py. The CoACD search
+// parameters sit well below its own defaults on purpose — decomposition costs
+// tens of seconds no matter how light the mesh is, because the work is in the
+// search over cut planes, and a collider does not need the fidelity the slower
+// settings buy.
+export const DEFAULT_COLLISION_OPTIONS = {
+  method: 'convex_hull',
+  max_hulls: 16,
+  threshold: 0.25,
+  input_faces: 1000,
+  max_hull_vertices: 64,
+  resolution: 1000,
+  mcts_nodes: 6,
+  mcts_iterations: 40,
+  mcts_max_depth: 2,
+  preprocess_resolution: 50,
+  seed: 0,
+}
+
+export const COLLISION_METHOD_OPTIONS = [
+  { value: 'convex_hull', label: 'Single convex hull — instant' },
+  { value: 'decomposition', label: 'Convex decomposition — accurate, ~1 min' },
+  { value: 'box', label: 'Box — instant' },
+  { value: 'sphere', label: 'Sphere — instant' },
+]
+
+// Game-Ready check. Read-only: returns a report, never a mesh, so this is a plain
+// JSON round trip rather than the SSE contract the mesh-returning tools use.
+// Resolves to { checks: [...], summary: {...}, stats: {...} } — see
+// python-server/app/services/inspect.py for the shape.
+export async function inspectMesh(meshBlob, { options = {}, fileName = 'mesh.glb' } = {}) {
+  const form = new FormData()
+  form.append('meshFile', meshBlob, fileName)
+  form.append('options', JSON.stringify(options))
+
+  const response = await fetch(`${API_BASE}/meshes/inspect`, { method: 'POST', body: form })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const payload = await response.json()
+      message = payload.detail ? `${payload.error}: ${JSON.stringify(payload.detail)}` : (payload.error || message)
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(message)
+  }
+  return await response.json()
+}
+
+// Budgets the Game-Ready check grades against (see InspectOptions). These are
+// deliberately generous defaults — a hero prop and a background rock disagree
+// about every one of them, so the panel exposes them.
+export const DEFAULT_INSPECT_OPTIONS = {
+  tri_budget: 50000,
+  texture_resolution: 2048,
+  max_material_count: 4,
+  uv_overlap_grid: 512,
+  uv_scan_max_faces: 60000,
+  max_extent: 50,
+  min_extent: 0.01,
+  expect_ground_pivot: false,
+}
+
+// LOD chain. Runs the bundled gltfpack binary once per ratio server-side (not the
+// Python service) and returns one GLB per level, each simplified from the
+// original. `ratios` is ordered LOD0 → LODn, e.g. [1, 0.5, 0.25, 0.12].
+// Resolves to [{ level, ratio, blob, triangles, passthrough }].
+export async function generateLods(meshBlob, { ratios = [], allowSeamBreaking = false, fileName = 'mesh.glb', onProgress = null } = {}) {
+  const form = new FormData()
+  form.append('meshFile', meshBlob, fileName)
+  form.append('options', JSON.stringify({ ratios, allow_seam_breaking: allowSeamBreaking }))
+
+  onProgress?.({ type: 'progress', stage: 'run', frac: 0.2, message: `Generating ${ratios.length} LOD levels…` })
+
+  const response = await fetch(`${API_BASE}/meshes/lods`, { method: 'POST', body: form })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const payload = await response.json()
+      message = payload.error || message
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(message)
+  }
+
+  const data = await response.json()
+  // A `passthrough` level carries no payload — it *is* the mesh that was
+  // uploaded, so the caller reuses the source it already holds.
+  return (data.lods || []).map(lod => ({
+    level: lod.level,
+    ratio: lod.ratio,
+    triangles: lod.triangles ?? null,
+    // The ratio actually reached. `seamLimited` means the simplifier stopped
+    // early rather than weld UV seams — the level is valid, just coarser than
+    // asked for. `seamsBroken` means seams were welded, so the texture moved.
+    achievedRatio: lod.achieved_ratio ?? null,
+    seamLimited: !!lod.seam_limited,
+    seamsBroken: !!lod.seams_broken,
+    passthrough: !!lod.passthrough,
+    blob: lod.mesh_b64 ? base64ToBlob(lod.mesh_b64, 'model/gltf-binary') : null,
+  }))
+}
+
+// Default LOD ratios per level count. LOD0 is always 1 (the untouched source);
+// each subsequent level roughly halves, which is the ratio Unity's and Unreal's
+// own auto-LOD tools default to.
+export function defaultLodRatios(levels) {
+  const count = Math.max(2, Math.min(6, Number(levels) || 4))
+  return Array.from({ length: count }, (_, index) => (index === 0 ? 1 : Number((0.5 ** index).toFixed(3))))
+}
+
 // Auto Rig option defaults + the bone-naming conventions the service supports.
 // Shared by every Auto Rig surface (the Mesh Editor panel and the graph's Rig
 // Mesh node) so they cannot drift apart.

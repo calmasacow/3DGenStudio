@@ -25,6 +25,9 @@ export default function AutoRigToolsPanel({
   hasSkeleton,
   showSkeleton,
   onToggleSkeleton,
+  rigPreserved,
+  rigBoneCount,
+  rigDropped,
   disabled,
 }) {
   const o = options
@@ -46,6 +49,25 @@ export default function AutoRigToolsPanel({
         />
         {!hasSkeleton && (
           <span className="mesh-editor-panel__hint">This mesh has no skeleton yet. Run Auto Rig to generate one.</span>
+        )}
+
+        {/* Whether saving will actually carry the rig. Editing bakes the mesh to
+            flat world-space geometry, so this is the one place that can say
+            whether the weights survived — before you find out in the engine. */}
+        {rigPreserved && (
+          <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'center', gap: '0.4em' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em', color: '#4caf50' }}>check_circle</span>
+            <span>Rig preserved — saving keeps the skeleton and {rigBoneCount} bones&apos; skin weights.</span>
+          </div>
+        )}
+        {rigDropped && (
+          <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#e0a030' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>warning</span>
+            <span>
+              An edit rebuilt the topology, so the skin weights were lost — saving now writes a
+              static mesh. Run Auto Rig again to re-rig it.
+            </span>
+          </div>
         )}
 
         <button

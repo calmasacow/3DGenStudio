@@ -83,6 +83,14 @@ export default function AutoRetopoToolsPanel({
             </button>
             {repairOptions && (
               <>
+                <ToggleField label="Keep UVs and texture" value={repairOptions.preserve_uv}
+                  onChange={v => setRepairOption('preserve_uv', v)} disabled={fieldsDisabled || repairRunning}
+                  hint="Repair only the faces that form the defect, leaving every other vertex — and its UV — untouched. Uncheck only if the mesh is too broken for that: the fallback rebuilds the mesh and discards all UVs (and the texture with them)." />
+                {!repairOptions.preserve_uv && (
+                  <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
+                    The texture will be lost — the fallback welds across UV seams.
+                  </span>
+                )}
                 <SelectField label="Repair method" value={repairOptions.method}
                   onChange={v => setRepairOption('method', v)} disabled={fieldsDisabled || repairRunning}
                   options={[
@@ -90,12 +98,19 @@ export default function AutoRetopoToolsPanel({
                     { value: 'split', label: 'Split vertices (keep faces)' },
                   ]}
                   hint="Remove deletes the offending faces; Split detaches the sheets and leaves open edges" />
+                {repairOptions.preserve_uv && repairOptions.method === 'split' && (
+                  <span className="mesh-editor-panel__hint">
+                    Split keeps every face by duplicating the shared vertices. They stay at the same
+                    position, so the watertight check — which compares positions — still reports the
+                    edge. Use Remove to clear the count.
+                  </span>
+                )}
                 <ToggleField label="Close resulting holes" value={repairOptions.close_holes}
-                  onChange={v => setRepairOption('close_holes', v)} disabled={fieldsDisabled || repairRunning}
+                  onChange={v => setRepairOption('close_holes', v)} disabled={fieldsDisabled || repairRunning || repairOptions.method === 'split'}
                   hint="Seal the small holes that face removal opens (uncheck to leave them and guarantee no new non-manifold edges)" />
                 <NumberField label="Max hole size" min={0} max={5000} step={1}
                   value={repairOptions.max_hole_size} onChange={v => setRepairOption('max_hole_size', v)}
-                  disabled={fieldsDisabled || repairRunning || !repairOptions.close_holes}
+                  disabled={fieldsDisabled || repairRunning || !repairOptions.close_holes || repairOptions.method === 'split'}
                   hint="Largest hole (in edges) to close; bigger openings are left intact" />
               </>
             )}

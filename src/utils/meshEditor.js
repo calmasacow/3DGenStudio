@@ -7,6 +7,7 @@ import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh'
+import { buildRiggedObject } from './meshRig'
 import { ADDITION, Brush, Evaluator, INTERSECTION, SUBTRACTION } from 'three-bvh-csg'
 
 if (THREE.BufferGeometry.prototype.computeBoundsTree !== computeBoundsTree) {
@@ -247,7 +248,11 @@ function toFloat32Attribute(attribute) {
 // collapsing the whole mesh to a speck (it then loads without error but is
 // invisible in the editor). Convert everything we read to plain Float32 first.
 function dequantizeGeometryAttributes(geometry) {
-  const names = ['position', 'normal', 'tangent', 'uv', 'uv1', 'uv2', 'color']
+  // skinIndex/skinWeight are included so a rigged GLB's interleaved or quantized
+  // skin data is de-interleaved like everything else; createIndexedGeometry puts
+  // skinIndex back into an integer array before export, which is what glTF
+  // requires of JOINTS_0.
+  const names = ['position', 'normal', 'tangent', 'uv', 'uv1', 'uv2', 'color', 'skinIndex', 'skinWeight']
   names.forEach(name => {
     const attribute = geometry.attributes[name]
     if (!attribute) {
@@ -285,6 +290,17 @@ function createMergedGeometryFromObject(object) {
     throw new Error('No editable mesh geometry found')
   }
 
+  // mergeGeometries requires every input to carry the same attribute set, and a
+  // scene can mix skinned and static parts. When they disagree, drop the skin
+  // data rather than fail the merge — a partial rig cannot be reassembled into a
+  // single flattened mesh anyway, and the editor reports the rig as lost.
+  if (geometries.length > 1 && geometries.some(geometry => !geometry.attributes.skinIndex)) {
+    geometries.forEach(geometry => {
+      geometry.deleteAttribute('skinIndex')
+      geometry.deleteAttribute('skinWeight')
+    })
+  }
+
   const mergedGeometry = geometries.length === 1 ? geometries[0] : mergeGeometries(geometries, false)
   const weldedGeometry = mergeVertices(mergedGeometry, 1e-5)
 
@@ -297,8 +313,8 @@ function createMergedGeometryFromObject(object) {
 
 export function loadEditableGeometryFromObject(object) {
   const geometry = createMergedGeometryFromObject(object)
-  const { positions, indices, uvs } = compactMeshData(geometryToMeshData(geometry))
-  return createIndexedGeometry(positions, indices, uvs)
+  const { positions, indices, uvs, skinIndices, skinWeights } = compactMeshData(geometryToMeshData(geometry))
+  return createIndexedGeometry(positions, indices, uvs, skinIndices, skinWeights)
 }
 
 // Parse an in-memory GLB (ArrayBuffer) into an editable BufferGeometry without
@@ -334,7 +350,7 @@ export function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
 // Skeleton extraction now lives in ./skeleton.js so plain viewers can read a rig
 // without pulling in this module's CSG/BVH deps. Re-exported here so existing
 // callers keep importing it from utils/meshEditor.
-export { extractSkeletonFromObject, extractSkeletonFromGlbBuffer } from './skeleton'
+export { extractSkeletonFromObject, extractSkeletonFromGlbBuffer, translateSkeleton } from './skeleton'
 
 async function loadGeometryFromUrl(url) {
   const extension = getExtensionFromUrl(url)
@@ -362,12 +378,22 @@ async function loadGeometryFromUrl(url) {
   throw new Error('Unsupported mesh format')
 }
 
-function createIndexedGeometry(positions = [], indices = [], uvs = null) {
+function createIndexedGeometry(positions = [], indices = [], uvs = null, skinIndices = null, skinWeights = null) {
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
 
   if (Array.isArray(uvs) && uvs.length === (positions.length / 3) * 2) {
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  }
+
+  const vertexCount = positions.length / 3
+  if (Array.isArray(skinIndices) && Array.isArray(skinWeights)
+    && skinIndices.length === vertexCount * 4 && skinWeights.length === vertexCount * 4) {
+    // JOINTS_0 must be an integer accessor in glTF — a Float32 array here would
+    // make GLTFExporter emit componentType FLOAT, which is invalid and which
+    // importers reject or silently mis-read.
+    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4))
+    geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4))
   }
 
   geometry.setIndex(indices)
@@ -641,7 +667,7 @@ function getBridgeAndFillCandidate(geometry, selectedVertexIndices = []) {
 
 function geometryToMeshData(geometry) {
   if (!geometry?.attributes?.position) {
-    return { positions: [], indices: [], uvs: null }
+    return { positions: [], indices: [], uvs: null, skinIndices: null, skinWeights: null }
   }
 
   const positions = Array.from(geometry.attributes.position.array)
@@ -653,13 +679,26 @@ function geometryToMeshData(geometry) {
     ? Array.from(uvAttribute.array)
     : null
 
-  return { positions, indices, uvs }
+  // Skin data rides through the pipeline as plain per-vertex data so that any
+  // operation which only moves or removes vertices keeps the rig intact.
+  const vertexCount = positions.length / 3
+  const skinIndexAttribute = geometry.attributes.skinIndex
+  const skinWeightAttribute = geometry.attributes.skinWeight
+  const hasSkin = skinIndexAttribute?.array?.length === vertexCount * 4
+    && skinWeightAttribute?.array?.length === vertexCount * 4
+  const skinIndices = hasSkin ? Array.from(skinIndexAttribute.array) : null
+  const skinWeights = hasSkin ? Array.from(skinWeightAttribute.array) : null
+
+  return { positions, indices, uvs, skinIndices, skinWeights }
 }
 
-function compactMeshData({ positions = [], indices = [], uvs = null }) {
+function compactMeshData({ positions = [], indices = [], uvs = null, skinIndices = null, skinWeights = null }) {
   const usedVertices = [...new Set(indices)]
   const nextPositions = []
   const nextUvs = Array.isArray(uvs) ? [] : null
+  const hasSkin = Array.isArray(skinIndices) && Array.isArray(skinWeights)
+  const nextSkinIndices = hasSkin ? [] : null
+  const nextSkinWeights = hasSkin ? [] : null
   const remap = new Map()
 
   usedVertices.forEach((vertexIndex, nextIndex) => {
@@ -675,6 +714,13 @@ function compactMeshData({ positions = [], indices = [], uvs = null }) {
         uvs[vertexIndex * 2],
         uvs[vertexIndex * 2 + 1]
       )
+    }
+
+    if (hasSkin) {
+      for (let component = 0; component < 4; component += 1) {
+        nextSkinIndices.push(skinIndices[vertexIndex * 4 + component])
+        nextSkinWeights.push(skinWeights[vertexIndex * 4 + component])
+      }
     }
   })
 
@@ -695,7 +741,13 @@ function compactMeshData({ positions = [], indices = [], uvs = null }) {
     nextIndices.push(a, b, c)
   }
 
-  return { positions: nextPositions, indices: nextIndices, uvs: nextUvs }
+  return {
+    positions: nextPositions,
+    indices: nextIndices,
+    uvs: nextUvs,
+    skinIndices: nextSkinIndices,
+    skinWeights: nextSkinWeights,
+  }
 }
 
 function getFace(meshData, faceIndex) {
@@ -1596,7 +1648,10 @@ export function exportGeometryToObj(geometry) {
   return `${lines.join('\n')}\n`
 }
 
-export function exportGeometryToGlb(geometry) {
+// `rig` (from utils/meshRig.js) is optional. When supplied and the geometry
+// still carries skin data, the GLB is written as a SkinnedMesh with its skeleton
+// instead of a static mesh.
+export function exportGeometryToGlb(geometry, rig = null) {
   return new Promise((resolve, reject) => {
     if (!geometry) {
       reject(new Error('Geometry is required to export a GLB mesh.'))
@@ -1604,10 +1659,9 @@ export function exportGeometryToGlb(geometry) {
     }
 
     const exporter = new GLTFExporter()
-    const exportMesh = new THREE.Mesh(
-      geometry.clone(),
-      new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
-    )
+    const material = new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
+    const rigged = rig ? buildRiggedObject(rig, geometry.clone(), material) : null
+    const exportMesh = rigged || new THREE.Mesh(geometry.clone(), material)
     exportMesh.name = 'MeshEditorResult'
 
     exporter.parse(

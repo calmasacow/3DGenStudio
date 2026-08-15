@@ -191,6 +191,92 @@
   color: #9cffce;
 }
 
+/* ── Game-ready extras (LODs, collision, pre-export check) ────────────────── */
+
+.export-mesh__extras {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgba(71, 72, 74, 0.18);
+}
+
+.export-mesh__check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--on-surface);
+  cursor: pointer;
+}
+
+.export-mesh__extra-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: -0.1rem 0 0.35rem 1.5rem;
+}
+
+.export-mesh__inline-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--on-surface-variant);
+}
+
+.export-mesh__select--inline {
+  height: 32px;
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.export-mesh__check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.export-mesh__check-row .export-mesh__btn {
+  min-width: 0;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+.export-mesh__verdict {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.export-mesh__verdict--pass { color: #9cffce; }
+.export-mesh__verdict--warn { color: #e0a030; }
+.export-mesh__verdict--fail { color: #ff9c9c; }
+
+.export-mesh__findings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.export-mesh__finding {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  padding-left: 0.6rem;
+  border-left: 2px solid transparent;
+  color: var(--on-surface-variant);
+}
+
+.export-mesh__finding--fail { border-left-color: #ff9c9c; }
+.export-mesh__finding--warn { border-left-color: #e0a030; }
+.export-mesh__finding--pass { border-left-color: #9cffce; }
+
 .export-mesh__actions {
   display: flex;
   align-items: center;

@@ -12,6 +12,12 @@ scipy>=1.11               # sparse solvers (LSCM/ARAP), KD-trees, ndimage
 scikit-image>=0.22        # marching cubes for the watertight voxel shell
 pymeshlab>=2023.12        # isotropic remesh / decimation / quad conversion
 
+# --- Collision hulls ---------------------------------------------------------
+# Approximate convex decomposition for the collision proxies the export dialog
+# generates. Optional at runtime: services/collision.py falls back to a single
+# convex hull (and says so) when the import fails.
+coacd>=1.0
+
 # --- Optional ----------------------------------------------------------------
 matplotlib>=3.8         # only needed for the CLI's UV-layout / compare PNGs
 rtree

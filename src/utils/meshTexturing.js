@@ -8,6 +8,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh'
+import { buildRiggedObject } from './meshRig'
 
 if (THREE.BufferGeometry.prototype.computeBoundsTree !== computeBoundsTree) {
   THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
@@ -863,10 +864,30 @@ export function buildTexturedMeshObject({ root, textureKey, textureCanvas, textu
   return { object, materials, exportTexture }
 }
 
+// `rig` + `geometry` are optional. When both are present and the geometry still
+// carries skin data, the textured mesh is exported as a SkinnedMesh with its
+// skeleton: the display root the editor keeps is deliberately un-skinned (see
+// the SkinnedMesh demotion in MeshEditorPage), so the rig has to be reattached
+// here rather than read back off it.
 export async function exportTexturedMeshToGlb(args) {
   const { object, materials, exportTexture } = buildTexturedMeshObject(args)
+  const { rig = null, geometry = null } = args || {}
 
   try {
+    if (rig && geometry) {
+      // Reuse the textured material the clone just received, so the exported
+      // rigged mesh keeps the painted texture.
+      let texturedMaterial = null
+      object.traverse(child => {
+        if (!texturedMaterial && child.isMesh) {
+          texturedMaterial = Array.isArray(child.material) ? child.material[0] : child.material
+        }
+      })
+      const rigged = buildRiggedObject(rig, geometry.clone(), texturedMaterial)
+      if (rigged) {
+        return await exportObjectToGlb(rigged)
+      }
+    }
     return await exportObjectToGlb(object)
   } finally {
     materials.forEach(material => material?.dispose?.())

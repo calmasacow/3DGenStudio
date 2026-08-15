@@ -26,6 +26,7 @@ import {
   loadEditableGeometryFromGlbBuffer,
   extractSkeletonFromObject,
   extractSkeletonFromGlbBuffer,
+  translateSkeleton,
   mergeSelectedVertices,
   smoothSelectedVertices,
   subdivideSelectedFaces
@@ -157,7 +158,10 @@ import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
-import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS } from '../utils/meshTools'
+import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
+import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS } from '../utils/meshTools'
+import { exportObject3D } from '../utils/meshExport'
+import { extractRigFromObject, buildRiggedObject, geometryHasSkin } from '../utils/meshRig'
 
 // Default option sets for the Python mesh-tools panels. These mirror the
 // defaults of autouv.unwrap() and autoretopo.RetopoConfig 1:1 (see
@@ -209,10 +213,18 @@ const DEFAULT_REPAIR_OPTIONS = {
   close_holes: true,
   max_hole_size: 30,
   weld: true,
+  // Surgical repair that keeps UVs (and so the texture) intact. Off falls back
+  // to the pymeshlab rebuild, which is stronger on badly broken meshes but welds
+  // across UV seams and discards every UV.
+  preserve_uv: true,
 }
 
 const DEFAULT_OPTIMIZE_OPTIONS = {
   simplify_ratio: 0.5,
+  // Off by default: welding UV seams is the only way past a seamed mesh's
+  // simplification floor, and it scrambles the texture. Under-simplifying and
+  // saying so beats silently ruining the asset.
+  allow_seam_breaking: false,
 }
 
 // ── Projection per-layer mask helpers ───────────────────────────────────────
@@ -438,6 +450,11 @@ export default function MeshEditorPage() {
   // or of the freshly-generated rig result. `showSkeleton` toggles its visibility.
   const [skeleton, setSkeleton] = useState(null)
   const [showSkeleton, setShowSkeleton] = useState(true)
+  // The real rig (bones + inverse bind matrices), kept out of React state
+  // because it is a scene graph that never re-renders. `rigDropped` records that
+  // an edit destroyed the per-vertex weights, so saving can no longer carry it.
+  const rigRef = useRef(null)
+  const [rigDropped, setRigDropped] = useState(false)
   // Index of the bone selected in the Skeleton panel / by clicking it on the mesh
   // (null = none). Highlighted in the viewport by SkeletonOverlay.
   const [selectedBone, setSelectedBone] = useState(null)
@@ -475,6 +492,21 @@ export default function MeshEditorPage() {
   const [optimizeRunning, setOptimizeRunning] = useState(false)
   const [optimizeResult, setOptimizeResult] = useState(null)
   const [optimizeProgress, setOptimizeProgress] = useState(null)
+  // LOD ladder built from the current mesh. `lodSourceFaces` records what it was
+  // built from so the panel can flag the numbers as stale after further edits
+  // instead of showing figures that quietly stopped being true.
+  const [lodLevels, setLodLevels] = useState(4)
+  const [lodChain, setLodChain] = useState([])
+  const [lodSourceFaces, setLodSourceFaces] = useState(0)
+  const [lodGenerating, setLodGenerating] = useState(false)
+  const [lodProgress, setLodProgress] = useState(null)
+  // Game-Ready check (read-only analysis) — no result/undo state, it never edits.
+  const [gameReadyOptions, setGameReadyOptions] = useState(DEFAULT_INSPECT_OPTIONS)
+  const [gameReadyRunning, setGameReadyRunning] = useState(false)
+  const [gameReadyReport, setGameReadyReport] = useState(null)
+  // Set by a fix that edits the mesh, so the check re-runs once the new geometry
+  // has actually landed in state rather than against the pre-fix closure.
+  const pendingGameReadyRecheckRef = useRef(false)
   // Snapshot of the texturable-mesh state from just before a mesh tool ran, so
   // "Revert" can restore the original texture/UVs alongside the geometry undo.
   const preToolTexturableRef = useRef(null)
@@ -1844,6 +1876,39 @@ export default function MeshEditorPage() {
       return
     }
 
+    // A rigged mesh arrives as a SkinnedMesh, and the editable `geometry` below
+    // holds rest-pose *world* positions (loadEditableGeometryFromObject bakes
+    // each vertex through child.matrixWorld). Leaving the node skinned would
+    // therefore be wrong in two different ways depending on the mesh:
+    //
+    //   * without skin attributes — the case before rig preservation, and still
+    //     the case after any topology edit — three throws in
+    //     computeBoundingSphere() -> applyBoneTransform() while frustum culling,
+    //     dereferencing the missing skinIndex and taking the whole canvas down;
+    //   * with skin attributes, the original bind matrix would be applied on top
+    //     of geometry that already has it baked in, deforming the mesh.
+    //
+    // The editor never poses the skeleton, so a static node renders identically
+    // to a correctly-bound one. Demote unconditionally and keep the real rig
+    // aside in rigRef, which is what save/export reattaches.
+    //
+    // The uuid is carried over deliberately: paint targets are keyed by it
+    // (texturableMesh.paintTargetsByMeshUuid), so a fresh uuid would silently
+    // break painting and projection on this mesh.
+    if (targetMesh.isSkinnedMesh && targetMesh.parent) {
+      const plainMesh = new THREE.Mesh(geometry, targetMesh.material)
+      plainMesh.uuid = targetMesh.uuid
+      plainMesh.name = targetMesh.name
+      plainMesh.userData = targetMesh.userData
+      plainMesh.visible = targetMesh.visible
+      plainMesh.castShadow = targetMesh.castShadow
+      plainMesh.receiveShadow = targetMesh.receiveShadow
+      targetMesh.parent.add(plainMesh)
+      targetMesh.removeFromParent()
+      targetMesh = plainMesh
+      texturableEditableMeshRef.current = plainMesh
+    }
+
     targetMesh.geometry = geometry
     // The editable `geometry` already has the mesh's full world transform baked
     // in (loadEditableGeometryFromObject applies child.matrixWorld). If the
@@ -1916,6 +1981,16 @@ export default function MeshEditorPage() {
         } catch (skeletonError) {
           console.warn('Skeleton extraction failed:', skeletonError)
         }
+        // Capture the actual rig (bones + inverse bind matrices) alongside the
+        // display-only overlay data. The editing pipeline can carry per-vertex
+        // skin weights as geometry attributes but not a scene graph, so the
+        // skeleton is kept aside and reattached on save/export.
+        let loadedRig = null
+        try {
+          loadedRig = extractRigFromObject(loadedRoot)
+        } catch (rigError) {
+          console.warn('Rig capture failed:', rigError)
+        }
         const texturableStartedAt = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
 
         const geometryPromise = Promise.resolve().then(() => loadEditableGeometryFromObject(loadedRoot)).then(loadedGeometry => {
@@ -1953,6 +2028,8 @@ export default function MeshEditorPage() {
           setSelectedVertexIndices([])
           setHoleLoops([])
           // Reset the rig overlay to whatever this mesh arrived with.
+          rigRef.current = loadedRig
+          setRigDropped(false)
           setSkeleton(loadedSkeleton)
           setShowSkeleton(true)
           setSelectedBone(null)
@@ -3836,6 +3913,20 @@ export default function MeshEditorPage() {
     setHoleLoops(nextHoleLoops)
     setSelectedFaceIndices([])
     setSelectedVertexIndices([])
+
+    // Anything that rebuilds topology — the Python tools, gltfpack, CSG, the
+    // local face/vertex ops — returns geometry with no skin attributes, and a
+    // weight cannot be invented for a vertex that did not exist before. Rather
+    // than let the rig disappear from the saved file unannounced, notice it here
+    // once and say so. Checked instead of enumerating operations, so a tool
+    // added later cannot forget to report it.
+    if (rigRef.current && !geometryHasSkin(nextGeometry)) {
+      rigRef.current = null
+      setRigDropped(true)
+      setFeedback('Mesh updated — this operation rebuilt the topology, so the skin weights were lost. Re-run Auto Rig before saving if you need the rig.')
+      return
+    }
+
     setFeedback('Mesh updated.')
   }, [geometry])
 
@@ -4432,6 +4523,11 @@ export default function MeshEditorPage() {
       setProgress: setRepairProgress,
       label: 'Repair',
       requiresService: 'meshtools',
+      // The UV-preserving repair returns the same UV layout it was given, so the
+      // painted texture can be carried straight onto the result. Without it the
+      // UVs are gone and a carried-over texture would map to nothing, so the
+      // blank-canvas reset is the honest outcome.
+      preserveTexture: repairOptions.preserve_uv,
       buildRows: stats => {
         const t = stats?.tool || {}
         const before = t.before || {}
@@ -4444,6 +4540,9 @@ export default function MeshEditorPage() {
           rows.push({ label: 'Open edges', value: `${before.boundary_edges} → ${after.boundary_edges}` })
         }
         if (t.removed_faces != null) rows.push({ label: 'Faces removed', value: t.removed_faces })
+        if (t.detached_faces) rows.push({ label: 'Faces detached', value: t.detached_faces })
+        if (t.filled_faces) rows.push({ label: 'Holes closed', value: t.filled_faces })
+        rows.push({ label: 'UVs / texture', value: t.uv_preserved ? 'Preserved' : 'Discarded' })
         if (after.watertight != null) rows.push({ label: 'Watertight', value: after.watertight ? 'Yes' : 'No' })
         return rows
       },
@@ -4451,13 +4550,87 @@ export default function MeshEditorPage() {
   }, [runMeshTool, repairOptions])
 
   // Any geometry change (edits, Auto Retopo, revert…) invalidates a prior result,
-  // so clear it and let the user re-check against the new topology.
+  // so clear it and let the user re-check against the new topology. The
+  // Game-Ready report goes with it: a stale green checklist is worse than none.
   useEffect(() => {
     setWatertightResult(null)
+    setGameReadyReport(null)
   }, [geometryRevision])
   const setOptimizeOption = useCallback((key, value) => {
     setOptimizeOptions(prev => ({ ...prev, [key]: value }))
   }, [])
+
+  // ── LOD chain ────────────────────────────────────────────────────────────
+  const lodRatios = useMemo(() => defaultLodRatios(lodLevels), [lodLevels])
+
+  // Build every level and report its real triangle count. Only the geometry is
+  // sent: gltfpack would otherwise re-encode the embedded texture once per level,
+  // which costs seconds and megabytes to produce numbers that do not depend on it.
+  const handleGenerateLods = useCallback(async () => {
+    if (!geometry || lodGenerating) {
+      return
+    }
+    setLodGenerating(true)
+    setError('')
+    setLodProgress({ stage: 'start', frac: 0, message: 'Preparing mesh…' })
+    try {
+      // Send the rig along: gltfpack carries JOINTS_0/WEIGHTS_0 through
+      // simplification, so an LOD of a rigged mesh keeps its weights and stays
+      // applicable without dropping the skeleton. Without this the levels would
+      // come back static and applying one would silently un-rig the mesh.
+      const rig = geometryHasSkin(geometry) ? rigRef.current : null
+      const glbBuffer = await exportGeometryToGlb(geometry, rig)
+      const sourceBlob = new Blob([glbBuffer], { type: 'model/gltf-binary' })
+      const chain = await generateLods(sourceBlob, {
+        ratios: lodRatios,
+        allowSeamBreaking: !!optimizeOptions.allow_seam_breaking,
+        fileName: 'mesh.glb',
+        onProgress: evt => setLodProgress(evt),
+      })
+      const sourceFaces = geometryFaceCount(geometry)
+      // The service sends no payload for the passthrough level — it *is* what we
+      // uploaded. Hand it the blob we already hold so LOD0 can be applied like
+      // any other level, which is how you get back to the original mesh after
+      // trying a coarser one.
+      setLodChain(chain.map(lod => (lod.passthrough
+        ? { ...lod, blob: sourceBlob, triangles: sourceFaces }
+        : lod)))
+      setLodSourceFaces(sourceFaces)
+      const limited = chain.filter(lod => lod.seamLimited).length
+      setFeedback(limited
+        ? `LOD chain ready — ${limited} level${limited === 1 ? '' : 's'} stopped early to protect the UVs.`
+        : `LOD chain ready — ${chain.length} levels.`)
+    } catch (err) {
+      console.error('LOD generation failed:', err)
+      setError(err?.message || 'LOD generation failed.')
+      setLodChain([])
+    } finally {
+      setLodGenerating(false)
+      setLodProgress(null)
+    }
+  }, [geometry, lodGenerating, lodRatios, optimizeOptions.allow_seam_breaking])
+
+  // Swap the mesh for one of the generated levels. Routed through runMeshTool so
+  // it behaves exactly like Optimize does — undo entry, texture carried over,
+  // Keep/Revert banner — with the already-built blob standing in for the service.
+  const handleApplyLod = useCallback((level) => {
+    const lod = lodChain.find(entry => entry.level === level)
+    if (!lod?.blob) {
+      return
+    }
+    runMeshTool(async () => ({ blob: lod.blob, stats: null, previewUrl: null }), {}, {
+      setRunning: setOptimizeRunning,
+      setResult: setOptimizeResult,
+      setProgress: setOptimizeProgress,
+      label: lod.passthrough ? 'Restore LOD0' : `Apply LOD${level}`,
+      preserveTexture: true,
+      buildRows: (_stats, nextGeometry) => [
+        { label: 'Level', value: `LOD${level}${lod.passthrough ? ' (original)' : ''}` },
+        { label: 'Target ratio', value: `${Math.round(lod.ratio * 100)}%` },
+        { label: 'Faces', value: `${lodSourceFaces.toLocaleString()} → ${geometryFaceCount(nextGeometry).toLocaleString()}` },
+      ],
+    })
+  }, [lodChain, lodSourceFaces, runMeshTool])
 
   const handleRevertMeshTool = useCallback((clearResult) => {
     handleModelingUndo()
@@ -4655,6 +4828,11 @@ export default function MeshEditorPage() {
       && geometry?.attributes?.uv?.count
     )
 
+    // Same rule as saving: reattach the skeleton when the weights survived, so
+    // the Export dialog (and everything downstream of it — FBX presets, LOD
+    // levels, the Game-Ready check) sees a rigged mesh rather than a baked one.
+    const rig = geometryHasSkin(geometry) ? rigRef.current : null
+
     if (canExportTextured) {
       const { object } = buildTexturedMeshObject({
         root: texturableMesh.root,
@@ -4662,14 +4840,131 @@ export default function MeshEditorPage() {
         textureCanvas: texturableMesh.textureCanvas,
         textureConfig: texturableMesh.textureConfig
       })
+      if (rig) {
+        let texturedMaterial = null
+        object.traverse(child => {
+          if (!texturedMaterial && child.isMesh) {
+            texturedMaterial = Array.isArray(child.material) ? child.material[0] : child.material
+          }
+        })
+        const rigged = buildRiggedObject(rig, geometry.clone(), texturedMaterial)
+        if (rigged) return rigged
+      }
       return object
     }
 
-    return new THREE.Mesh(
-      geometry.clone(),
-      new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
-    )
+    const material = new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
+    if (rig) {
+      const rigged = buildRiggedObject(rig, geometry.clone(), material)
+      if (rigged) return rigged
+    }
+    return new THREE.Mesh(geometry.clone(), material)
   }, [geometry, texturableMesh])
+
+  // ── Game-Ready check ─────────────────────────────────────────────────────
+  const setGameReadyOption = useCallback((key, value) => {
+    setGameReadyOptions(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  // Analyses the *export* object rather than the raw geometry: the material and
+  // texture counts are only meaningful on the mesh as it would actually ship, and
+  // exportGeometryToGlb would hand the service a bare, material-free buffer.
+  const handleRunGameReady = useCallback(async () => {
+    if (!geometry || gameReadyRunning) {
+      return
+    }
+    setGameReadyRunning(true)
+    setError('')
+    setFeedback('Running the Game-Ready check…')
+    try {
+      await ensureDesktopService('meshtools')
+      const object = getExportObject()
+      const files = await exportObject3D(object, { format: 'glb', baseName: 'inspect' })
+      const report = await runInspectService(files[0].blob, {
+        options: gameReadyOptions,
+        fileName: 'inspect.glb',
+      })
+      setGameReadyReport(report)
+      const failed = report?.summary?.fail || 0
+      const warned = report?.summary?.warn || 0
+      setFeedback(failed
+        ? `Game-Ready check: ${failed} blocking issue${failed === 1 ? '' : 's'}.`
+        : warned
+          ? `Game-Ready check: ready, with ${warned} warning${warned === 1 ? '' : 's'}.`
+          : 'Game-Ready check: everything passed.')
+    } catch (err) {
+      console.error('Game-Ready check failed:', err)
+      setError(err?.message || 'The Game-Ready check failed.')
+      setGameReadyReport(null)
+    } finally {
+      setGameReadyRunning(false)
+    }
+  }, [geometry, gameReadyRunning, gameReadyOptions, getExportObject])
+
+  // Move the mesh's pivot to where an engine expects it. 'ground_pivot' drops the
+  // mesh onto Y=0 centred on X/Z (a prop that snaps to the floor when placed);
+  // 'centre_pivot' puts the bbox centre on the origin (so the asset rotates about
+  // itself). Pure client-side translation of the editable geometry — no service
+  // round trip — and it goes through applyGeometryUpdate, so Ctrl+Z undoes it.
+  const handleMovePivot = useCallback((mode) => {
+    if (!geometry) {
+      return
+    }
+    const next = geometry.clone()
+    next.computeBoundingBox()
+    const box = next.boundingBox
+    if (!box) {
+      return
+    }
+
+    const offsetX = -(box.min.x + box.max.x) / 2
+    const offsetZ = -(box.min.z + box.max.z) / 2
+    const offsetY = mode === 'ground_pivot' ? -box.min.y : -(box.min.y + box.max.y) / 2
+
+    if (Math.abs(offsetX) < 1e-9 && Math.abs(offsetY) < 1e-9 && Math.abs(offsetZ) < 1e-9) {
+      next.dispose?.()
+      setFeedback('The pivot is already in place.')
+      return
+    }
+
+    next.translate(offsetX, offsetY, offsetZ)
+    next.computeBoundingBox()
+    next.computeBoundingSphere()
+    applyGeometryUpdate(next, [], { pushUndo: true })
+    // Keep the rig overlay on the mesh — it is baked world-space data, not live
+    // bones, so it does not follow the geometry on its own.
+    setSkeleton(prev => (prev ? translateSkeleton(prev, offsetX, offsetY, offsetZ) : prev))
+    // Show the user the check going green rather than making them re-run it. The
+    // re-check has to wait for the new geometry to land in state — see the
+    // geometryRevision effect below.
+    pendingGameReadyRecheckRef.current = true
+    setFeedback(mode === 'ground_pivot'
+      ? 'Pivot moved to the ground at the origin.'
+      : 'Pivot centred on the origin.')
+  }, [geometry, applyGeometryUpdate])
+
+  // A finding's fix button either jumps to the mode that resolves it (Repair has
+  // no mode of its own — its controls live inside the Auto Retopo panel) or, for
+  // the parameterless corrections, applies the fix directly.
+  const handleGameReadyFix = useCallback((fix) => {
+    if (fix === 'ground_pivot' || fix === 'centre_pivot') {
+      handleMovePivot(fix)
+      return
+    }
+    setActiveMenu(fix === 'repair' ? 'autoretopo' : fix)
+  }, [handleMovePivot])
+
+  // Re-run the check after a fix that edits the mesh. It cannot be called inline:
+  // handleRunGameReady reads `geometry` from its closure, which still holds the
+  // pre-fix mesh until React commits the update — so it would re-measure the mesh
+  // we just changed and report the same warning.
+  useEffect(() => {
+    if (!pendingGameReadyRecheckRef.current) {
+      return
+    }
+    pendingGameReadyRecheckRef.current = false
+    handleRunGameReady()
+  }, [geometryRevision, handleRunGameReady])
 
   const handleSave = useCallback(async (saveMode) => {
     if (!geometry || saving) {
@@ -4685,14 +4980,20 @@ export default function MeshEditorPage() {
         && texturableMesh?.textureCanvas
         && geometry?.attributes?.uv?.count
       )
+      // Reattach the rig when the geometry still carries its weights. The
+      // display root is deliberately un-skinned, so neither export path can find
+      // the skeleton on its own — it is threaded through explicitly.
+      const rig = geometryHasSkin(geometry) ? rigRef.current : null
       const meshBinary = canExportTextured
         ? await exportTexturedMeshToGlb({
           root: texturableMesh.root,
           textureKey: texturableMesh.textureKey,
           textureCanvas: texturableMesh.textureCanvas,
-          textureConfig: texturableMesh.textureConfig
+          textureConfig: texturableMesh.textureConfig,
+          rig,
+          geometry
         })
-        : await exportGeometryToGlb(geometry)
+        : await exportGeometryToGlb(geometry, rig)
       const meshFile = new File(
         [meshBinary],
         `${(meshName || 'mesh').trim() || 'mesh'}.glb`,
@@ -6508,10 +6809,19 @@ export default function MeshEditorPage() {
                     type="button"
                     className={`mesh-editor-mode-btn ${activeMenu === 'optimize' ? 'mesh-editor-mode-btn--active' : ''}`}
                     onClick={() => setActiveMenu('optimize')}
-                    title="Simplify the mesh with gltfpack (meshoptimizer)"
+                    title="Simplify the mesh or build an LOD chain with gltfpack (meshoptimizer)"
                   >
                     <span className="material-symbols-outlined">compress</span>
-                    <span>Optimize</span>
+                    <span>Optimize / LOD</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`mesh-editor-mode-btn ${activeMenu === 'gameready' ? 'mesh-editor-mode-btn--active' : ''}`}
+                    onClick={() => setActiveMenu('gameready')}
+                    title="Check the mesh against engine-readiness budgets (read-only)"
+                  >
+                    <span className="material-symbols-outlined">fact_check</span>
+                    <span>Game-Ready</span>
                   </button>
                 </div>
 
@@ -6623,6 +6933,9 @@ export default function MeshEditorPage() {
                     hasSkeleton: !!skeleton,
                     showSkeleton,
                     onToggleSkeleton: setShowSkeleton,
+                    rigPreserved: !!rigRef.current && geometryHasSkin(geometry),
+                    rigBoneCount: rigRef.current?.boneCount || 0,
+                    rigDropped,
                     disabled: !geometry
                   }} />
                 ) : activeMenu === 'optimize' ? (
@@ -6633,6 +6946,18 @@ export default function MeshEditorPage() {
                     onRun: handleRunOptimize,
                     onKeepResult: () => setOptimizeResult(null),
                     onRevertResult: () => handleRevertMeshTool(setOptimizeResult),
+                    lodLevels, onLodLevelsChange: setLodLevels, lodRatios,
+                    lodChain, lodSourceFaces, lodGenerating, lodProgress,
+                    onGenerateLods: handleGenerateLods,
+                    onApplyLod: handleApplyLod,
+                    disabled: !geometry
+                  }} />
+                ) : activeMenu === 'gameready' ? (
+                  <GameReadyPanel {...{
+                    options: gameReadyOptions, setOption: setGameReadyOption,
+                    running: gameReadyRunning, report: gameReadyReport,
+                    onRun: handleRunGameReady,
+                    onFix: handleGameReadyFix,
                     disabled: !geometry
                   }} />
                 ) : activeMenu === 'sculpting' ? (
