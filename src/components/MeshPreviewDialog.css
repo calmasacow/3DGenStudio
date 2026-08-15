@@ -117,6 +117,29 @@
   background: rgba(143, 245, 255, 0.14);
 }
 
+.mesh-preview-dialog__stats {
+  position: absolute;
+  bottom: 1rem;
+  left: 1rem;
+  z-index: 3;
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(71, 72, 74, 0.22);
+  border-radius: var(--radius-full);
+  background: rgba(18, 19, 21, 0.88);
+  color: var(--on-surface-variant);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+
+.mesh-preview-dialog__stats strong {
+  color: var(--on-surface);
+  font-weight: 700;
+}
+
 .mesh-preview-dialog__light-panel {
   width: 40px;
   padding: 0.55rem 0.35rem;

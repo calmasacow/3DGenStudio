@@ -34,6 +34,11 @@ function normalizeLoadedModel(asset, fitMode = 'ground') {
   const container = new THREE.Group()
   container.add(root)
 
+  // Counted during the traverse the meshes are prepared in — the geometry is
+  // already in memory, so the stats are free rather than a second pass.
+  let vertexCount = 0
+  let faceCount = 0
+
   root.traverse(child => {
     if (!child.isMesh) {
       return
@@ -49,6 +54,10 @@ function normalizeLoadedModel(asset, fitMode = 'ground') {
     if (child.geometry && !child.geometry.attributes.normal) {
       child.geometry.computeVertexNormals()
     }
+
+    const positionCount = child.geometry?.attributes?.position?.count || 0
+    vertexCount += positionCount
+    faceCount += Math.floor((child.geometry?.index?.count ?? positionCount) / 3)
   })
 
   root.updateMatrixWorld(true)
@@ -97,7 +106,8 @@ function normalizeLoadedModel(asset, fitMode = 'ground') {
   return {
     object: container,
     target,
-    cameraPosition
+    cameraPosition,
+    stats: { vertexCount, faceCount }
   }
 }
 
@@ -347,7 +357,11 @@ export default function Viewer({
       return
     }
 
-    onModelLoadedRef.current?.({ modelUrl, isRigged: Boolean(skeleton?.jointCount) })
+    onModelLoadedRef.current?.({
+      modelUrl,
+      isRigged: Boolean(skeleton?.jointCount),
+      stats: modelState.stats || null
+    })
   }, [modelState, modelUrl, skeleton])
 
   const cameraTarget = modelState?.modelUrl === modelUrl ? modelState.target : new THREE.Vector3(0, 0.75, 0)

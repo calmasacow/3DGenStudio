@@ -15,11 +15,14 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
   const [showExport, setShowExport] = useState(false)
   // Whether a rig was found is only known once the mesh has loaded, so it is
   // tracked as the url it was found for — switching assets then invalidates it
-  // (and the skeleton overlay) without needing a reset effect.
+  // (and the skeleton overlay) without needing a reset effect. The face/vertex
+  // counts are keyed the same way.
   const [riggedUrl, setRiggedUrl] = useState(null)
+  const [loadedStats, setLoadedStats] = useState(null)
 
-  const handleModelLoaded = useCallback(({ modelUrl, isRigged }) => {
+  const handleModelLoaded = useCallback(({ modelUrl, isRigged, stats }) => {
     setRiggedUrl(isRigged ? modelUrl : null)
+    setLoadedStats(stats ? { ...stats, modelUrl } : null)
   }, [])
 
   if (!asset) {
@@ -28,6 +31,7 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
 
   const isRigged = Boolean(asset.url) && riggedUrl === asset.url
   const showSkeleton = isRigged && skeletonEnabled
+  const stats = loadedStats?.modelUrl === asset.url ? loadedStats : null
 
   return (
     <div className="mesh-preview-dialog-overlay" role="presentation" onClick={onClose}>
@@ -132,6 +136,12 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
               lightIntensity={lightIntensity}
               fitMode="center"
             />
+            {stats && (
+              <div className="mesh-preview-dialog__stats">
+                <span><strong>{stats.faceCount.toLocaleString()}</strong> faces</span>
+                <span><strong>{stats.vertexCount.toLocaleString()}</strong> verts</span>
+              </div>
+            )}
           </div>
         </div>
         <div className="mesh-preview-dialog__actions">
