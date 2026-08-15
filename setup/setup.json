@@ -287,7 +287,7 @@
 				"Q3":   { "FileName": "z-image-turbo-Q3_K_M.gguf", "Url": "https://huggingface.co/unsloth/Z-Image-Turbo-GGUF/resolve/main/z-image-turbo-Q3_K_M.gguf?download=true", "Size": 4.2  },
 				"Q2":   { "FileName": "z-image-turbo-Q2_K.gguf",   "Url": "https://huggingface.co/unsloth/Z-Image-Turbo-GGUF/resolve/main/z-image-turbo-Q2_K.gguf?download=true",   "Size": 3.6  }
 			},
-			"VAE":         { "FileName": "ae.safetensors",                  "Url": "https://huggingface.co/black-forest-labs/FLUX.2-dev/resolve/main/ae.safetensors?download=true",                                                "Size": 0.3 },
+			"VAE":         { "FileName": "ae.safetensors",                        "Url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors?download=true",                                     "Size": 0.3  },
 			"TextEncoder": { "FileName": "qwen_3_4b_fp8_mixed.safetensors", "Url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors?download=true",          "Size": 5.6 },
 			"Workflows": [
 				{
