@@ -117,9 +117,10 @@ export default function BoneMappingModal({
           <div>
             <h2 className="mesh-editor-bonemap__title">Map bones — {referenceLabel}</h2>
             <p className="mesh-editor-bonemap__subtitle">
-              Assign each animation (source) bone to a bone on your mesh (target). Rotate the 3D
-              views and click a bone to select it, drag a source bone onto a target, or click a
-              source then a target. {mappedCount} mapped.
+              Assign each animation (source) bone to a bone on your mesh (target). In the 3D views:
+              drag to rotate, right-drag (or middle-drag) to pan, scroll to zoom, and click a bone
+              to select it. You can also drag a source bone onto a target, or click a source then a
+              target. {mappedCount} mapped.
             </p>
           </div>
           <button type="button" className="mesh-editor-bonemap__close" onClick={onClose} title="Close">

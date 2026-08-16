@@ -4,9 +4,12 @@
 // version or download it. Presentational: option state + handlers come from
 // MeshEditorPage.
 //
-// Unlike Auto UV / Auto Retopo, the rig result is a SKINNED GLB whose value is
-// the skeleton itself, so it is NOT flattened back into the editable mesh — hence
-// Save/Download instead of Keep/Revert.
+// Unlike Auto UV / Auto Retopo, the rig result is a SKINNED GLB — but the editor
+// adopts it whole (geometry, weights and skeleton), so the page's own Save / Save
+// as version / Export carry the rig along with the materials, and the result card
+// only reports what happened. It keeps a save/download of its own for the single
+// case the editor cannot adopt — a result that came back without UVs on a
+// textured mesh — where the generated file is the only copy of the rig.
 import { RangeField, ToggleField, SelectField } from './MeshToolField'
 import MeshToolProgress from './MeshToolProgress'
 import { AUTO_RIG_BONE_NAME_OPTIONS } from '../../utils/meshTools'
@@ -28,6 +31,7 @@ export default function AutoRigToolsPanel({
   rigPreserved,
   rigBoneCount,
   rigDropped,
+  rigEdited,
   disabled,
 }) {
   const o = options
@@ -58,6 +62,15 @@ export default function AutoRigToolsPanel({
           <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'center', gap: '0.4em' }}>
             <span className="material-symbols-outlined" style={{ fontSize: '1.1em', color: '#4caf50' }}>check_circle</span>
             <span>Rig preserved — saving keeps the skeleton and {rigBoneCount} bones&apos; skin weights.</span>
+          </div>
+        )}
+        {/* Bone edits live in memory until something writes the mesh out, and the
+            skeleton looks identical at rest — so say so here rather than let the
+            corrections be lost to a page away. */}
+        {rigEdited && (
+          <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'center', gap: '0.4em', color: '#8ff5ff' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>edit</span>
+            <span>Skeleton edited by hand — save the mesh (or a new version) to keep the changes.</span>
           </div>
         )}
         {rigDropped && (
@@ -96,32 +109,46 @@ export default function AutoRigToolsPanel({
               ))}
             </div>
 
-            <span className="mesh-editor-panel__hint">
-              The skeleton is shown in the viewport. Save it as a new version or download the rigged GLB.
-            </span>
+            {/* The rig is on the editor's mesh now, and Save / Save as version /
+                Export in the toolbar all reattach it alongside the textures — a
+                second save button here would only be a divergent copy of them. */}
+            {!result.blobOnly ? (
+              <span className="mesh-editor-panel__hint">
+                The skeleton is on your mesh. Save, Save as version and Export in the toolbar all keep
+                it, together with the materials and textures.
+              </span>
+            ) : (
+              <>
+                <span className="mesh-editor-panel__hint">
+                  This rig could not be applied to the mesh in the editor, so it lives only in the
+                  generated file — save or download it here. The toolbar would save your mesh without
+                  the skeleton.
+                </span>
 
-            <div className="mesh-editor-icon-grid mesh-editor-icon-grid--double mesh-editor-patch-preview__actions">
-              <button
-                type="button"
-                className="mesh-editor-btn mesh-editor-btn--primary"
-                onClick={onSaveResult}
-                disabled={saving}
-                title="Save the rigged mesh as a new version in the asset library"
-              >
-                <span className="material-symbols-outlined">{saving ? 'progress_activity' : 'save'}</span>
-                <span>{saving ? 'Saving…' : 'Save as version'}</span>
-              </button>
-              <button
-                type="button"
-                className="mesh-editor-btn"
-                onClick={onDownloadResult}
-                disabled={saving}
-                title="Download the rigged GLB"
-              >
-                <span className="material-symbols-outlined">download</span>
-                <span>Download</span>
-              </button>
-            </div>
+                <div className="mesh-editor-icon-grid mesh-editor-icon-grid--double mesh-editor-patch-preview__actions">
+                  <button
+                    type="button"
+                    className="mesh-editor-btn mesh-editor-btn--primary"
+                    onClick={onSaveResult}
+                    disabled={saving}
+                    title="Save the rigged mesh as a new version in the asset library"
+                  >
+                    <span className="material-symbols-outlined">{saving ? 'progress_activity' : 'save'}</span>
+                    <span>{saving ? 'Saving…' : 'Save as version'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="mesh-editor-btn"
+                    onClick={onDownloadResult}
+                    disabled={saving}
+                    title="Download the rigged GLB"
+                  >
+                    <span className="material-symbols-outlined">download</span>
+                    <span>Download</span>
+                  </button>
+                </div>
+              </>
+            )}
             <button
               type="button"
               className="mesh-editor-btn mesh-editor-btn--ghost"

@@ -6570,6 +6570,68 @@ app.post('/api/meshes/inspect', meshToolsUpload.single('meshFile'), async (req, 
   }
 });
 
+// High-to-low texture bake. The only mesh-tools route that takes TWO meshes —
+// the low-poly bake target and the high-poly it samples detail from — so it
+// forwards both instead of going through proxyMeshTool's single-file contract.
+app.post('/api/meshes/bake',
+  meshToolsUpload.fields([{ name: 'meshFile', maxCount: 1 }, { name: 'sourceFile', maxCount: 1 }]),
+  async (req, res) => {
+    try {
+      const low = req.files?.meshFile?.[0];
+      const high = req.files?.sourceFile?.[0];
+      if (!low?.buffer?.length || !high?.buffer?.length) {
+        return res.status(400).json({ error: 'Both meshFile (low-poly) and sourceFile (high-poly) are required.' });
+      }
+
+      const settings = await getSettings();
+      const baseUrl = buildMeshToolsBaseUrl(settings);
+
+      const form = new FormData();
+      form.append('meshFile', new Blob([low.buffer], { type: 'model/gltf-binary' }), low.originalname || 'low.glb');
+      form.append('sourceFile', new Blob([high.buffer], { type: 'model/gltf-binary' }), high.originalname || 'high.glb');
+      if (typeof req.body?.options === 'string' && req.body.options.length) {
+        form.append('options', req.body.options);
+      }
+
+      let upstream;
+      try {
+        upstream = await fetch(`${baseUrl}/meshes/bake`, { method: 'POST', body: form });
+      } catch (err) {
+        console.error('Bake proxy could not reach the Python service:', err);
+        return res.status(502).json({ error: `Could not reach the Mesh Tools (Python) service at ${baseUrl}. Is it running?` });
+      }
+
+      if (!upstream.ok) {
+        const detail = await upstream.text().catch(() => '');
+        return res.status(upstream.status).json({ error: `Bake failed (${upstream.status})`, detail: detail.slice(0, 2000) });
+      }
+
+      res.status(200);
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+      if (!upstream.body) { res.end(); return undefined; }
+
+      const source = Readable.fromWeb(upstream.body);
+      source.on('error', err => {
+        console.error('Bake proxy upstream stream error:', err);
+        if (!res.writableEnded) {
+          try { res.write(`data: ${JSON.stringify({ type: 'error', detail: 'The mesh service connection was lost.' })}\n\n`); } catch { /* gone */ }
+          res.end();
+        }
+      });
+      res.on('close', () => { if (!source.destroyed) source.destroy(); });
+      return source.pipe(res);
+    } catch (err) {
+      console.error('Bake proxy failed:', err);
+      if (!res.headersSent) res.status(500).json({ error: err.message || 'Bake failed' });
+      return undefined;
+    }
+  });
+
 // Convex collision hulls (CoACD decomposition). Returns a GLB scene with one
 // node per hull; engine-specific naming happens client-side at export time.
 app.post('/api/meshes/collision', meshToolsUpload.single('meshFile'), async (req, res) => {

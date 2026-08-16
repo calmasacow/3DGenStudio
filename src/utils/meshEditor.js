@@ -317,11 +317,11 @@ export function loadEditableGeometryFromObject(object) {
   return createIndexedGeometry(positions, indices, uvs, skinIndices, skinWeights)
 }
 
-// Parse an in-memory GLB (ArrayBuffer) into an editable BufferGeometry without
-// going through a URL. Used for results returned by the Python mesh-tools
-// service (Auto UV / Auto Retopo), which arrive as binary blobs with no
-// file extension for the URL-based loaders to key off.
-export function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
+// Parse an in-memory GLB (ArrayBuffer) into its scene graph. Callers that need
+// several things out of one result — geometry, rig and skeleton overlay all come
+// from the rigging service's GLB — should parse once through this and read the
+// scene, rather than re-parsing the same buffer per aspect.
+export function parseGlbScene(arrayBuffer) {
   return new Promise((resolve, reject) => {
     try {
       new GLTFLoader().parse(
@@ -333,11 +333,7 @@ export function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
             reject(new Error('The returned mesh did not contain a scene.'))
             return
           }
-          try {
-            resolve(loadEditableGeometryFromObject(scene))
-          } catch (err) {
-            reject(err instanceof Error ? err : new Error('Failed to read the returned mesh geometry.'))
-          }
+          resolve(scene)
         },
         error => reject(error instanceof Error ? error : new Error('Failed to parse the returned GLB mesh.')),
       )
@@ -345,6 +341,19 @@ export function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
       reject(error instanceof Error ? error : new Error('Failed to parse the returned GLB mesh.'))
     }
   })
+}
+
+// Parse an in-memory GLB (ArrayBuffer) into an editable BufferGeometry without
+// going through a URL. Used for results returned by the Python mesh-tools
+// service (Auto UV / Auto Retopo), which arrive as binary blobs with no
+// file extension for the URL-based loaders to key off.
+export async function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
+  const scene = await parseGlbScene(arrayBuffer)
+  try {
+    return loadEditableGeometryFromObject(scene)
+  } catch (err) {
+    throw err instanceof Error ? err : new Error('Failed to read the returned mesh geometry.')
+  }
 }
 
 // Skeleton extraction now lives in ./skeleton.js so plain viewers can read a rig

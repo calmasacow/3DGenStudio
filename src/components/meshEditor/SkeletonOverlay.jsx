@@ -31,7 +31,11 @@ export default function SkeletonOverlay({ skeleton, visible = true, selectedBone
 
   // Size joint dots relative to the skeleton's extent so they read on any scale.
   const jointSize = useMemo(() => Math.max((skeleton?.size || 1) * 0.02, 1e-4), [skeleton])
-  const markerRadius = useMemo(() => Math.max((skeleton?.size || 1) * 0.018, 1e-4), [skeleton])
+  // The selection marker only has to read as a highlight. At the joint dots' own
+  // size it swallowed its neighbours — a problem on dense chains like fingers,
+  // where the bone you want to pick next is the one hidden underneath — and in
+  // edit mode it engulfed the gizmo that lands on the same spot.
+  const markerRadius = useMemo(() => Math.max((skeleton?.size || 1) * 0.007, 1e-4), [skeleton])
 
   // World position + name of the highlighted joint (if any).
   const selected = useMemo(() => {

@@ -30,10 +30,11 @@ from pydantic import ValidationError
 
 from ..config import MAX_UPLOAD_BYTES
 from ..meshio import export_mesh, load_mesh, load_scene, mesh_stats, scene_to_mesh
-from ..schemas import (AutoRetopoOptions, AutoUvOptions, CollisionOptions, ConvertOptions,
-                       InspectOptions, RepairOptions)
+from ..schemas import (AutoRetopoOptions, AutoUvOptions, BakeOptions, CollisionOptions,
+                       ConvertOptions, InspectOptions, RepairOptions)
 from ..services.auto_retopo import run_auto_retopo
 from ..services.auto_uv import run_auto_uv
+from ..services.bake import run_bake
 from ..services.collision import run_collision
 from ..services.convert_fbx import run_convert_fbx
 from ..services.inspect import run_inspect
@@ -257,6 +258,36 @@ async def collision(
         }
 
     return _stream_payload(run, "Collision")
+
+
+@router.post("/bake")
+async def bake(
+    meshFile: UploadFile = File(...),
+    sourceFile: UploadFile = File(...),
+    options: str | None = Form(None),
+) -> StreamingResponse:
+    """Bake the detail of a high-poly source onto a low-poly mesh's UVs.
+
+    Two uploads, unlike every other route: `meshFile` is the low-poly bake target
+    (it must carry UVs) and `sourceFile` is the high-poly it samples from —
+    typically the pre-Retopo or pre-Optimize mesh.
+
+    Returns images rather than geometry, so the terminal `done` event carries a
+    `maps` dict of base64 PNGs instead of the usual `mesh_b64`.
+    """
+    opts = _parse_options(options, BakeOptions)
+    low_bytes = await _read_upload(meshFile)
+    source_bytes = await _read_upload(sourceFile)
+
+    def run(emit):
+        images, tool_stats = run_bake(low_bytes, source_bytes, opts, progress=emit)
+        return {
+            "format": "png",
+            "maps": {name: base64.b64encode(data).decode("ascii") for name, data in images.items()},
+            "stats": {"tool": tool_stats},
+        }
+
+    return _stream_payload(run, "Bake")
 
 
 @router.post("/inspect")

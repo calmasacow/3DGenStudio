@@ -163,6 +163,35 @@ class ConvertOptions(BaseModel):
                                  description="Baked curve simplification (0 = lossless, larger = smaller files).")
 
 
+class BakeOptions(BaseModel):
+    """Options for the high-to-low texture bake (`/meshes/bake`).
+
+    This is what makes Auto Retopo and Optimize non-destructive: on their own they
+    return clean topology with the detail deleted, and baking captures that detail
+    as a normal map so the low-poly mesh still reads as the high-poly one.
+    """
+
+    maps: list[Literal["normal", "ao", "base_color"]] = Field(
+        default=["normal", "ao"],
+        description="Which passes to bake. 'normal' carries the lost silhouette detail, "
+                    "'ao' the contact shadow, 'base_color' transfers the source texture.")
+    resolution: int = Field(default=2048, ge=64, le=8192,
+                            description="Output map resolution (px). Cost scales with the square of this.")
+    samples: int = Field(default=8, ge=1, le=512,
+                         description="Cycles samples. Only the AO pass is noisy enough to need more than a few.")
+    cage_extrusion: float = Field(default=0.0, ge=0.0, le=10.0,
+                                  description="How far to push the ray origins out along the low-poly normals, "
+                                              "in metres. Too small misses detail that sticks out; too large "
+                                              "catches surfaces from the other side of the mesh. 0 scales it to "
+                                              "the mesh (2% of its bounding-box diagonal), which is right far "
+                                              "more often than any fixed distance.")
+    max_ray_distance: float = Field(default=0.0, ge=0.0, le=10.0,
+                                    description="Ray length limit in metres (0 = unlimited).")
+    margin: int = Field(default=8, ge=0, le=64,
+                        description="Texels of island dilation, so filtering cannot sample the empty gutter "
+                                    "and bleed seams into the surface.")
+
+
 class InspectOptions(BaseModel):
     """Options for the Game-Ready check (`/meshes/inspect`).
 

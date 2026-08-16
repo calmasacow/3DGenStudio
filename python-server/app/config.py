@@ -47,6 +47,12 @@ CONVERT_TIMEOUT_S: int = _env_int("MESHTOOLS_CONVERT_TIMEOUT", 600)
 # low-sample Cycles-CPU render of one frame after the bpy import (~seconds).
 THUMBNAIL_TIMEOUT_S: int = _env_int("MESHTOOLS_THUMBNAIL_TIMEOUT", 180)
 
+# High-to-low texture bake (headless Blender subprocess). The most generous of
+# the three: a Cycles selected-to-active bake casts rays from every texel of the
+# target atlas against the full-resolution source mesh, so cost scales with
+# resolution x samples x high-poly density.
+BAKE_TIMEOUT_S: int = _env_int("MESHTOOLS_BAKE_TIMEOUT", 1800)
+
 # Scratch space for temp files when a tool needs real paths on disk
 # (many mesh CLIs/libraries only accept file paths, not in-memory buffers).
 WORK_DIR: Path = Path(

@@ -394,7 +394,8 @@
 			"TextEncoder": { "FileName": "qwen_3_8b_fp8mixed.safetensors", "Url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors?download=true",          "Size": 5.6 },
 			"LoRA":[        				
 				{ "FileName": "flux2-klein9b-canny5k-lora_000000500.safetensors", "Url": "https://huggingface.co/visualbruno/Flux2KleinLora/resolve/main/flux2-klein9b-canny5k-lora_000000500.safetensors?download=true", "Size": 0.3 },
-				{ "FileName": "flux2-klein9b-albedo-lora.safetensors", "Url": "https://huggingface.co/visualbruno/Flux2KleinLora/resolve/main/flux2-klein9b-albedo-lora.safetensors?download=true", "Size": 0.3 }
+				{ "FileName": "flux2-klein9b-albedo-lora.safetensors", "Url": "https://huggingface.co/visualbruno/Flux2KleinLora/resolve/main/flux2-klein9b-albedo-lora.safetensors?download=true", "Size": 0.3 },
+				{ "FileName": "TripleView_klein9b_v1.safetensors", "Url": "https://huggingface.co/Alissonerdx/CharacterSheet/resolve/main/TripleView_klein9b_v1.safetensors?download=true", "Size": 0.3 }
 			],
 			"UpscaleModels": [
 				{ "FileName": "4xLexicaDAT2_otf.pth", "Url": "https://huggingface.co/visualbruno/Upscalers/resolve/main/4xLexicaDAT2_otf.pth?download=true", "Size": 0.1 }
@@ -483,7 +484,20 @@
 					"Outputs": [
 						{ "Node": "173", "Name": "Save Image", "Type": "Image" }
 					]
-				}					
+				},
+				{
+					"Name": "CharacterSheet with Flux2Klein9B",
+					"File": "setup/CharacterSheet with Flux2Klein9B.json",
+					"Inputs": [
+						{ "Node": "1", "Input": "image",  "Name": "Source Image",    "Type": "Image"  },
+						{ "Node": "6",  "Input": "text", "Name": "Prompt",            "Type": "String" },
+						{ "Node": "7", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "71", "Name": "Save Image", "Type": "Image" }
+					]
+				}				
 			]
 		},
 		{

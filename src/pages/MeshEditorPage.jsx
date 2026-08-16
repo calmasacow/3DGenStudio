@@ -24,8 +24,8 @@ import {
   getSelectedHoleLoops,
   loadEditableGeometryFromObject,
   loadEditableGeometryFromGlbBuffer,
+  parseGlbScene,
   extractSkeletonFromObject,
-  extractSkeletonFromGlbBuffer,
   translateSkeleton,
   mergeSelectedVertices,
   smoothSelectedVertices,
@@ -161,7 +161,19 @@ import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
 import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS } from '../utils/meshTools'
 import { exportObject3D } from '../utils/meshExport'
-import { extractRigFromObject, buildRiggedObject, geometryHasSkin } from '../utils/meshRig'
+import { extractRigFromObject, buildRiggedObject, geometryHasSkin, translateRig } from '../utils/meshRig'
+import BoneTransformGizmo from '../components/meshEditor/BoneTransformGizmo'
+import {
+  addChildBone,
+  computeRigInfluence,
+  deleteRigBones,
+  findUnusedBones,
+  moveRigBone,
+  renameRigBone,
+  restoreRigSnapshot,
+  snapshotRig,
+  takeWeightsFromParent,
+} from '../utils/meshRigEdit'
 
 // Default option sets for the Python mesh-tools panels. These mirror the
 // defaults of autouv.unwrap() and autoretopo.RetopoConfig 1:1 (see
@@ -458,6 +470,27 @@ export default function MeshEditorPage() {
   // Index of the bone selected in the Skeleton panel / by clicking it on the mesh
   // (null = none). Highlighted in the viewport by SkeletonOverlay.
   const [selectedBone, setSelectedBone] = useState(null)
+  // Bone editing (Skeleton panel → "Edit"): fixing what Auto Rig got wrong by
+  // moving joints, renaming and deleting bones. Its undo stack is separate from
+  // the modeling one because a rig edit spans two things that have to travel
+  // together — the bone graph in rigRef and the skin weights on the geometry —
+  // and restoring one without the other yields a rig that describes nothing.
+  const [rigEditing, setRigEditing] = useState(false)
+  const [rigEditDirty, setRigEditDirty] = useState(false)
+  const [rigMoveChildren, setRigMoveChildren] = useState(false)
+  const [rigCanUndo, setRigCanUndo] = useState(false)
+  const [rigCanRedo, setRigCanRedo] = useState(false)
+  const [rigRevision, setRigRevision] = useState(0)
+  const rigUndoStackRef = useRef([])
+  const rigRedoStackRef = useRef([])
+  const rigBaselineRef = useRef(null)      // rig as it was when editing began (Revert)
+  const rigGizmoDragRef = useRef(false)    // suppresses bone picking mid-drag
+  // Net edits away from the baseline. The undo stack is capped, so its emptiness
+  // stops meaning "unchanged" after 20 edits; this counter still does.
+  const rigEditCountRef = useRef(0)
+  // Names of bones added by hand this session, so the unused-bone sweep doesn't
+  // offer to delete a bone the user has only just created.
+  const rigAddedBonesRef = useRef(new Set())
 
   // --- Auto Rig → Animations (mesh2motion reference clips retargeted onto the mesh) ---
   const [animReferenceId, setAnimReferenceId] = useState('')
@@ -480,6 +513,9 @@ export default function MeshEditorPage() {
   const retargetedClipsRef = useRef(new Map())  // clipName -> retargeted THREE.AnimationClip (cache)
   // The rigged GLB blob returned by the service, kept for Save-as-version / download.
   const riggedBlobRef = useRef(null)
+  // Whether the live rig came from the last Auto Rig result (adopted) or the
+  // service blob is still the only copy of it.
+  const rigResultAdoptedRef = useRef(true)
   // Watertight check (Auto Retopo panel) — runs on demand via a button.
   const [watertightChecking, setWatertightChecking] = useState(false)
   const [watertightResult, setWatertightResult] = useState(null)
@@ -2033,6 +2069,18 @@ export default function MeshEditorPage() {
           setSkeleton(loadedSkeleton)
           setShowSkeleton(true)
           setSelectedBone(null)
+          // A different mesh means a different skeleton — no edit history of the
+          // previous one may survive into it.
+          setRigEditing(false)
+          setRigEditDirty(false)
+          rigUndoStackRef.current = []
+          rigRedoStackRef.current = []
+          rigBaselineRef.current = null
+          rigEditCountRef.current = 0
+          rigAddedBonesRef.current.clear()
+          setRigCanUndo(false)
+          setRigCanRedo(false)
+          setRigRevision(current => current + 1)
           // A new mesh means a new target skeleton — reset the Animations feature.
           setAnimReferenceId('')
           setAnimMapping(null)
@@ -2048,6 +2096,7 @@ export default function MeshEditorPage() {
           retargetedClipsRef.current.clear()
           setAutoRigResult(null)
           riggedBlobRef.current = null
+          rigResultAdoptedRef.current = true
           // Bump the camera framing key so CameraRig re-frames the new mesh.
           // Topology edits below do NOT bump this so the view stays put.
           setMeshFrameKey(key => key + 1)
@@ -3029,6 +3078,11 @@ export default function MeshEditorPage() {
 
     // Auto Rig: left-click picks the nearest bone joint (screen-space) so it can be
     // highlighted + selected in the Skeleton panel. Clicking empty space deselects.
+    // While the bone gizmo has the pointer, the click belongs to the drag — picking
+    // there would deselect the very bone being moved.
+    if (rigGizmoDragRef.current) {
+      return
+    }
     if (activeMenu === 'autorig' && skeleton?.joints?.length && cameraRef.current) {
       const camera = cameraRef.current
       const rect = canvasShellRef.current?.getBoundingClientRect()
@@ -4000,6 +4054,57 @@ export default function MeshEditorPage() {
     return loaded
   }, [modelUrl])
 
+  // Texture pipeline for a freshly-rigged mesh the editor is adopting.
+  //
+  // The rig round trip uploads the TEXTURED glb and, with "Preserve texture &
+  // scale" on, gets the same mesh back with a skeleton — so the result itself is
+  // the truthful source of the texture, whatever its vertex count came back as.
+  // Rebuilding from geometry alone (buildTexturableFromGeometry) would hand back
+  // a blank white canvas, which is how a rigged save lost its material.
+  const adoptRiggedTexturable = useCallback(async (scene, nextGeometry) => {
+    const withMask = loaded => (loaded?.textureCanvas
+      ? {
+        ...loaded,
+        maskCanvas: Object.assign(document.createElement('canvas'), {
+          width: loaded.textureCanvas.width,
+          height: loaded.textureCanvas.height,
+        }),
+      }
+      : loaded)
+
+    let loaded = null
+    try {
+      loaded = await loadTexturableMeshFromRoot(scene, { url: modelUrl, blankTextureSize })
+    } catch (err) {
+      console.warn('Could not read the rigged result for texture editing:', err)
+    }
+    if (loaded?.textureCanvas && !loaded.isBlank) return withMask(loaded)
+
+    // The result came back bare (rig transfer off, or an untextured upload).
+    // Carry the canvas the editor already holds onto the new geometry instead of
+    // dropping it — the UV layout is the one we sent.
+    const currentCanvas = texturableMesh?.textureCanvas
+    if (currentCanvas && !texturableMesh?.isBlank && nextGeometry?.attributes?.uv?.count) {
+      const carriedRoot = new THREE.Mesh(
+        nextGeometry.clone(),
+        new THREE.MeshStandardMaterial({
+          map: createCanvasTexture(currentCanvas, texturableMesh.textureConfig),
+          metalness: 0.08,
+          roughness: 0.62,
+        }),
+      )
+      carriedRoot.name = 'MeshEditorRigged'
+      try {
+        const carried = await loadTexturableMeshFromRoot(carriedRoot, { url: modelUrl, blankTextureSize })
+        if (carried?.textureCanvas) return withMask(carried)
+      } catch (err) {
+        console.warn('Could not carry the texture onto the rigged mesh:', err)
+      }
+    }
+
+    return withMask(loaded) || await buildTexturableFromGeometry(nextGeometry, blankTextureSize)
+  }, [modelUrl, blankTextureSize, texturableMesh, buildTexturableFromGeometry])
+
   const handleBlankTextureSizeChange = useCallback(async (size) => {
     setBlankTextureSize(size)
     if (texturableMesh?.isBlank && geometry) {
@@ -4197,10 +4302,56 @@ export default function MeshEditorPage() {
 
       const resultBuffer = await blob.arrayBuffer()
       riggedBlobRef.current = blob
-      const rigSkeleton = await extractSkeletonFromGlbBuffer(resultBuffer)
+
+      // Adopt the result as the editor's working mesh instead of only reading an
+      // overlay off it. The rig arrives as a scene graph plus per-vertex weights;
+      // taking both means the bones can be corrected afterwards, and that every
+      // save path (Save mesh, Export, LOD, Game-Ready) reattaches the *current*
+      // skeleton rather than replaying a service blob that no longer matches.
+      const riggedScene = await parseGlbScene(resultBuffer)
+      const riggedGeometry = loadEditableGeometryFromObject(riggedScene)
+      const nextRig = extractRigFromObject(riggedScene)
+      const rigSkeleton = extractSkeletonFromObject(riggedScene)
+      // Adopting a result with no UVs would cost the mesh its texture for good,
+      // and no rig is worth that — keep the textured mesh and fall back to the
+      // downloadable-result behaviour (bone editing is unavailable for it).
+      const hadTexture = !!(texturableMesh?.textureCanvas && !texturableMesh.isBlank)
+      const riggedHasUvs = !!riggedGeometry.attributes?.uv?.count
+      const riggable = !!nextRig && geometryHasSkin(riggedGeometry)
+      const adopted = riggable && (riggedHasUvs || !hadTexture)
+      const keptForTexture = riggable && !adopted
+
+      rigResultAdoptedRef.current = adopted
+      if (adopted) {
+        rigRef.current = nextRig
+        setRigDropped(false)
+        // Resolved before the geometry swap so it still sees the outgoing texture.
+        const nextTexturable = await adoptRiggedTexturable(riggedScene, riggedGeometry)
+        applyGeometryUpdate(riggedGeometry, [], { pushUndo: true })
+        if (nextTexturable) {
+          setTexturableMesh(nextTexturable)
+          setTextureRevision(0)
+          // The layers were composited into the texture we uploaded, so they come
+          // back baked into the result rather than as separate layers.
+          setPaintLayers([])
+          setSelectedLayerId(null)
+        }
+      }
+
       setSkeleton(rigSkeleton)
       setShowSkeleton(true)
       setSelectedBone(null)
+      setRigEditDirty(false)
+      rigUndoStackRef.current = []
+      rigRedoStackRef.current = []
+      rigEditCountRef.current = 0
+      rigAddedBonesRef.current.clear()
+      // Re-running Auto Rig replaces the skeleton, so anything the user had
+      // edited is gone with it — the fresh rig becomes what Revert returns to.
+      rigBaselineRef.current = adopted ? snapshotRig(nextRig, riggedGeometry) : null
+      setRigCanUndo(false)
+      setRigCanRedo(false)
+      setRigRevision(current => current + 1)
       // The target skeleton changed — drop any cached target scene / mapping so
       // the Animations tab re-maps against the freshly-rigged bones.
       animTargetRef.current = null
@@ -4220,8 +4371,13 @@ export default function MeshEditorPage() {
       rows.push({ label: 'Bone names', value: autoRigOptions.rename_bones })
       rows.push({ label: 'Texture preserved', value: autoRigOptions.use_transfer ? 'Yes' : 'No' })
       if (autoRigOptions.use_postprocess) rows.push({ label: 'Postprocess', value: 'Voxel skin' })
-      setAutoRigResult({ rows })
-      setFeedback('Auto Rig complete.')
+      // `blobOnly` marks the case where the rig exists ONLY in the service's GLB:
+      // the toolbar saves the editor's mesh, which does not have it, so the result
+      // card has to offer its own save/download. Adopted rigs need neither.
+      setAutoRigResult({ rows, blobOnly: !adopted })
+      setFeedback(keptForTexture
+        ? 'Auto Rig complete — the rigged mesh came back without UVs, so your textured mesh was kept as it is. Save or download the result to keep the rig; bone editing needs a rig the editor can adopt.'
+        : 'Auto Rig complete.')
     } catch (err) {
       console.error('Auto Rig failed:', err)
       setError(err?.message || 'Auto Rig failed.')
@@ -4229,55 +4385,286 @@ export default function MeshEditorPage() {
       setAutoRigRunning(false)
       setAutoRigProgress(null)
     }
-  }, [geometry, autoRigRunning, autoRigOptions, texturableMesh])
-
-  const handleSaveRiggedResult = useCallback(async () => {
-    const blob = riggedBlobRef.current
-    if (!blob || autoRigSaving) return
-    try {
-      setAutoRigSaving(true)
-      setError('')
-      setFeedback('Saving rigged mesh…')
-      const baseName = (meshName || 'mesh').trim() || 'mesh'
-      const meshFile = new File([blob], `${baseName}-rigged.glb`, { type: 'model/gltf-binary' })
-      await saveMeshEdit({
-        assetId: Number.isFinite(numericAssetId) && numericAssetId > 0 ? numericAssetId : null,
-        filePath,
-        name: `${baseName} (rigged)`,
-        saveMode: 'version',
-        meshFile,
-      })
-      setFeedback('Rigged mesh saved as a new version.')
-    } catch (err) {
-      console.error('Failed to save rigged mesh:', err)
-      setError(err?.message || 'Failed to save the rigged mesh.')
-    } finally {
-      setAutoRigSaving(false)
-    }
-  }, [autoRigSaving, meshName, numericAssetId, filePath, saveMeshEdit])
-
-  const handleDownloadRiggedResult = useCallback(() => {
-    const blob = riggedBlobRef.current
-    if (!blob) return
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${(meshName || 'mesh').trim() || 'mesh'}-rigged.glb`
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }, [meshName])
+  }, [geometry, autoRigRunning, autoRigOptions, texturableMesh, applyGeometryUpdate, adoptRiggedTexturable])
 
   const handleDismissRigResult = useCallback(() => {
     setAutoRigResult(null)
   }, [])
 
+  // ── Bone editing (Skeleton panel → Edit) ─────────────────────────────────
+  // Auto Rig gets joints wrong often enough — a shoulder inside the chest, a
+  // knee above the kneecap, a fistful of weightless `Extra_*` bones — that the
+  // rig needs correcting by hand rather than re-rolling the generator.
+
+  // Editable only when both halves of the rig are present: the bone graph AND
+  // the per-vertex weights that address it.
+  const rigEditable = !!rigRef.current?.rigScene && geometryHasSkin(geometry)
+
+  const rigInfluence = useMemo(
+    () => {
+      // rigRevision is the signal that the bone graph changed under the ref.
+      const rig = rigRevision >= 0 ? rigRef.current : null
+      return rigEditing && rig ? computeRigInfluence(rig, geometry) : null
+    },
+    [rigEditing, rigRevision, geometry],
+  )
+
+  const rigUnusedBones = useMemo(
+    () => {
+      const rig = rigRevision >= 0 ? rigRef.current : null
+      if (!rigEditing || !rig || !rigInfluence) return []
+      // A bone the user just added carries no weight by definition — offering to
+      // sweep it away as junk seconds later would be absurd.
+      const added = rigAddedBonesRef.current
+      return findUnusedBones(rig, geometry, rigInfluence)
+        .filter(index => !added.has(rig.boneNames[index]))
+    },
+    [rigEditing, rigRevision, rigInfluence, geometry],
+  )
+
+  // Cached retargets are keyed by the target skeleton, so any bone edit stales
+  // them. A rename or a deletion also breaks the name-based bone mapping itself.
+  const invalidateAnimationTarget = useCallback((mappingToo) => {
+    animTargetRef.current = null
+    retargetedClipsRef.current.clear()
+    setAnimPreview(null)
+    setSelectedAnimation(null)
+    if (mappingToo) {
+      setAnimMapping(null)
+      setAnimClips([])
+      setAnimArmTargets(null)
+      setAnimArmExtension(0)
+      setCheckedAnimations(new Set())
+    }
+  }, [])
+
+  const pushRigSnapshot = useCallback(() => {
+    const snapshot = snapshotRig(rigRef.current, geometry)
+    if (!snapshot) return false
+    const stack = rigUndoStackRef.current
+    stack.push(snapshot)
+    while (stack.length > 20) stack.shift()
+    rigRedoStackRef.current = []
+    setRigCanUndo(true)
+    setRigCanRedo(false)
+    return true
+  }, [geometry])
+
+  // Refresh the overlay from the mutated bone graph and record the edit.
+  const commitRigEdit = useCallback((message, { mappingToo = false, counted = true } = {}) => {
+    const rig = rigRef.current
+    if (!rig?.rigScene) return
+    setSkeleton(extractSkeletonFromObject(rig.rigScene))
+    setRigRevision(current => current + 1)
+    if (counted) {
+      rigEditCountRef.current += 1
+      setRigEditDirty(true)
+    }
+    invalidateAnimationTarget(mappingToo)
+    if (message) setFeedback(message)
+  }, [invalidateAnimationTarget])
+
+  // `live` moves come from the gizmo mid-drag: apply them to the bones so the
+  // overlay tracks the handle, but don't record an edit until the drag ends.
+  const handleRigBoneMove = useCallback((index, position, { live = false } = {}) => {
+    const rig = rigRef.current
+    if (!rig || index == null) return
+    const moved = moveRigBone(
+      rig,
+      index,
+      { x: position[0], y: position[1], z: position[2] },
+      { moveChildren: rigMoveChildren },
+    )
+    if (!moved) return
+    if (live) {
+      setSkeleton(extractSkeletonFromObject(rig.rigScene))
+      return
+    }
+    commitRigEdit(`Moved ${rig.boneNames[index] || 'bone'}.`)
+  }, [rigMoveChildren, commitRigEdit])
+
+  const handleRigBoneRename = useCallback((index, name) => {
+    const rig = rigRef.current
+    const current = rig?.boneNames?.[index]
+    if (!rig || !name?.trim() || name.trim() === current) return
+    if (!pushRigSnapshot()) return
+    const applied = renameRigBone(rig, index, name)
+    if (!applied) {
+      rigUndoStackRef.current.pop()
+      setRigCanUndo(rigUndoStackRef.current.length > 0)
+      return
+    }
+    commitRigEdit(`Renamed ${current} to ${applied}.`, { mappingToo: true })
+  }, [pushRigSnapshot, commitRigEdit])
+
+  const handleRigBoneDelete = useCallback((indices) => {
+    const rig = rigRef.current
+    const list = (Array.isArray(indices) ? indices : [indices]).filter(i => i != null)
+    if (!rig || !list.length) return
+    if (!pushRigSnapshot()) return
+
+    const result = deleteRigBones(rig, geometry, list)
+    if (!result.removed) {
+      rigUndoStackRef.current.pop()
+      setRigCanUndo(rigUndoStackRef.current.length > 0)
+      setError(result.blocked.length
+        ? `${result.blocked.join(', ')} is a root bone — the rig hangs off it, so it can't be deleted.`
+        : 'That bone could not be deleted.')
+      return
+    }
+
+    if (result.geometry !== geometry) {
+      // The weights moved to the parent bones; the rig undo stack owns the
+      // rollback, so this must not push a second entry onto the modeling one.
+      applyGeometryUpdate(result.geometry, [], { pushUndo: false })
+    }
+    setSelectedBone(null)
+    commitRigEdit(
+      result.removed === 1
+        ? `Deleted ${result.removedNames[0]} — its weights moved to its parent.`
+        : `Deleted ${result.removed} bones — their weights moved to their parents.`,
+      { mappingToo: true },
+    )
+  }, [geometry, pushRigSnapshot, applyGeometryUpdate, commitRigEdit])
+
+  const handleRigRemoveUnused = useCallback(() => {
+    if (rigUnusedBones.length) handleRigBoneDelete(rigUnusedBones)
+  }, [rigUnusedBones, handleRigBoneDelete])
+
+  // Add a child under a bone and select it, so the gizmo is already on the new
+  // joint and placing it is the next drag. It arrives with no influence — see
+  // handleRigTakeWeights for giving it some.
+  const handleRigAddChild = useCallback((index) => {
+    const rig = rigRef.current
+    if (!rig) return
+    if (!pushRigSnapshot()) return
+    const added = addChildBone(rig, index)
+    if (!added || added.index < 0) {
+      rigUndoStackRef.current.pop()
+      setRigCanUndo(rigUndoStackRef.current.length > 0)
+      setError('That bone could not be given a child.')
+      return
+    }
+    rigAddedBonesRef.current.add(added.name)
+    setSelectedBone(added.index)
+    commitRigEdit(`Added ${added.name} — drag the gizmo to place it.`, { mappingToo: true })
+  }, [pushRigSnapshot, commitRigEdit])
+
+  const handleRigTakeWeights = useCallback((index) => {
+    const rig = rigRef.current
+    if (!rig) return
+    if (!pushRigSnapshot()) return
+    const result = takeWeightsFromParent(rig, geometry, index)
+    if (!result.moved) {
+      rigUndoStackRef.current.pop()
+      setRigCanUndo(rigUndoStackRef.current.length > 0)
+      setError(result.reason || 'No weights could be transferred to this bone.')
+      return
+    }
+    applyGeometryUpdate(result.geometry, [], { pushUndo: false })
+    commitRigEdit(`${rig.boneNames[index]} now moves ${result.moved} vertices, taken from its parent.`)
+  }, [geometry, pushRigSnapshot, applyGeometryUpdate, commitRigEdit])
+
+  // Undo/redo swap the current rig with a stored one — the geometry's weights
+  // travel in the same snapshot, so the pair can never drift apart.
+  const stepRigHistory = useCallback((fromStack, toStack, setFromEnabled, setToEnabled, delta) => {
+    const snapshot = fromStack.current.pop()
+    if (!snapshot) {
+      setFromEnabled(false)
+      return
+    }
+    const current = snapshotRig(rigRef.current, geometry)
+    const restored = restoreRigSnapshot(snapshot, geometry)
+    if (!restored) return
+    if (current) toStack.current.push(current)
+
+    rigRef.current = restored.rig
+    if (restored.geometry !== geometry) applyGeometryUpdate(restored.geometry, [], { pushUndo: false })
+    setSelectedBone(null)
+    setFromEnabled(fromStack.current.length > 0)
+    setToEnabled(true)
+    rigEditCountRef.current = Math.max(0, rigEditCountRef.current + delta)
+    setRigEditDirty(rigEditCountRef.current > 0)
+    commitRigEdit(null, { mappingToo: true, counted: false })
+  }, [geometry, applyGeometryUpdate, commitRigEdit])
+
+  const handleRigUndo = useCallback(() => {
+    stepRigHistory(rigUndoStackRef, rigRedoStackRef, setRigCanUndo, setRigCanRedo, -1)
+  }, [stepRigHistory])
+
+  const handleRigRedo = useCallback(() => {
+    stepRigHistory(rigRedoStackRef, rigUndoStackRef, setRigCanRedo, setRigCanUndo, 1)
+  }, [stepRigHistory])
+
+  const handleRigRevert = useCallback(() => {
+    const baseline = rigBaselineRef.current
+    const restored = baseline ? restoreRigSnapshot(baseline, geometry) : null
+    if (!restored) return
+    rigRef.current = restored.rig
+    if (restored.geometry !== geometry) applyGeometryUpdate(restored.geometry, [], { pushUndo: false })
+    rigUndoStackRef.current = []
+    rigRedoStackRef.current = []
+    rigEditCountRef.current = 0
+    rigAddedBonesRef.current.clear()
+    setRigCanUndo(false)
+    setRigCanRedo(false)
+    setRigEditDirty(false)
+    setSelectedBone(null)
+    commitRigEdit('Skeleton reverted to how it was before editing.', { mappingToo: true, counted: false })
+  }, [geometry, applyGeometryUpdate, commitRigEdit])
+
+  const handleToggleRigEdit = useCallback(() => {
+    setRigEditing(prev => {
+      const next = !prev
+      if (next) {
+        // Entering: this rig is what Revert goes back to.
+        rigBaselineRef.current = snapshotRig(rigRef.current, geometry)
+        rigUndoStackRef.current = []
+        rigRedoStackRef.current = []
+        rigEditCountRef.current = 0
+        rigAddedBonesRef.current.clear()
+        setRigCanUndo(false)
+        setRigCanRedo(false)
+        setRigEditDirty(false)
+      }
+      return next
+    })
+  }, [geometry])
+
+  const handleRigGizmoDragStart = useCallback(() => {
+    rigGizmoDragRef.current = true
+    pushRigSnapshot()
+  }, [pushRigSnapshot])
+
+  const handleRigGizmoDrag = useCallback((position) => {
+    handleRigBoneMove(selectedBone, [position.x, position.y, position.z], { live: true })
+  }, [handleRigBoneMove, selectedBone])
+
+  // Typed into the panel's X/Y/Z fields — one snapshot per committed value,
+  // where a gizmo drag snapshots once at the start of the drag instead.
+  const handleRigBonePosition = useCallback((index, position) => {
+    if (!pushRigSnapshot()) return
+    handleRigBoneMove(index, position)
+  }, [pushRigSnapshot, handleRigBoneMove])
+
+  const handleRigGizmoDragEnd = useCallback((position) => {
+    rigGizmoDragRef.current = false
+    handleRigBoneMove(selectedBone, [position.x, position.y, position.z])
+  }, [handleRigBoneMove, selectedBone])
+
   // --- Animations: load the user's rigged mesh as an animatable skinned scene ---
-  // Prefer the freshly-rigged blob; otherwise (re)load the mesh's source URL.
+  // Prefer the mesh as it currently stands — rig edits included — then the
+  // freshly-rigged blob, then the mesh's source URL. Retargeting onto the
+  // service's original blob would animate the skeleton the user just corrected.
+  //
+  // Reached through a ref because the exporter is defined further down the
+  // component (it needs the texturable mesh), and a direct call here would read
+  // it before initialisation.
+  const buildRiggedResultBlobRef = useRef(null)
   const ensureAnimTargetScene = useCallback(async () => {
     if (animTargetRef.current) return animTargetRef.current
-    const riggedBlob = riggedBlobRef.current
+    const buildCurrent = buildRiggedResultBlobRef.current
+    const riggedBlob = buildCurrent ? await buildCurrent() : riggedBlobRef.current
     const riggedBuffer = riggedBlob ? await riggedBlob.arrayBuffer() : null
     const target = await loadTargetScene({ riggedBuffer, modelUrl })
     animTargetRef.current = target
@@ -4861,6 +5248,73 @@ export default function MeshEditorPage() {
     return new THREE.Mesh(geometry.clone(), material)
   }, [geometry, texturableMesh])
 
+  // The rigged GLB for the Auto Rig result card. Built from the LIVE rig, not
+  // from the service's blob: once a bone has been moved or deleted that blob is
+  // a stale copy of the skeleton, and saving it would quietly throw the
+  // corrections away. The blob remains the fallback for the case where adopting
+  // the result failed and there is no editable rig to export.
+  const buildRiggedResultBlob = useCallback(async () => {
+    // When the last result could not be adopted, the service blob *is* the rig:
+    // `rigRef` is then either empty or still describes the mesh as it was before
+    // that run, and exporting it would save the wrong skeleton.
+    if (riggedBlobRef.current && !rigResultAdoptedRef.current) return riggedBlobRef.current
+    if (geometryHasSkin(geometry) && rigRef.current) {
+      const files = await exportObject3D(getExportObject(), { format: 'glb', baseName: 'rigged' })
+      if (files?.[0]?.blob) return files[0].blob
+    }
+    return riggedBlobRef.current
+  }, [geometry, getExportObject])
+
+  // Published for ensureAnimTargetScene, which runs above this definition.
+  useEffect(() => {
+    buildRiggedResultBlobRef.current = buildRiggedResultBlob
+  }, [buildRiggedResultBlob])
+
+  const handleSaveRiggedResult = useCallback(async () => {
+    if (autoRigSaving) return
+    try {
+      setAutoRigSaving(true)
+      setError('')
+      setFeedback('Saving rigged mesh…')
+      const blob = await buildRiggedResultBlob()
+      if (!blob) throw new Error('There is no rigged mesh to save.')
+      const baseName = (meshName || 'mesh').trim() || 'mesh'
+      const meshFile = new File([blob], `${baseName}-rigged.glb`, { type: 'model/gltf-binary' })
+      await saveMeshEdit({
+        assetId: Number.isFinite(numericAssetId) && numericAssetId > 0 ? numericAssetId : null,
+        filePath,
+        name: `${baseName} (rigged)`,
+        saveMode: 'version',
+        meshFile,
+      })
+      setRigEditDirty(false)
+      setFeedback('Rigged mesh saved as a new version.')
+    } catch (err) {
+      console.error('Failed to save rigged mesh:', err)
+      setError(err?.message || 'Failed to save the rigged mesh.')
+    } finally {
+      setAutoRigSaving(false)
+    }
+  }, [autoRigSaving, meshName, numericAssetId, filePath, saveMeshEdit, buildRiggedResultBlob])
+
+  const handleDownloadRiggedResult = useCallback(async () => {
+    try {
+      const blob = await buildRiggedResultBlob()
+      if (!blob) return
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${(meshName || 'mesh').trim() || 'mesh'}-rigged.glb`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      console.error('Failed to export the rigged mesh:', err)
+      setError(err?.message || 'Failed to export the rigged mesh.')
+    }
+  }, [meshName, buildRiggedResultBlob])
+
   // ── Game-Ready check ─────────────────────────────────────────────────────
   const setGameReadyOption = useCallback((key, value) => {
     setGameReadyOptions(prev => ({ ...prev, [key]: value }))
@@ -4931,9 +5385,27 @@ export default function MeshEditorPage() {
     next.computeBoundingBox()
     next.computeBoundingSphere()
     applyGeometryUpdate(next, [], { pushUndo: true })
-    // Keep the rig overlay on the mesh — it is baked world-space data, not live
-    // bones, so it does not follow the geometry on its own.
-    setSkeleton(prev => (prev ? translateSkeleton(prev, offsetX, offsetY, offsetZ) : prev))
+
+    // Move the rig with the mesh. Neither the captured bones nor the overlay
+    // follow the geometry on their own — the bones are a separate scene graph and
+    // the overlay is baked world-space arrays.
+    //
+    // When there IS a captured rig it becomes the single source of truth: the
+    // bones move, and the overlay is re-derived from them. Keeping two copies in
+    // step by translating both invites exactly the drift this is fixing.
+    if (rigRef.current) {
+      translateRig(rigRef.current, offsetX, offsetY, offsetZ)
+      try {
+        setSkeleton(extractSkeletonFromObject(rigRef.current.rigScene))
+      } catch (err) {
+        console.warn('Could not re-derive the skeleton overlay after moving the pivot:', err)
+        setSkeleton(prev => (prev ? translateSkeleton(prev, offsetX, offsetY, offsetZ) : prev))
+      }
+    } else {
+      // No captured rig (e.g. the skeleton came from an in-session Auto Rig):
+      // the overlay arrays are all there is, so shift them directly.
+      setSkeleton(prev => (prev ? translateSkeleton(prev, offsetX, offsetY, offsetZ) : prev))
+    }
     // Show the user the check going green rather than making them re-run it. The
     // re-check has to wait for the new geometry to land in state — see the
     // geometryRevision effect below.
@@ -6936,6 +7408,7 @@ export default function MeshEditorPage() {
                     rigPreserved: !!rigRef.current && geometryHasSkin(geometry),
                     rigBoneCount: rigRef.current?.boneCount || 0,
                     rigDropped,
+                    rigEdited: rigEditDirty,
                     disabled: !geometry
                   }} />
                 ) : activeMenu === 'optimize' ? (
@@ -7164,6 +7637,15 @@ export default function MeshEditorPage() {
                       </group>
                     )}
                     <SkeletonOverlay skeleton={skeleton} visible={showSkeleton && !animPreview} selectedBone={selectedBone} />
+                    {activeMenu === 'autorig' && rigEditing && rigEditable && showSkeleton && !animPreview && (
+                      <BoneTransformGizmo
+                        skeleton={skeleton}
+                        boneIndex={selectedBone}
+                        onDragStart={handleRigGizmoDragStart}
+                        onDrag={handleRigGizmoDrag}
+                        onDragEnd={handleRigGizmoDragEnd}
+                      />
+                    )}
                     <Grid
                       infiniteGrid
                       fadeDistance={60}
@@ -7278,6 +7760,27 @@ export default function MeshEditorPage() {
                 selectedBone={selectedBone}
                 onSelectBone={setSelectedBone}
                 animation={animationPanelProps}
+                edit={{
+                  available: rigEditable,
+                  active: rigEditing && rigEditable,
+                  onToggle: handleToggleRigEdit,
+                  influence: rigInfluence,
+                  unusedCount: rigUnusedBones.length,
+                  onRemoveUnused: handleRigRemoveUnused,
+                  onRename: handleRigBoneRename,
+                  onDelete: handleRigBoneDelete,
+                  onMove: handleRigBonePosition,
+                  onAddChild: handleRigAddChild,
+                  onTakeWeights: handleRigTakeWeights,
+                  moveChildren: rigMoveChildren,
+                  onToggleMoveChildren: () => setRigMoveChildren(prev => !prev),
+                  canUndo: rigCanUndo,
+                  canRedo: rigCanRedo,
+                  onUndo: handleRigUndo,
+                  onRedo: handleRigRedo,
+                  onRevert: handleRigRevert,
+                  dirty: rigEditDirty,
+                }}
               />
             )}
 

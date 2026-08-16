@@ -68,6 +68,50 @@ export function extractRigFromObject(root) {
   }
 }
 
+// Move the captured skeleton with the mesh.
+//
+// Anything that translates the editable geometry bodily — the Game-Ready pivot
+// fix — leaves the captured bones behind, because they live in their own scene
+// graph. At rest that is invisible: every joint matrix is identity there, so the
+// already-translated vertices render in the right place regardless. It only
+// surfaces once the rig is *posed*, when the bones rotate about points that are
+// no longer inside the mesh. Silent until it reaches an engine, in other words.
+//
+// The inverse bind matrices are recalculated afterwards. Without that the joint
+// matrices stop being identity at rest — they become the translation itself —
+// and the export would shift the mesh a second time.
+export function translateRig(rig, offsetX, offsetY, offsetZ) {
+  const scene = rig?.rigScene
+  if (!scene) return
+
+  const bones = []
+  scene.traverse(node => { if (node.isBone) bones.push(node) })
+  if (!bones.length) return
+
+  const boneSet = new Set(bones)
+  const offset = new THREE.Vector3(offsetX, offsetY, offsetZ)
+  const worldPosition = new THREE.Vector3()
+  const parentInverse = new THREE.Matrix4()
+
+  scene.updateMatrixWorld(true)
+  for (const bone of bones) {
+    // Only the roots move; every descendant follows through the hierarchy.
+    if (boneSet.has(bone.parent)) continue
+    bone.getWorldPosition(worldPosition).add(offset)
+    if (bone.parent) {
+      bone.parent.updateWorldMatrix(true, false)
+      parentInverse.copy(bone.parent.matrixWorld).invert()
+      worldPosition.applyMatrix4(parentInverse)
+    }
+    bone.position.copy(worldPosition)
+  }
+  scene.updateMatrixWorld(true)
+
+  scene.traverse(node => {
+    if (node.isSkinnedMesh && node.skeleton) node.skeleton.calculateInverses()
+  })
+}
+
 // Rebuild an exportable scene: the captured bone hierarchy plus a SkinnedMesh
 // carrying `geometry`. Returns null when the geometry has no skin data to bind,
 // so callers fall back to a plain static export rather than emit a SkinnedMesh

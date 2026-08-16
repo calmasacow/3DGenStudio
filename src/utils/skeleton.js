@@ -20,11 +20,16 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 //   parents:  number[]                                   // parent bone index per bone, -1 for roots
 //   size:     number                                     // bbox diagonal (for sizing joint dots)
 // }
-export function extractSkeletonFromObject(object) {
-  const root = object?.scene || object
-  if (!root) return null
-
-  root.updateMatrixWorld(true)
+// The bone objects of an object graph, in the order every "bone index" in the
+// editor refers to.
+//
+// IMPORTANT: this is traverse order, which is NOT necessarily the order of
+// `skeleton.bones` — and `skinIndex` addresses the latter. Anything that touches
+// skin weights has to map between the two through the bone objects themselves
+// (see utils/meshRigEdit.js); assuming they coincide corrupts weights silently on
+// the rigs where they don't.
+export function collectSkeletonBones(root) {
+  if (!root) return []
 
   const bones = []
   const boneSet = new Set()
@@ -47,9 +52,31 @@ export function extractSkeletonFromObject(object) {
       }
     })
   }
+  return bones
+}
+
+// `parents[i]` is the index of bone i's nearest bone-ancestor, or -1 for roots —
+// a bone's parent may be a plain node, so the chain is walked up until another
+// bone is found. This is the hierarchy the Skeleton tree view renders from.
+export function boneParentIndices(bones) {
+  const boneSet = new Set(bones)
+  const indexOf = new Map(bones.map((bone, i) => [bone, i]))
+  return bones.map(bone => {
+    let parent = bone.parent
+    while (parent && !boneSet.has(parent)) parent = parent.parent
+    return parent && indexOf.has(parent) ? indexOf.get(parent) : -1
+  })
+}
+
+export function extractSkeletonFromObject(object) {
+  const root = object?.scene || object
+  if (!root) return null
+
+  root.updateMatrixWorld(true)
+
+  const bones = collectSkeletonBones(root)
   if (bones.length === 0) return null
 
-  const indexOf = new Map(bones.map((bone, i) => [bone, i]))
   const tmp = new THREE.Vector3()
   const joints = new Float32Array(bones.length * 3)
   const names = new Array(bones.length)
@@ -64,22 +91,14 @@ export function extractSkeletonFromObject(object) {
     box.expandByPoint(tmp)
   })
 
-  // A bone's parent may be a plain node; walk up until we find another bone.
-  // `parents[i]` is the index of bone i's nearest bone-ancestor, or -1 for roots
-  // — this is the hierarchy the Skeleton tree view renders from.
+  const parents = boneParentIndices(bones)
   const segments = []
-  const parents = new Array(bones.length).fill(-1)
-  bones.forEach((bone, i) => {
-    let parent = bone.parent
-    while (parent && !boneSet.has(parent)) parent = parent.parent
-    if (parent && indexOf.has(parent)) {
-      const p = indexOf.get(parent)
-      parents[i] = p
-      segments.push(
-        joints[p * 3], joints[p * 3 + 1], joints[p * 3 + 2],
-        joints[i * 3], joints[i * 3 + 1], joints[i * 3 + 2],
-      )
-    }
+  parents.forEach((p, i) => {
+    if (p < 0) return
+    segments.push(
+      joints[p * 3], joints[p * 3 + 1], joints[p * 3 + 2],
+      joints[i * 3], joints[i * 3 + 1], joints[i * 3 + 2],
+    )
   })
 
   const size = box.isEmpty() ? 1 : box.getSize(tmp).length()

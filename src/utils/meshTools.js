@@ -169,6 +169,51 @@ export const COLLISION_METHOD_OPTIONS = [
   { value: 'sphere', label: 'Sphere — instant' },
 ]
 
+// High-to-low texture bake. Takes TWO meshes — the low-poly target (needs UVs)
+// and the high-poly source whose detail is captured — and returns IMAGES, not a
+// mesh, so it does not go through callMeshTool's single-file/mesh_b64 contract.
+// Resolves to { maps: { normal?: Blob, ao?: Blob, base_color?: Blob }, stats }.
+export async function bakeMaps(lowBlob, highBlob, { options = {}, fileName = 'low.glb', sourceName = 'high.glb', onProgress = null } = {}) {
+  const form = new FormData()
+  form.append('meshFile', lowBlob, fileName)
+  form.append('sourceFile', highBlob, sourceName)
+  form.append('options', JSON.stringify(options))
+
+  const response = await fetch(`${API_BASE}/meshes/bake`, { method: 'POST', body: form })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const payload = await response.json()
+      message = payload.detail ? `${payload.error}: ${payload.detail}` : (payload.error || message)
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(message)
+  }
+
+  const data = await readSseStream(response, onProgress)
+  const maps = {}
+  for (const [name, base64] of Object.entries(data.maps || {})) {
+    maps[name] = base64ToBlob(base64, 'image/png')
+  }
+  return { maps, stats: data.stats?.tool || null }
+}
+
+export const DEFAULT_BAKE_OPTIONS = {
+  maps: ['normal', 'ao'],
+  resolution: 2048,
+  samples: 8,
+  cage_extrusion: 0,
+  max_ray_distance: 0,
+  margin: 8,
+}
+
+export const BAKE_MAP_LABELS = {
+  normal: 'Normal (tangent space)',
+  ao: 'Ambient occlusion',
+  base_color: 'Base colour transfer',
+}
+
 // Game-Ready check. Read-only: returns a report, never a mesh, so this is a plain
 // JSON round trip rather than the SSE contract the mesh-returning tools use.
 // Resolves to { checks: [...], summary: {...}, stats: {...} } — see
