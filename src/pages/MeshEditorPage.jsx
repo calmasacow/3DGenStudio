@@ -159,7 +159,8 @@ import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
-import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS } from '../utils/meshTools'
+import BakeToolsPanel from '../components/meshEditor/BakeToolsPanel'
+import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, bakeMaps, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS, DEFAULT_BAKE_OPTIONS } from '../utils/meshTools'
 import { exportObject3D } from '../utils/meshExport'
 import { extractRigFromObject, buildRiggedObject, geometryHasSkin, translateRig } from '../utils/meshRig'
 import BoneTransformGizmo from '../components/meshEditor/BoneTransformGizmo'
@@ -230,6 +231,12 @@ const DEFAULT_REPAIR_OPTIONS = {
   // across UV seams and discards every UV.
   preserve_uv: true,
 }
+
+// How many pre-operation meshes the Bake mode keeps as high-poly sources. Each
+// one is a full geometry GLB held in memory, so this is a cap rather than a
+// history: at 10, a heavy 300k-face mesh costs on the order of 100 MB if every
+// slot is filled with one.
+const MAX_BAKE_SOURCES = 10
 
 const DEFAULT_OPTIMIZE_OPTIONS = {
   simplify_ratio: 0.5,
@@ -540,6 +547,21 @@ export default function MeshEditorPage() {
   const [lodSourceFaces, setLodSourceFaces] = useState(0)
   const [lodGenerating, setLodGenerating] = useState(false)
   const [lodProgress, setLodProgress] = useState(null)
+  // ── Bake ────────────────────────────────────────────────────────────────
+  // Snapshots of the mesh as it was *before* each tool ran, newest first, so a
+  // bake can sample the detail Retopo/Optimize removed. Capped because each one
+  // is a full GLB in memory.
+  const [bakeSources, setBakeSources] = useState([])
+  const [bakeSourceId, setBakeSourceId] = useState('')
+  const [bakeOptions, setBakeOptions] = useState(DEFAULT_BAKE_OPTIONS)
+  const [bakeRunning, setBakeRunning] = useState(false)
+  const [bakeProgress, setBakeProgress] = useState(null)
+  const [bakeSourceLoading, setBakeSourceLoading] = useState(false)
+  const [showBakeSourceSelector, setShowBakeSourceSelector] = useState(false)
+  const [bakedMaps, setBakedMaps] = useState(null)
+  // Baked maps assigned to the mesh, kept so the export paths can reattach them
+  // to whatever material they build.
+  const appliedMapsRef = useRef({})
   // Game-Ready check (read-only analysis) — no result/undo state, it never edits.
   const [gameReadyOptions, setGameReadyOptions] = useState(DEFAULT_INSPECT_OPTIONS)
   const [gameReadyRunning, setGameReadyRunning] = useState(false)
@@ -4144,6 +4166,28 @@ export default function MeshEditorPage() {
       }
       const glbBuffer = await exportGeometryToGlb(geometry)
       const meshBlob = new Blob([glbBuffer], { type: 'model/gltf-binary' })
+      // Keep the pre-operation mesh as a bake source. Retopo and Optimize hand
+      // back clean topology with the detail *deleted*; this is the only moment
+      // that detail still exists, and baking from it is what turns those tools
+      // from destructive into non-destructive. Captured for every tool rather
+      // than a chosen few, so one added later cannot forget to.
+      //
+      // It must be the TEXTURED mesh, not `meshBlob`. That one is geometry with a
+      // flat placeholder material, which is fine for the service (none of the
+      // tools read the texture, and sending it would mean re-encoding megabytes
+      // per call) but useless as a bake source: a base-colour transfer from it
+      // reproduces the placeholder colour instead of the artwork. The extra
+      // export only happens when there is actually a texture to lose.
+      let snapshotBlob = meshBlob
+      if (texturableMesh?.root && texturableMesh?.textureCanvas && geometry?.attributes?.uv?.count) {
+        try {
+          const files = await exportObject3D(getExportObject(), { format: 'glb', baseName: 'bake-source' })
+          if (files?.[0]?.blob) snapshotBlob = files[0].blob
+        } catch (snapshotError) {
+          console.warn('Could not capture a textured bake snapshot; keeping geometry only:', snapshotError)
+        }
+      }
+      rememberBakeSource(snapshotBlob, `Before ${label}`, geometryFaceCount(geometry))
       const { blob, stats, previewUrl } = await service(meshBlob, {
         options,
         fileName: 'mesh.glb',
@@ -4979,6 +5023,169 @@ export default function MeshEditorPage() {
     setOptimizeOptions(prev => ({ ...prev, [key]: value }))
   }, [])
 
+  // ── Bake ─────────────────────────────────────────────────────────────────
+
+  // Returns the new entry's id so callers can select it. Snapshots taken behind
+  // the user's back only auto-select when nothing is chosen yet; a file the user
+  // picked deliberately becomes the selection.
+  const rememberBakeSource = useCallback((blob, label, faces) => {
+    const id = `snap-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    // Timestamped because a longer list makes repeats likely — three runs of the
+    // same tool would otherwise be three identically-labelled entries.
+    const at = new Date().toLocaleTimeString()
+    setBakeSources(prev => [{ id, label, faces, blob, at }, ...prev].slice(0, MAX_BAKE_SOURCES))
+    setBakeSourceId(current => current || id)
+    return id
+  }, [])
+
+  const setBakeOption = useCallback((key, value) => {
+    setBakeOptions(prev => ({ ...prev, [key]: value }))
+  }, [])
+
+  // Pull a library mesh in as the bake source. `showEdits` means versions are
+  // selectable too, which is the common case here: the high-poly is usually an
+  // earlier version of the very mesh being edited. A version carries `filePath`
+  // rather than `filename`, hence the two-way resolve.
+  const handleBakeSourceAsset = useCallback(async (asset) => {
+    if (!asset) return
+    const url = buildAssetUrl(asset)
+    if (!url) {
+      setError('That asset has no file on disk.')
+      return
+    }
+    setBakeSourceLoading(true)
+    setError('')
+    try {
+      const response = await fetch(url)
+      if (!response.ok) {
+        throw new Error(`Could not load ${asset.name || 'the asset'}.`)
+      }
+      const blob = await response.blob()
+      // Give it a real filename: the service picks its loader from the extension,
+      // so a nameless Blob would be rejected as an unsupported format.
+      const fileName = (asset.filePath || asset.filename || 'high.glb').split('/').pop()
+      const named = new File([blob], fileName, { type: blob.type || 'model/gltf-binary' })
+      setBakeSourceId(rememberBakeSource(named, asset.name || fileName, null))
+      setFeedback(`Bake source set to ${asset.name || fileName}.`)
+    } catch (err) {
+      console.error('Loading the bake source asset failed:', err)
+      setError(err?.message || 'Could not load that asset.')
+    } finally {
+      setBakeSourceLoading(false)
+    }
+  }, [rememberBakeSource])
+
+  const handleRunBake = useCallback(async () => {
+    const source = bakeSources.find(entry => entry.id === bakeSourceId) || bakeSources[0]
+    if (!geometry || bakeRunning || !source) {
+      return
+    }
+    if (!geometry.attributes?.uv?.count) {
+      setError('The mesh has no UVs, so there is nowhere to bake to. Run Auto UV first.')
+      return
+    }
+    setBakeRunning(true)
+    setBakedMaps(null)
+    setError('')
+    setBakeProgress({ stage: 'start', frac: 0, message: 'Bake starting…' })
+    try {
+      await ensureDesktopService('meshtools')
+      // The low-poly target is the mesh as it stands; the rig is irrelevant to a
+      // bake, so it is left out to keep the upload small.
+      const lowBuffer = await exportGeometryToGlb(geometry)
+      const { maps, stats } = await bakeMaps(
+        new Blob([lowBuffer], { type: 'model/gltf-binary' }),
+        source.blob,
+        {
+          options: bakeOptions,
+          fileName: 'low.glb',
+          sourceName: source.blob.name || 'high.glb',
+          onProgress: evt => setBakeProgress(evt),
+        },
+      )
+      const decoded = {}
+      for (const [name, blob] of Object.entries(maps)) {
+        decoded[name] = { blob, url: URL.createObjectURL(blob) }
+      }
+      setBakedMaps({ maps: decoded, stats })
+      setFeedback(`Baked ${Object.keys(decoded).length} map${Object.keys(decoded).length === 1 ? '' : 's'} at ${stats?.resolution || bakeOptions.resolution}px.`)
+    } catch (err) {
+      console.error('Bake failed:', err)
+      setError(err?.message || 'The bake failed.')
+    } finally {
+      setBakeRunning(false)
+      setBakeProgress(null)
+    }
+  }, [geometry, bakeRunning, bakeSources, bakeSourceId, bakeOptions])
+
+  // Put the baked maps on the mesh. Normal and AO are channels the editor does
+  // not otherwise own, so they attach straight to the material. A base-colour
+  // transfer instead goes into the paint canvas, which IS the editor's base
+  // colour — that is what gives a retopologised mesh its texture back.
+  const handleApplyBakedMaps = useCallback(async () => {
+    if (!bakedMaps?.maps) return
+    const { maps } = bakedMaps
+    const applied = []
+
+    const loadTexture = url => new Promise((resolve, reject) => {
+      new THREE.TextureLoader().load(url, resolve, undefined, reject)
+    })
+
+    try {
+      for (const channel of ['normal', 'ao']) {
+        if (!maps[channel]) continue
+        const texture = await loadTexture(maps[channel].url)
+        texture.colorSpace = THREE.NoColorSpace
+        texture.flipY = false // glTF convention, matching the loader's textures
+        texture.needsUpdate = true
+        const slot = channel === 'normal' ? 'normalMap' : 'aoMap'
+        if (slot === 'aoMap') {
+          // three reads aoMap from the uv1 channel unless told otherwise; the
+          // bake wrote into the mesh's only UV set.
+          texture.channel = 0
+        }
+        appliedMapsRef.current[slot] = texture
+        texturableMesh?.root?.traverse(child => {
+          if (!child.isMesh) return
+          const materials = Array.isArray(child.material) ? child.material : [child.material]
+          materials.forEach(material => {
+            if (!material) return
+            material[slot] = texture
+            material.needsUpdate = true
+          })
+        })
+        applied.push(channel)
+      }
+
+      if (maps.base_color && texturableMesh?.textureCanvas) {
+        const image = await new Promise((resolve, reject) => {
+          const img = new Image()
+          img.onload = () => resolve(img)
+          img.onerror = reject
+          img.src = maps.base_color.url
+        })
+        const canvas = texturableMesh.textureCanvas
+        const context = canvas.getContext('2d')
+        context.save()
+        context.globalCompositeOperation = 'source-over'
+        context.drawImage(image, 0, 0, canvas.width, canvas.height)
+        context.restore()
+        updateCanvasTexture(displayTextureRef.current)
+        setTextureRevision(rev => rev + 1)
+        applied.push('base colour')
+      }
+
+      // Remount the textured display so the new material channels take effect.
+      setTextureRevision(rev => rev + 1)
+      setFeedback(applied.length
+        ? `Applied ${applied.join(' + ')} to the mesh.`
+        : 'Nothing to apply.')
+    } catch (err) {
+      console.error('Applying baked maps failed:', err)
+      setError(err?.message || 'Could not apply the baked maps.')
+    }
+  }, [bakedMaps, texturableMesh])
+
   // ── LOD chain ────────────────────────────────────────────────────────────
   const lodRatios = useMemo(() => defaultLodRatios(lodLevels), [lodLevels])
 
@@ -5273,6 +5480,13 @@ export default function MeshEditorPage() {
     }
 
     const material = new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
+    // Carry any baked maps onto the fallback material too. The textured path gets
+    // them for free (they live on the root's cloned materials); this branch builds
+    // a material from scratch and would otherwise drop them.
+    Object.entries(appliedMapsRef.current).forEach(([slot, texture]) => {
+      if (texture) material[slot] = texture
+    })
+    material.needsUpdate = true
     if (rig) {
       const rigged = buildRiggedObject(rig, geometry.clone(), material)
       if (rigged) return rigged
@@ -7320,6 +7534,15 @@ export default function MeshEditorPage() {
                   </button>
                   <button
                     type="button"
+                    className={`mesh-editor-mode-btn ${activeMenu === 'bake' ? 'mesh-editor-mode-btn--active' : ''}`}
+                    onClick={() => setActiveMenu('bake')}
+                    title="Bake a high-poly source's detail onto this mesh (normal, AO, base colour)"
+                  >
+                    <span className="material-symbols-outlined">flare</span>
+                    <span>Bake</span>
+                  </button>
+                  <button
+                    type="button"
                     className={`mesh-editor-mode-btn ${activeMenu === 'gameready' ? 'mesh-editor-mode-btn--active' : ''}`}
                     onClick={() => setActiveMenu('gameready')}
                     title="Check the mesh against engine-readiness budgets (read-only)"
@@ -7455,6 +7678,18 @@ export default function MeshEditorPage() {
                     lodChain, lodSourceFaces, lodGenerating, lodProgress,
                     onGenerateLods: handleGenerateLods,
                     onApplyLod: handleApplyLod,
+                    disabled: !geometry
+                  }} />
+                ) : activeMenu === 'bake' ? (
+                  <BakeToolsPanel {...{
+                    options: bakeOptions, setOption: setBakeOption,
+                    sources: bakeSources, sourceId: bakeSourceId, onSourceChange: setBakeSourceId,
+                    onPickAsset: () => setShowBakeSourceSelector(true),
+                    loadingSource: bakeSourceLoading,
+                    running: bakeRunning, progress: bakeProgress, result: bakedMaps,
+                    onRun: handleRunBake,
+                    onApply: handleApplyBakedMaps,
+                    hasUvs: !!geometry?.attributes?.uv?.count,
                     disabled: !geometry
                   }} />
                 ) : activeMenu === 'gameready' ? (
@@ -7605,7 +7840,7 @@ export default function MeshEditorPage() {
                         armExtension={animArmExtension}
                         armTargets={animArmTargets}
                       />
-                    ) : (activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection' || activeMenu === 'optimize') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
+                    ) : (activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection' || activeMenu === 'optimize' || activeMenu === 'bake') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
                       <TexturedMesh
                         key={textureRevision}
                         root={texturableMesh.root}
@@ -8317,6 +8552,17 @@ export default function MeshEditorPage() {
             setShowBooleanBrushSelector(false)
           }}
           onClose={() => setShowBooleanBrushSelector(false)}
+        />
+      )}
+      {showBakeSourceSelector && (
+        <AssetSelectorModal
+          assetType="mesh"
+          onSelect={(asset) => {
+            setShowBakeSourceSelector(false)
+            handleBakeSourceAsset(asset)
+          }}
+          onClose={() => setShowBakeSourceSelector(false)}
+          showEdits
         />
       )}
       {showSculptStampSelector && (
