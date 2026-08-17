@@ -39,6 +39,11 @@ contextBridge.exposeInMainWorld('genStudioServices', {
   checkComfyUpdate: () => ipcRenderer.invoke('comfyui:update-check'),
   updateComfyUI: () => ipcRenderer.invoke('comfyui:update-run'),
   reinstallComfyUI: () => ipcRenderer.invoke('comfyui:reinstall'),
+
+  // Open the log directory in the OS file manager. The Logs panel reads log
+  // CONTENT over the API (/api/logs) — this is only for attaching the files to
+  // a bug report, and for reaching the previous session's *.prev.log.
+  openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
 });
 
 contextBridge.exposeInMainWorld('genStudioSetup', {

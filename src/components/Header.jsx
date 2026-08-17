@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useNotifications } from '../context/NotificationContext'
+import LogsModal from './LogsModal'
 import './Header.css'
 import localVersionInfo from '../../version.json'
 
@@ -60,6 +61,9 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
   const navigate = useNavigate()
   const { notifications, clearNotifications, removeNotification } = useNotifications()
   const [showNotifications, setShowNotifications] = useState(false)
+  // Owned here rather than by each page (the way Settings is), so the Logs
+  // panel is reachable from every screen without touching any page component.
+  const [showLogs, setShowLogs] = useState(false)
   const [isCheckingVersion, setIsCheckingVersion] = useState(true)
   const [versionCheckError, setVersionCheckError] = useState('')
   const [versionStatus, setVersionStatus] = useState({
@@ -198,6 +202,15 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
 
         <div className="header__actions">
           <button
+            className="header__icon-btn"
+            id="logs-btn"
+            title="View service logs"
+            onClick={() => setShowLogs(true)}
+            aria-label="View service logs"
+          >
+            <span className="material-symbols-outlined">terminal</span>
+          </button>
+          <button
             className={`header__icon-btn ${hasUnreadNotifications ? 'header__icon-btn--update' : ''}`}
             id="notifications-btn"
             title={hasUnreadNotifications ? 'You have new notifications' : 'Notifications'}
@@ -324,6 +337,8 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
           </Link>
         )}
       </div>
+
+      {showLogs && <LogsModal onClose={() => setShowLogs(false)} />}
     </header>
   )
 }

@@ -16,6 +16,7 @@ import si from 'systeminformation';
 import { WebSocket as WsWebSocket } from 'ws';
 import tencentcloudSdk from 'tencentcloud-sdk-nodejs-intl-en';
 import { mountMcp } from './mcp/http.js';
+import { mountLogs } from './logs.js';
 
 // Node 20 (bundled by Electron 33) has no global WebSocket, so fall back to the
 // `ws` package. Newer Node runtimes (dev) expose a global WebSocket we can reuse.
@@ -305,6 +306,11 @@ mountMcp(app, {
     ...(detail || {})
   })
 });
+
+// Service logs (GET /api/logs, GET /api/logs/:id) — read-only tails of the log
+// files the desktop shell writes for itself, the backend, the two Python
+// services and the managed ComfyUI. Backs the Logs panel in the header.
+mountLogs(app);
 
 // Multer Config for Asset Uploads
 const storage = multer.diskStorage({

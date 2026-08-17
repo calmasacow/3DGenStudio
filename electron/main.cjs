@@ -102,6 +102,44 @@ function openLogStream(name) {
   return fs.createWriteStream(path.join(LOG_DIR, name), { flags: 'a' });
 }
 
+// Every log this app writes. Kept in one place because both the startup reset
+// below and the Logs panel (logs.js, via the backend) key off these names.
+const LOG_FILES = ['desktop.log', 'backend.log', 'python.log', 'rig.log', 'comfyui.log'];
+
+// Start each launch with empty logs, so whatever a user reads in the Logs panel
+// — or sends us — is this session and nothing else. Without it the files grow
+// without bound and every report needs "scroll to the end and guess where your
+// last restart was".
+//
+// The old file is kept alongside as <name>.prev.log rather than deleted: when
+// something crashes, the log worth having is the one from the run that just
+// died, and by then the user has already relaunched. Exactly one generation is
+// kept, so the directory stays bounded.
+//
+// MUST run before anything opens a log — i.e. before startBackend() and before
+// any service start() calls openLogStream().
+function resetLogs() {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+  } catch {
+    return; // no log dir → nothing to rotate; logging must never block startup
+  }
+  for (const name of LOG_FILES) {
+    const current = path.join(LOG_DIR, name);
+    if (!fs.existsSync(current)) continue;
+    const previous = path.join(LOG_DIR, name.replace(/\.log$/, '.prev.log'));
+    try {
+      fs.rmSync(previous, { force: true }); // Windows rename won't clobber
+      fs.renameSync(current, previous);
+    } catch {
+      // A leftover process from a previous run can still hold the file open on
+      // Windows, which fails the rename. Truncating in place loses the previous
+      // session but still gives this one a clean file.
+      try { fs.truncateSync(current, 0); } catch { /* give up quietly */ }
+    }
+  }
+}
+
 function startBackend() {
   log(`Starting backend: ${SERVER_JS} (port ${BACKEND_PORT}, cwd ${DATA_ROOT})`);
   fs.mkdirSync(DATA_ROOT, { recursive: true });
@@ -114,6 +152,9 @@ function startBackend() {
       ELECTRON_RUN_AS_NODE: '1',
       PORT: String(BACKEND_PORT),
       NODE_ENV: 'production',
+      // Lets the backend serve /api/logs — the desktop shell owns the log
+      // directory, so it has to tell the backend where it is.
+      GENSTUDIO_LOG_DIR: LOG_DIR,
     },
     // 4th fd = IPC channel: lets the headless backend ask the main process to
     // start a Python service on demand (e.g. to render a mesh thumbnail) —
@@ -409,6 +450,18 @@ function serviceStatus() {
 
 function registerServicesIpc() {
   ipcMain.handle('services:status', () => serviceStatus());
+  // Reveal the log directory in the OS file manager. The Logs panel reads the
+  // files over the API; this is the escape hatch for attaching them to a bug
+  // report — and the only way to reach the previous session's *.prev.log.
+  ipcMain.handle('logs:open-folder', async () => {
+    try {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+      const error = await shell.openPath(LOG_DIR);
+      return error ? { ok: false, error } : { ok: true, path: LOG_DIR };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   ipcMain.handle('services:ensure', async (_e, { name } = {}) => {
     try { await ensureService(name); return { ok: true, status: serviceStatus() }; }
     catch (err) { return { ok: false, error: err.message, status: serviceStatus() }; }
@@ -699,6 +752,7 @@ function loadingWindow() {
 
 async function boot() {
   fs.mkdirSync(DATA_ROOT, { recursive: true });
+  resetLogs();
   SERVICES = serviceRegistry();
   registerSetupIpc();
   registerServicesIpc();
