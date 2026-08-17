@@ -520,6 +520,23 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
                 <span>Auto-align to floor</span>
               </button>
 
+              {/* Without this the clip is measured against your mesh's own rest
+                  pose, so a character modelled with its legs apart walks with its
+                  legs apart. Rebakes the clip, hence disabled mid-retarget. */}
+              <button
+                type="button"
+                className={`mesh-editor-anim__floor-btn ${animation?.matchRestPose ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+                onClick={animation?.onToggleMatchRestPose}
+                disabled={!!animation?.retargeting}
+                title="Pose your mesh like the reference rig before applying the animation. Turn off to keep your mesh's own stance — a character whose rest pose has the legs or arms apart will then keep them apart while it moves."
+                aria-pressed={!!animation?.matchRestPose}
+              >
+                <span className="material-symbols-outlined">
+                  {animation?.matchRestPose ? 'check_box' : 'check_box_outline_blank'}
+                </span>
+                <span>Match reference rest pose</span>
+              </button>
+
               {animation?.canAdjustArms && (
                 <div className="mesh-editor-anim__arms">
                   <div className="mesh-editor-anim__arms-head">

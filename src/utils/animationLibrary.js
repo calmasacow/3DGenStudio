@@ -7,8 +7,9 @@
 // one of those clips on the user's rigged mesh we:
 //   1. load the reference scene (source skeleton + clips),
 //   2. map the source bones to the user's mesh bones (auto + manual),
-//   3. retarget each clip from the source skeleton to the target skeleton with
-//      three's SkeletonUtils.retargetClip, then play it on the target SkinnedMesh.
+//   3. bake each clip from the source skeleton onto the target skeleton with the
+//      hand-rolled retarget below (NOT three's SkeletonUtils.retargetClip), then
+//      play the result on the target SkinnedMesh.
 import { AnimationClip, AnimationMixer, Box3, Matrix4, Quaternion, QuaternionKeyframeTrack, Vector3, VectorKeyframeTrack } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
@@ -132,18 +133,28 @@ export async function loadTargetScene({ riggedBuffer, modelUrl }) {
   if (!skinnedMesh) throw new Error('The current mesh is not skinned (no bones to animate).')
   skinnedMesh.skeleton.pose()
   gltf.scene.updateMatrixWorld(true)
-  // One-time "auto-align to floor" offset: how far to lift the rest pose so its
-  // lowest point sits on y=0 (the grid). Applied as a constant during playback —
-  // NOT a per-frame foot lock — so animations keep their natural motion (jumps
-  // leave the ground, crouches lower, etc.).
-  const box = new Box3().setFromObject(gltf.scene)
-  const floorOffset = Number.isFinite(box.min.y) ? -box.min.y : 0
   return {
     scene: gltf.scene,
     skinnedMesh,
     boneNames: skinnedMesh.skeleton.bones.map(b => b.name),
-    floorOffset,
+    // One-time "auto-align to floor" offset for the rest pose — see poseFloorOffset.
+    floorOffset: poseFloorOffset(gltf.scene),
   }
+}
+
+// How far to lift a skinned scene so the lowest point of the pose it is CURRENTLY
+// standing in sits on y=0 (the grid). Used as a constant during playback — NOT a
+// per-frame foot lock — so animations keep their natural motion (jumps leave the
+// ground, crouches lower, etc.).
+//
+// SkinnedMesh.boundingBox accounts for the posed bones, but three computes it
+// once and caches it, so it has to be cleared or we would measure whichever pose
+// it happened to see first (the bind pose) instead of the current one.
+function poseFloorOffset(scene) {
+  scene.updateMatrixWorld(true)
+  scene.traverse(o => { if (o.isSkinnedMesh) o.boundingBox = null })
+  const box = new Box3().setFromObject(scene)
+  return Number.isFinite(box.min.y) ? -box.min.y : 0
 }
 
 // ---- Bone-name matching (Auto-Map) ----
@@ -279,6 +290,94 @@ export function detectHipBone(boneNames) {
   )
 }
 
+// Bones of `bone`'s subtree that are mapped and have no mapped bone between them
+// and `bone` — i.e. where its chain continues. Descends through unmapped bones so
+// an intermediate helper/twist bone does not break a chain.
+function nearestMappedDescendants(bone, mapping) {
+  const out = []
+  const walk = node => {
+    for (const child of node.children) {
+      if (!child.isBone) continue
+      if (mapping[child.name]) out.push(child)
+      else walk(child)
+    }
+  }
+  walk(bone)
+  return out
+}
+
+function isDescendantOf(bone, ancestor) {
+  for (let p = bone.parent; p; p = p.parent) if (p === ancestor) return true
+  return false
+}
+
+// A correction this large means the two bones are not the same limb — almost
+// always a bad mapping. Leave the bone alone rather than wrench it into place.
+const MAX_REST_MATCH_ANGLE = (135 * Math.PI) / 180
+
+// Rotate the target's mapped bones so each one POINTS THE SAME WAY as the
+// reference bone it is mapped from, and leave the skeleton standing in that pose
+// so the retarget below measures its deltas against it.
+//
+// This is what stops a character whose rest pose has the legs apart from walking
+// with the legs apart. The retarget is delta-based (see retargetAnimationClip), so
+// the constant srcBind⁻¹·tgtBind offset that makes "source at rest ⇒ target at
+// rest" true also carries every rest-pose difference into every frame. Matching
+// the bone DIRECTIONS (the swing) cancels exactly that part, while the leftover
+// rotation about each bone's own axis (the twist) is deliberately kept — that part
+// is the rig's axis convention, and dropping it would corkscrew the limbs.
+//
+// Only bones with exactly ONE mapped descendant are touched. For a hip, a chest or
+// a hand the "bone direction" is ambiguous (spine vs the two legs, neck vs the
+// clavicles, five fingers) and picking one child would tilt the whole torso; limb
+// chains, where the splay actually lives, are unambiguous.
+//
+// Returns the number of bones adjusted.
+function matchTargetRestPose({ targetBones, mapping, sourceByName }) {
+  const srcHead = new Vector3(), srcTail = new Vector3(), srcDir = new Vector3()
+  const tgtHead = new Vector3(), tgtTail = new Vector3(), tgtDir = new Vector3()
+  const swing = new Quaternion(), boneWorld = new Quaternion(), parentWorldInv = new Quaternion()
+  let adjusted = 0
+
+  // `targetBones` is a pre-order traversal, so each bone is corrected after the
+  // parent whose own correction moved it.
+  for (const tb of targetBones) {
+    const sb = sourceByName.get(mapping[tb.name])
+    if (!sb) continue
+    const children = nearestMappedDescendants(tb, mapping)
+    if (children.length !== 1) continue
+    const tc = children[0]
+    const sc = sourceByName.get(mapping[tc.name])
+    // A scrambled mapping can pair a bone with something outside its own chain,
+    // making the two directions unrelated. Only trust a genuine parent → child.
+    if (!sc || sc === sb || !isDescendantOf(sc, sb)) continue
+
+    tb.getWorldPosition(tgtHead); tc.getWorldPosition(tgtTail)
+    sb.getWorldPosition(srcHead); sc.getWorldPosition(srcTail)
+    tgtDir.subVectors(tgtTail, tgtHead)
+    srcDir.subVectors(srcTail, srcHead)
+    if (tgtDir.lengthSq() < 1e-12 || srcDir.lengthSq() < 1e-12) continue
+    tgtDir.normalize(); srcDir.normalize()
+
+    const angle = Math.acos(Math.min(1, Math.max(-1, tgtDir.dot(srcDir))))
+    if (!(angle > 1e-4)) continue
+    if (angle > MAX_REST_MATCH_ANGLE) {
+      console.warn(`Rest-pose match: skipped ${tb.name} → ${sb.name}, ${Math.round(angle * 180 / Math.PI)}° apart (mismapped?)`)
+      continue
+    }
+
+    // World-space swing, pre-multiplied onto the bone's current world rotation,
+    // then back to the parent's space as a local rotation.
+    swing.setFromUnitVectors(tgtDir, srcDir)
+    tb.getWorldQuaternion(boneWorld)
+    tb.parent.getWorldQuaternion(parentWorldInv).invert()
+    tb.quaternion.copy(parentWorldInv.multiply(swing).multiply(boneWorld)).normalize()
+    tb.updateMatrixWorld(true)
+    adjusted++
+  }
+  return adjusted
+}
+
 // Retarget a source clip onto the target skeleton using a bone map, producing an
 // AnimationClip of target-bone quaternion tracks (ready for an AnimationMixer on
 // the target SkinnedMesh). `mapping` is { [targetBoneName]: sourceBoneName }.
@@ -288,14 +387,25 @@ export function detectHipBone(boneNames) {
 //     desiredWorld = (sourceAnimWorld * sourceBindWorld⁻¹) * targetBindWorld
 //     targetLocal  = targetParentAnimWorld⁻¹ * desiredWorld
 // At the source's rest pose the delta is identity, so the target stays exactly at
-// its own rest — no distortion from differing rig rest poses (unlike copying the
-// source's absolute orientations). Playback is in-place (no hip translation).
+// whatever rest pose it was measured in. Playback is in-place (no hip translation).
+//
+// That last property is why `matchRestPose` exists (and defaults on): the delta is
+// measured against the target's OWN rest pose, so any difference between the two
+// rigs' rest poses survives into every frame — legs modelled apart stay apart for
+// the whole walk cycle. matchTargetRestPose first poses the target like the
+// reference and measures the deltas from there. Turn it off to keep the mesh's own
+// stance (a stylised rig may want that) at the cost of that artefact.
+//
+// Sets clip.userData.floorOffset: how far to lift the mesh so the rest pose it was
+// baked against sits on the grid. Matching the rest pose moves the mesh (closed
+// legs make a character taller), which invalidates the offset measured at load.
 //
 // Both scenes' roots are needed (not just the SkinnedMeshes): bones are siblings
 // of the mesh, so only the scene root's updateMatrixWorld() refreshes bone world
 // matrices, which the sampling below reads every frame.
 export function retargetAnimationClip({
   targetScene, targetSkinnedMesh, sourceScene, sourceSkinnedMesh, clip, mapping, fps = 30,
+  matchRestPose = true,
 }) {
   const sourceSkeleton = sourceSkinnedMesh.skeleton
   const sourceByName = new Map(sourceSkeleton.bones.map(b => [b.name, b]))
@@ -315,8 +425,18 @@ export function retargetAnimationClip({
   targetSkinnedMesh.skeleton.pose(); targetScene.updateMatrixWorld(true)
   const srcBindWorldInv = new Map()
   sourceSkeleton.bones.forEach(b => srcBindWorldInv.set(b.name, b.getWorldQuaternion(new Quaternion()).invert()))
+
+  // Pose the target like the reference BEFORE reading its bind orientations, so
+  // the deltas below are measured against the reference's stance rather than the
+  // mesh's own (which would keep the mesh's leg/arm splay through every frame).
+  const restMatched = matchRestPose
+    ? matchTargetRestPose({ targetBones, mapping, sourceByName })
+    : 0
   const tgtBindWorld = new Map()
   targetBones.forEach(b => tgtBindWorld.set(b.name, b.getWorldQuaternion(new Quaternion())))
+  // Measured while standing in the pose the clip is baked against — a moved rest
+  // pose sits differently on the floor. Null keeps the caller's load-time offset.
+  const floorOffset = restMatched > 0 ? poseFloorOffset(targetScene) : null
 
   // Hip position bind state + size scale (target hip height / source hip height),
   // so the source's hip translation maps to the target's proportions.
@@ -388,7 +508,9 @@ export function retargetAnimationClip({
   if (hipTargetBone && hipPosValues) {
     tracks.push(new VectorKeyframeTrack(`.bones[${hipTargetBone.name}].position`, times, hipPosValues))
   }
-  return new AnimationClip(clip.name, duration, tracks)
+  const retargeted = new AnimationClip(clip.name, duration, tracks)
+  retargeted.userData = { floorOffset, restMatchedBones: restMatched }
+  return retargeted
 }
 
 // Rebind a retargeted clip's tracks for glTF export. Playback tracks are named

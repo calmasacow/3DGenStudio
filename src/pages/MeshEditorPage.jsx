@@ -504,6 +504,10 @@ export default function MeshEditorPage() {
   const [animRetargeting, setAnimRetargeting] = useState(null)   // clip name currently retargeting
   const [animPreview, setAnimPreview] = useState(null)           // { scene, skinnedMesh, clip, floorOffset }
   const [animAlignFloor, setAnimAlignFloor] = useState(true)     // sit the animated mesh on the grid
+  // Pose the mesh like the reference rig before measuring the retarget deltas, so
+  // a mesh modelled with its legs/arms apart doesn't keep that stance through the
+  // whole clip. On by default; off keeps the mesh's own rest stance.
+  const [animMatchRestPose, setAnimMatchRestPose] = useState(true)
   const [animArmExtension, setAnimArmExtension] = useState(0)    // Expand/Contract arms (%)
   const [animArmTargets, setAnimArmTargets] = useState(null)     // { left:[], right:[] } upper-arm target bones
   const [checkedAnimations, setCheckedAnimations] = useState(() => new Set())  // clip names ticked for Save
@@ -4756,7 +4760,9 @@ export default function MeshEditorPage() {
 
   // Retarget a reference clip onto the target skeleton, memoised by clip name so
   // playback and Save reuse the same bake. Returns the THREE.AnimationClip.
-  const getRetargetedClip = useCallback(async (clipName) => {
+  // `matchRestPose` is a parameter rather than read from state so the toggle can
+  // rebake with its new value without waiting for the state update to land.
+  const getRetargetedClip = useCallback(async (clipName, matchRestPose = animMatchRestPose) => {
     const cached = retargetedClipsRef.current.get(clipName)
     if (cached) return cached
     const source = animSourceRef.current
@@ -4773,27 +4779,30 @@ export default function MeshEditorPage() {
       sourceSkinnedMesh: source.skinnedMesh,
       clip,
       mapping: animMapping,
+      matchRestPose,
     })
     retargetedClipsRef.current.set(clipName, retargeted)
     return retargeted
-  }, [animMapping])
+  }, [animMapping, animMatchRestPose])
 
-  const handleSelectAnimation = useCallback(async (clipName) => {
-    // Toggle off if the same clip is clicked again.
-    if (selectedAnimation === clipName) {
-      setSelectedAnimation(null)
-      setAnimPreview(null)
-      return
-    }
+  // Bake a clip and put it on screen. Shared by clicking a clip and by the
+  // rest-pose toggle, which has to rebuild whatever is already playing.
+  const showRetargetedClip = useCallback(async (clipName, matchRestPose) => {
     const target = animTargetRef.current
     if (!animSourceRef.current || !target || !animMapping) return
-    setSelectedAnimation(clipName)
     setAnimRetargeting(clipName)
     setAnimError(null)
     try {
-      const retargeted = await getRetargetedClip(clipName)
+      const retargeted = await getRetargetedClip(clipName, matchRestPose)
       if (!retargeted) throw new Error('Animation clip not found.')
-      setAnimPreview({ scene: target.scene, skinnedMesh: target.skinnedMesh, clip: retargeted, floorOffset: target.floorOffset || 0 })
+      setAnimPreview({
+        scene: target.scene,
+        skinnedMesh: target.skinnedMesh,
+        clip: retargeted,
+        // Matching the rest pose moves the mesh (closed legs make a character
+        // taller), so the bake remeasures the floor offset for the pose it used.
+        floorOffset: retargeted.userData?.floorOffset ?? target.floorOffset ?? 0,
+      })
     } catch (err) {
       console.error('Failed to retarget animation:', err)
       setAnimError(err?.message || 'Failed to retarget the animation.')
@@ -4802,7 +4811,27 @@ export default function MeshEditorPage() {
     } finally {
       setAnimRetargeting(null)
     }
-  }, [selectedAnimation, animMapping, getRetargetedClip])
+  }, [animMapping, getRetargetedClip])
+
+  const handleSelectAnimation = useCallback(async (clipName) => {
+    // Toggle off if the same clip is clicked again.
+    if (selectedAnimation === clipName) {
+      setSelectedAnimation(null)
+      setAnimPreview(null)
+      return
+    }
+    if (!animSourceRef.current || !animTargetRef.current || !animMapping) return
+    setSelectedAnimation(clipName)
+    await showRetargetedClip(clipName, animMatchRestPose)
+  }, [selectedAnimation, animMapping, animMatchRestPose, showRetargetedClip])
+
+  // Every cached bake was measured against the old rest pose, so they all go.
+  const handleToggleMatchRestPose = useCallback(() => {
+    const next = !animMatchRestPose
+    setAnimMatchRestPose(next)
+    retargetedClipsRef.current.clear()
+    if (selectedAnimation) void showRetargetedClip(selectedAnimation, next)
+  }, [animMatchRestPose, selectedAnimation, showRetargetedClip])
 
   const handleToggleAnimationChecked = useCallback((clipName) => {
     setCheckedAnimations(prev => {
@@ -4862,6 +4891,8 @@ export default function MeshEditorPage() {
     error: animError,
     alignFloor: animAlignFloor,
     onToggleAlignFloor: () => setAnimAlignFloor(v => !v),
+    matchRestPose: animMatchRestPose,
+    onToggleMatchRestPose: handleToggleMatchRestPose,
     armExtension: animArmExtension,
     onArmExtensionChange: setAnimArmExtension,
     canAdjustArms: !!(animArmTargets && (animArmTargets.left.length || animArmTargets.right.length)),
@@ -4871,6 +4902,7 @@ export default function MeshEditorPage() {
     onSave: handleSaveAnimations,
   }), [animReferenceId, handleSelectAnimReference, handleOpenBoneMapping, animMapping, animClips,
     selectedAnimation, handleSelectAnimation, animRetargeting, animLoading, animError, animAlignFloor,
+    animMatchRestPose, handleToggleMatchRestPose,
     animArmExtension, animArmTargets, checkedAnimations, handleToggleAnimationChecked, animSaving, handleSaveAnimations])
 
   // On-demand watertight check for the Auto Retopo panel. The position-welded
