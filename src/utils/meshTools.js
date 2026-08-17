@@ -211,7 +211,12 @@ export const DEFAULT_BAKE_OPTIONS = {
 export const BAKE_MAP_LABELS = {
   normal: 'Normal (tangent space)',
   ao: 'Ambient occlusion',
-  base_color: 'Base colour transfer',
+  base_color: 'Base colour (albedo)',
+  roughness: 'Roughness',
+  metallic: 'Metallic',
+  // Only appears in results, never as a request: the service packs it from the
+  // three channels above because that is the layout glTF stores them in.
+  orm: 'Packed ORM (AO / rough / metal)',
 }
 
 // Game-Ready check. Read-only: returns a report, never a mesh, so this is a plain

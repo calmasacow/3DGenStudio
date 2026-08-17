@@ -28,14 +28,43 @@ from pathlib import Path
 
 SENTINEL = "GENSTUDIO_EVT "  # keep in sync with app/services/bake.py
 
-# type -> (bake pass, colour space, description). Tangent-space normals and AO
-# are the two that actually carry the lost detail; the colour transfer exists so
-# a retopologised mesh does not also lose its texture.
+# name -> (bake pass, colour space, principled input to rewire or None).
+#
+# Blender has no METALLIC bake pass (its passes are AO, COMBINED, DIFFUSE, EMIT,
+# ENVIRONMENT, GLOSSY, NORMAL, POSITION, ROUGHNESS, SHADOW, TRANSMISSION, UV), so
+# metallic is captured by temporarily routing the high-poly's Metallic input into
+# an Emission shader and baking EMIT. Roughness has a native pass and needs no
+# such trick.
+#
+# Everything except base colour is DATA, not colour, so it is written Non-Color:
+# an sRGB-tagged roughness map would come back gamma-encoded and read wrong.
+#
+# Order matters and is the iteration order below: the metallic rewire replaces the
+# material's Surface link, so it has to run after any pass that reads the real
+# shader.
 BAKE_PASSES = {
-    "normal": ("NORMAL", "Non-Color"),
-    "ao": ("AO", "Non-Color"),
-    "base_color": ("DIFFUSE", "sRGB"),
+    "normal": ("NORMAL", "Non-Color", None),
+    "ao": ("AO", "Non-Color", None),
+    "base_color": ("DIFFUSE", "sRGB", None),
+    "roughness": ("ROUGHNESS", "Non-Color", None),
+    "metallic": ("EMIT", "Non-Color", "Metallic"),
 }
+
+BAKE_ORDER = ["normal", "ao", "base_color", "roughness", "metallic"]
+
+# Passes that bake natively but still map to a Principled input, so the "this came
+# from a constant, the map is flat" check applies to them as well.
+PROBE_INPUTS = {"roughness": "Roughness"}
+
+# glTF packs occlusion/roughness/metallic into one texture's R/G/B. Producing that
+# packed form means three.js can hand it to all three material slots as a single
+# object, which is both what the format wants and what lets its exporter skip
+# recompositing the channels.
+ORM_CHANNELS = ["ao", "roughness", "metallic"]
+# Neutral values for channels that were not baked: no occlusion, fully rough,
+# non-metal. Only the baked channels are ever read back on the client, so these
+# are padding rather than claims about the material.
+ORM_NEUTRAL = {"ao": 255, "roughness": 255, "metallic": 0}
 
 
 def emit(stage: str, frac: float, message: str = "") -> None:
@@ -45,6 +74,97 @@ def emit(stage: str, frac: float, message: str = "") -> None:
 def fail(code: int, error: str) -> None:
     print(f"{SENTINEL}{json.dumps({'type': 'result', 'ok': False, 'error': error})}", flush=True)
     sys.exit(code)
+
+
+def principled_input_is_linked(objects, input_name: str) -> bool:
+    """Is a Principled BSDF input driven by a node graph rather than a constant?
+
+    Used by the passes that need no rewiring (roughness has a native bake) so they
+    can report a flat result for the same reason the rewired ones do. Without this
+    a constant-roughness source would silently produce a flat map with no warning,
+    while constant metallic warned — an inconsistency that only shows up as
+    surprise later.
+    """
+    for obj in objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if not material or not material.use_nodes:
+                continue
+            bsdf = next((n for n in material.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+            socket = bsdf.inputs.get(input_name) if bsdf else None
+            if socket is not None and socket.is_linked:
+                return True
+    return False
+
+
+def rewire_to_emit(objects, input_name: str) -> bool:
+    """Route a Principled BSDF input into an Emission shader so EMIT can bake it.
+
+    Returns True when a *texture* (or any node graph) actually drives the input on
+    at least one material. When it is only a constant, the bake still succeeds but
+    produces a flat map — which is strictly worse than the scalar it came from, so
+    the caller reports that rather than pretending the map is useful.
+
+    Blender's glTF importer wires metallic/roughness through a Separate Color node
+    fed by the packed ORM texture, so the upstream socket here is normally that
+    node's B (or G) output. Linking a single float output into Emission's Color
+    broadcasts it across RGB, which is exactly what a data bake wants.
+    """
+    driven_by_graph = False
+    for obj in objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if not material or not material.use_nodes:
+                continue
+            tree = material.node_tree
+            bsdf = next((n for n in tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+            output = next((n for n in tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
+            if not bsdf or not output:
+                continue
+            socket = bsdf.inputs.get(input_name)
+            if socket is None:
+                continue
+
+            emission = tree.nodes.new("ShaderNodeEmission")
+            if socket.is_linked:
+                tree.links.new(socket.links[0].from_socket, emission.inputs["Color"])
+                driven_by_graph = True
+            else:
+                value = float(socket.default_value)
+                emission.inputs["Color"].default_value = (value, value, value, 1.0)
+            tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    return driven_by_graph
+
+
+def pack_orm(written: dict, outdir, resolution: int) -> tuple[str | None, list]:
+    """Compose the baked AO/roughness/metallic into one R/G/B texture.
+
+    Returns (filename, channels_actually_baked). Skipped unless at least two of
+    the three exist — a single channel is better served by its own map.
+    """
+    present = [name for name in ORM_CHANNELS if name in written]
+    if len(present) < 2:
+        return None, present
+
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception as exc:  # noqa: BLE001 — the individual maps are still returned
+        print(f"ORM packing unavailable ({exc}); returning separate maps.", flush=True)
+        return None, present
+
+    planes = []
+    for name in ORM_CHANNELS:
+        if name in written:
+            image = Image.open(outdir / written[name]).convert("L")
+            if image.size != (resolution, resolution):
+                image = image.resize((resolution, resolution), Image.LANCZOS)
+            planes.append(np.asarray(image, dtype=np.uint8))
+        else:
+            planes.append(np.full((resolution, resolution), ORM_NEUTRAL[name], dtype=np.uint8))
+
+    Image.fromarray(np.dstack(planes), mode="RGB").save(outdir / "orm.png")
+    return "orm.png", present
 
 
 def main() -> None:
@@ -122,10 +242,22 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     written = {}
 
-    for index, map_name in enumerate(maps):
-        pass_type, colorspace = BAKE_PASSES[map_name]
-        frac = 0.25 + 0.7 * (index / len(maps))
+    flat_channels = []
+    ordered = [name for name in BAKE_ORDER if name in maps]
+
+    for index, map_name in enumerate(ordered):
+        pass_type, colorspace, rewire_input = BAKE_PASSES[map_name]
+        frac = 0.25 + 0.7 * (index / len(ordered))
         emit("bake", frac, f"Baking {map_name.replace('_', ' ')}…")
+
+        # Either way, a channel whose source is a constant bakes to a flat map,
+        # which is strictly worse than the scalar it came from — report it.
+        if rewire_input:
+            if not rewire_to_emit(high_objects, rewire_input):
+                flat_channels.append(map_name)
+        elif map_name in PROBE_INPUTS:
+            if not principled_input_is_linked(high_objects, PROBE_INPUTS[map_name]):
+                flat_channels.append(map_name)
 
         image = bpy.data.images.new(f"bake_{map_name}", width=resolution, height=resolution,
                                     alpha=False, float_buffer=False)
@@ -162,6 +294,11 @@ def main() -> None:
         material.node_tree.nodes.remove(node)
         bpy.data.images.remove(image)
 
+    emit("pack", 0.96, "Packing ORM…")
+    orm_name, orm_channels = pack_orm(written, outdir, resolution)
+    if orm_name:
+        written["orm"] = orm_name
+
     emit("done", 1.0, "Bake complete.")
     stats = {
         "maps": written,
@@ -169,6 +306,11 @@ def main() -> None:
         "low_faces": len(low.data.polygons),
         "high_faces": int(sum(len(o.data.polygons) for o in high_objects)),
         "samples": scene.cycles.samples,
+        # Which of the ORM channels carry real baked data, so the client only binds
+        # the material slots that were actually measured.
+        "orm_channels": orm_channels if orm_name else [],
+        # Channels whose source was a constant, not a texture — the map is flat.
+        "flat_channels": flat_channels,
     }
     print(f"{SENTINEL}{json.dumps({'type': 'result', 'ok': True, 'stats': stats})}", flush=True)
 

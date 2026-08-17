@@ -5131,30 +5131,62 @@ export default function MeshEditorPage() {
       new THREE.TextureLoader().load(url, resolve, undefined, reject)
     })
 
-    try {
-      for (const channel of ['normal', 'ao']) {
-        if (!maps[channel]) continue
-        const texture = await loadTexture(maps[channel].url)
-        texture.colorSpace = THREE.NoColorSpace
-        texture.flipY = false // glTF convention, matching the loader's textures
-        texture.needsUpdate = true
-        const slot = channel === 'normal' ? 'normalMap' : 'aoMap'
-        if (slot === 'aoMap') {
-          // three reads aoMap from the uv1 channel unless told otherwise; the
-          // bake wrote into the mesh's only UV set.
-          texture.channel = 0
-        }
-        appliedMapsRef.current[slot] = texture
-        texturableMesh?.root?.traverse(child => {
-          if (!child.isMesh) return
-          const materials = Array.isArray(child.material) ? child.material : [child.material]
-          materials.forEach(material => {
-            if (!material) return
-            material[slot] = texture
-            material.needsUpdate = true
-          })
+    // Assign to every material on the display root, and remember it so the export
+    // paths can reattach it to whatever material they build.
+    const assign = (slot, texture, tweak = null) => {
+      appliedMapsRef.current[slot] = texture
+      texturableMesh?.root?.traverse(child => {
+        if (!child.isMesh) return
+        const materials = Array.isArray(child.material) ? child.material : [child.material]
+        materials.forEach(material => {
+          if (!material) return
+          material[slot] = texture
+          tweak?.(material)
+          material.needsUpdate = true
         })
-        applied.push(channel)
+      })
+    }
+
+    const prepare = async (url) => {
+      const texture = await loadTexture(url)
+      texture.colorSpace = THREE.NoColorSpace // data, not colour
+      texture.flipY = false // glTF convention, matching the loader's textures
+      texture.channel = 0 // aoMap would otherwise be read from uv1
+      texture.needsUpdate = true
+      return texture
+    }
+
+    try {
+      if (maps.normal) {
+        assign('normalMap', await prepare(maps.normal.url))
+        applied.push('normal')
+      }
+
+      // Prefer the packed ORM: one texture object across all three slots is the
+      // glTF layout, and it is what lets GLTFExporter skip recompositing the
+      // channels (it early-returns when metalnessMap === roughnessMap).
+      const ormChannels = bakedMaps.stats?.orm_channels || []
+      if (maps.orm && ormChannels.length) {
+        const texture = await prepare(maps.orm.url)
+        // A *Map is multiplied by its scalar factor, and the editor's placeholder
+        // material carries roughness 0.62 / metalness 0.08 — leaving those would
+        // scale the baked values down. glTF sets the factors to 1 when a texture
+        // is present, so match that.
+        if (ormChannels.includes('ao')) assign('aoMap', texture)
+        if (ormChannels.includes('roughness')) assign('roughnessMap', texture, m => { m.roughness = 1 })
+        if (ormChannels.includes('metallic')) assign('metalnessMap', texture, m => { m.metalness = 1 })
+        applied.push(`packed ${ormChannels.join('/')}`)
+      } else {
+        // Fewer than two channels baked — bind them individually.
+        if (maps.ao) { assign('aoMap', await prepare(maps.ao.url)); applied.push('ao') }
+        if (maps.roughness) {
+          assign('roughnessMap', await prepare(maps.roughness.url), m => { m.roughness = 1 })
+          applied.push('roughness')
+        }
+        if (maps.metallic) {
+          assign('metalnessMap', await prepare(maps.metallic.url), m => { m.metalness = 1 })
+          applied.push('metallic')
+        }
       }
 
       if (maps.base_color && texturableMesh?.textureCanvas) {

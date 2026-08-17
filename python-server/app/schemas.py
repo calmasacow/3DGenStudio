@@ -171,10 +171,14 @@ class BakeOptions(BaseModel):
     as a normal map so the low-poly mesh still reads as the high-poly one.
     """
 
-    maps: list[Literal["normal", "ao", "base_color"]] = Field(
+    maps: list[Literal["normal", "ao", "base_color", "roughness", "metallic"]] = Field(
         default=["normal", "ao"],
         description="Which passes to bake. 'normal' carries the lost silhouette detail, "
-                    "'ao' the contact shadow, 'base_color' transfers the source texture.")
+                    "'ao' the contact shadow, 'base_color' transfers the source texture, "
+                    "and 'roughness'/'metallic' resample the source's PBR channels onto the "
+                    "new UVs. When two or more of ao/roughness/metallic are baked they are "
+                    "also returned packed into one R/G/B 'orm' texture, which is the form "
+                    "glTF expects.")
     resolution: int = Field(default=2048, ge=64, le=8192,
                             description="Output map resolution (px). Cost scales with the square of this.")
     samples: int = Field(default=8, ge=1, le=512,

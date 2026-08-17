@@ -10,7 +10,10 @@ import { NumberField, RangeField, SelectField } from './MeshToolField'
 import MeshToolProgress from './MeshToolProgress'
 import { BAKE_MAP_LABELS } from '../../utils/meshTools'
 
-const MAP_ORDER = ['normal', 'ao', 'base_color']
+// Request order for the checkboxes. 'orm' is never requested — the service packs
+// it from ao/roughness/metallic — but it does come back in the result.
+const MAP_ORDER = ['normal', 'ao', 'base_color', 'roughness', 'metallic']
+const RESULT_ORDER = [...MAP_ORDER, 'orm']
 
 export default function BakeToolsPanel({
   options,
@@ -101,7 +104,7 @@ export default function BakeToolsPanel({
         <div className="mesh-editor-panel__section">
           <span className="mesh-editor-panel__section-title">Result</span>
           <div className="mesh-editor-bake-grid">
-            {MAP_ORDER.filter(name => result.maps[name]).map(name => (
+            {RESULT_ORDER.filter(name => result.maps[name]).map(name => (
               <figure className="mesh-editor-bake-map" key={name}>
                 <img src={result.maps[name].url} alt={BAKE_MAP_LABELS[name] || name} />
                 <figcaption>{BAKE_MAP_LABELS[name] || name}</figcaption>
@@ -113,7 +116,19 @@ export default function BakeToolsPanel({
               <span><strong>Resolution:</strong> {result.stats.resolution}px</span>
               <span><strong>Source:</strong> {result.stats.high_faces?.toLocaleString()} faces</span>
               <span><strong>Target:</strong> {result.stats.low_faces?.toLocaleString()} faces</span>
+              {result.stats.orm_channels?.length > 0 && (
+                <span><strong>Packed:</strong> {result.stats.orm_channels.join(' / ')}</span>
+              )}
             </div>
+          )}
+
+          {result.stats?.flat_channels?.length > 0 && (
+            <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
+              {result.stats.flat_channels.join(' and ')} came from a constant on the source
+              material, not a texture, so {result.stats.flat_channels.length === 1 ? 'that map is' : 'those maps are'} flat.
+              The material&apos;s own value is better than baking it — leave{' '}
+              {result.stats.flat_channels.length === 1 ? 'it' : 'them'} unchecked.
+            </span>
           )}
           <button
             type="button"
@@ -126,8 +141,9 @@ export default function BakeToolsPanel({
             <span>Apply to mesh</span>
           </button>
           <span className="mesh-editor-panel__hint">
-            Normal and AO attach to the material; a base-colour transfer is drawn into the paint
-            texture. All three then travel with the mesh on save and export.
+            Normal attaches to the material; AO, roughness and metallic attach as the single packed
+            ORM texture glTF expects; a base-colour transfer is drawn into the paint texture. They
+            all then travel with the mesh on save and export.
           </span>
         </div>
       )}
