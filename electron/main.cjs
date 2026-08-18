@@ -97,6 +97,29 @@ function log(line) {
   } catch { /* logging must never crash startup */ }
 }
 
+// Shell preferences: a tiny JSON file the MAIN process owns, for the few
+// settings that have to be readable BEFORE the backend — and therefore the
+// normal settings store — exists. "Clear the logs at startup" is one: resetLogs()
+// runs before startBackend(), so it cannot ask the database.
+const SHELL_PREFS_FILE = path.join(DATA_ROOT, 'shell-prefs.json');
+const SHELL_PREFS_DEFAULTS = { clearLogsAtStartup: true };
+
+function readShellPrefs() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SHELL_PREFS_FILE, 'utf8'));
+    return { ...SHELL_PREFS_DEFAULTS, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+  } catch {
+    return { ...SHELL_PREFS_DEFAULTS }; // absent or corrupt -> defaults
+  }
+}
+
+function writeShellPrefs(patch) {
+  const next = { ...readShellPrefs(), ...patch };
+  fs.mkdirSync(DATA_ROOT, { recursive: true });
+  fs.writeFileSync(SHELL_PREFS_FILE, JSON.stringify(next, null, 2));
+  return next;
+}
+
 function openLogStream(name) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   return fs.createWriteStream(path.join(LOG_DIR, name), { flags: 'a' });
@@ -106,7 +129,8 @@ function openLogStream(name) {
 // below and the Logs panel (logs.js, via the backend) key off these names.
 const LOG_FILES = ['desktop.log', 'backend.log', 'python.log', 'rig.log', 'comfyui.log'];
 
-// Start each launch with empty logs, so whatever a user reads in the Logs panel
+// Start each launch with empty logs (unless the user opted out in the Logs
+// panel), so whatever a user reads in the Logs panel
 // — or sends us — is this session and nothing else. Without it the files grow
 // without bound and every report needs "scroll to the end and guess where your
 // last restart was".
@@ -119,6 +143,13 @@ const LOG_FILES = ['desktop.log', 'backend.log', 'python.log', 'rig.log', 'comfy
 // MUST run before anything opens a log — i.e. before startBackend() and before
 // any service start() calls openLogStream().
 function resetLogs() {
+  // Opt-out (Logs panel -> "Clear the logs at startup"): keep appending to the
+  // existing files instead. They then grow without bound, which is the point —
+  // it is for chasing something that only shows up across restarts.
+  if (!readShellPrefs().clearLogsAtStartup) {
+    log('Keeping the existing logs ("Clear the logs at startup" is off in the Logs panel).');
+    return;
+  }
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
   } catch {
@@ -458,6 +489,21 @@ function registerServicesIpc() {
       fs.mkdirSync(LOG_DIR, { recursive: true });
       const error = await shell.openPath(LOG_DIR);
       return error ? { ok: false, error } : { ok: true, path: LOG_DIR };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // Whether the shell wipes the logs at startup. Read/written here rather than
+  // through the settings API because resetLogs() runs before the backend is up.
+  ipcMain.handle('logs:get-prefs', () => ({
+    ok: true,
+    clearAtStartup: readShellPrefs().clearLogsAtStartup !== false,
+  }));
+  ipcMain.handle('logs:set-prefs', (_e, { clearAtStartup } = {}) => {
+    try {
+      const next = writeShellPrefs({ clearLogsAtStartup: Boolean(clearAtStartup) });
+      log(`Logs: clear at startup is now ${next.clearLogsAtStartup ? 'ON' : 'OFF'}.`);
+      return { ok: true, clearAtStartup: next.clearLogsAtStartup };
     } catch (err) {
       return { ok: false, error: err.message };
     }

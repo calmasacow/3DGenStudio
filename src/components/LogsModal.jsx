@@ -29,6 +29,9 @@ export default function LogsModal({ onClose }) {
   const [follow, setFollow] = useState(true)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // Desktop only, and null until the shell answers — so the checkbox never
+  // flashes a value that isn't the real one.
+  const [clearAtStartup, setClearAtStartup] = useState(null)
 
   // Byte offset to resume from. A ref, not state, so the poll loop always reads
   // the current value without being re-created on every chunk.
@@ -80,8 +83,8 @@ export default function LogsModal({ onClose }) {
         setSources(list.sources || [])
         setLogDir(list.dir || '')
         // `reset` means the file was truncated or rotated under us — which is
-        // exactly what a restart does, since the desktop app clears the logs at
-        // startup. Replace rather than append so the view follows the new file.
+        // what a restart does whenever "Clear the logs at startup" is on.
+        // Replace rather than append so the view follows the new file.
         setText((prev) => (slice.reset ? slice.text : prev + slice.text))
         setPending(slice.pending || '')
         offsetRef.current = slice.nextOffset
@@ -110,6 +113,32 @@ export default function LogsModal({ onClose }) {
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [onClose])
+
+  // The startup-reset preference is owned by the desktop shell (it rotates the
+  // logs before the backend exists), so it comes over the bridge, not the API.
+  useEffect(() => {
+    let cancelled = false
+    // An older shell (or the browser) has no such bridge method — leave
+    // clearAtStartup null and the checkbox simply never appears.
+    const pendingPrefs = desktopBridge?.getLogPrefs?.()
+    if (!pendingPrefs) return undefined
+    pendingPrefs
+      .then((result) => {
+        if (!cancelled && result?.ok) setClearAtStartup(result.clearAtStartup !== false)
+      })
+      .catch(() => { /* nothing to show, and nothing worth an error banner */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const toggleClearAtStartup = async () => {
+    const next = !clearAtStartup
+    setClearAtStartup(next) // optimistic: a checkbox that lags a round trip feels broken
+    const result = await desktopBridge?.setLogPrefs?.({ clearAtStartup: next })
+    if (result && !result.ok) {
+      setClearAtStartup(!next)
+      setError(result.error || 'Could not save the startup preference.')
+    }
+  }
 
   const body = useMemo(() => {
     const combined = pending ? `${text}${pending}` : text
@@ -244,6 +273,23 @@ export default function LogsModal({ onClose }) {
                   <span className="material-symbols-outlined">folder_open</span>
                   Folder
                 </button>
+              )}
+              {isDesktop && clearAtStartup !== null && (
+                <label
+                  className="logs-startup-toggle"
+                  title={
+                    'On: each launch starts with empty logs and the previous session is kept as '
+                    + '*.prev.log. Off: every session keeps appending to the same files, which '
+                    + 'then grow without bound — useful when chasing something across restarts.'
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={clearAtStartup}
+                    onChange={toggleClearAtStartup}
+                  />
+                  Clear the logs at startup
+                </label>
               )}
             </div>
 

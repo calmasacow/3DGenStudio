@@ -4,7 +4,8 @@
 //
 // The desktop shell (electron/main.cjs) is what actually WRITES these files: it
 // pipes each spawned process's stdout/stderr into `<userData>/logs/<name>.log`
-// and truncates them all at startup, so one file == one session. This module
+// and — unless the user turns off "Clear the logs at startup" in the Logs panel
+// — rotates them all at startup, so one file == one session. This module
 // only reads them, which is why it is safe to expose over the normal API.
 //
 // Reads are incremental and bounded: the client passes back the `nextOffset` it
@@ -116,9 +117,9 @@ async function readLogSlice(file, since) {
     return { exists: false, size: 0, modifiedAt: null, from: 0, nextOffset: 0, reset: true, text: '', pending: '' };
   }
 
-  // `since > size` means the file shrank under us — the desktop shell truncates
-  // every log at startup, so this is exactly what a client sees when the app is
-  // relaunched while the panel is open. Treat it as a fresh file.
+  // `since > size` means the file shrank under us — which is what a client sees
+  // when the app is relaunched (with startup clearing on) while the panel is
+  // open. Treat it as a fresh file.
   let reset = since === null || since === undefined || since > size || since < 0;
   let from = reset ? Math.max(0, size - MAX_CHUNK_BYTES) : since;
   if (size - from > MAX_CHUNK_BYTES) {

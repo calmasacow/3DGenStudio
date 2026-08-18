@@ -238,6 +238,36 @@
   color: var(--primary);
 }
 
+/* Reads as one more toolbar control rather than a stray form field. Pushed to
+   the far end because it is a session preference, not an action on this view. */
+.logs-startup-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  padding: 0.4rem 0.625rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  color: var(--on-surface-variant);
+  font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s, background 0.15s;
+}
+
+.logs-startup-toggle:hover {
+  background: var(--surface-container);
+  color: var(--on-surface);
+}
+
+.logs-startup-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
 /* --- Output ---------------------------------------------------------------- */
 
 .logs-error {

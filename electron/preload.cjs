@@ -44,6 +44,14 @@ contextBridge.exposeInMainWorld('genStudioServices', {
   // CONTENT over the API (/api/logs) — this is only for attaching the files to
   // a bug report, and for reaching the previous session's *.prev.log.
   openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
+
+  // "Clear the logs at startup" (the Logs panel checkbox). This one preference
+  // lives with the shell, not in the settings DB, because the shell rotates the
+  // logs before the backend — and its settings store — is running.
+  //   getLogPrefs -> { ok, clearAtStartup }
+  //   setLogPrefs({ clearAtStartup }) -> { ok, clearAtStartup } | { ok: false, error }
+  getLogPrefs: () => ipcRenderer.invoke('logs:get-prefs'),
+  setLogPrefs: (prefs) => ipcRenderer.invoke('logs:set-prefs', prefs),
 });
 
 contextBridge.exposeInMainWorld('genStudioSetup', {

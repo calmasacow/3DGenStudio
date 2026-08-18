@@ -42,6 +42,9 @@ files:
   - server.js
   - storage.js
   - wikiStorage.js
+  # Read-only log reader mounted by server.js (/api/logs) — the Logs panel is
+  # blank-to-broken without it: a missing import kills the whole backend.
+  - logs.js
   # MCP automation server (POST /mcp on the backend + stdio bridge).
   - mcp/**/*
   - version.json
