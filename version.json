@@ -1,4 +1,4 @@
 {
-	"version": "2.3.2",
-	"message": "Graph: new node type 'Rig Mesh', Kanban: can 'Auto Rig' from Rigging column, MeshPreviewer: can see skeleton"
+	"version": "2.4.0",
+	"message": "MeshEditor new modes: Game-Ready and Bake - LOD Export"
 }

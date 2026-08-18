@@ -27,6 +27,18 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.4.0',
+    date: '2026-08-18',
+    items: [
+			'MeshEditor new modes: Bake and Game-Ready',
+			'Export: Can export LOD and Collision Mesh',
+			'Animations: Improved human retargeting',
+			'Auto-Rig: Can edit/add/delete bones',
+			'Desktop App: Can see logs',
+			'Fixed Z-Image Turbo VAE download'
+    ],
+  },
+  {
     version: 'v2.3.2',
     date: '2026-08-15',
     items: [
