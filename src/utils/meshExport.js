@@ -48,7 +48,9 @@ export const EXPORT_FORMATS = [
 ]
 
 function defaultMaterial() {
-  return new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
+  // White, not the viewport's placeholder tint: this colour lands in the exported
+  // file as baseColorFactor, where it would multiply the mesh's real colour.
+  return new THREE.MeshStandardMaterial({ color: '#ffffff', metalness: 0.08, roughness: 0.62 })
 }
 
 function getExtensionFromUrl(url) {

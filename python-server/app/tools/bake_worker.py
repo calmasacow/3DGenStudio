@@ -36,21 +36,30 @@ SENTINEL = "GENSTUDIO_EVT "  # keep in sync with app/services/bake.py
 # an Emission shader and baking EMIT. Roughness has a native pass and needs no
 # such trick.
 #
+# Base colour goes through that same rewire rather than through the DIFFUSE pass,
+# which looks like the obvious choice and is a trap: DIFFUSE returns the *diffuse
+# lobe* albedo, which for a Principled BSDF is base_color * (1 - metallic). A 60%
+# metallic source therefore bakes at 40% brightness and a fully metallic one bakes
+# pure black — and glTF's default metallicFactor is 1.0, so this also hits meshes
+# that simply never wrote the field. EMIT off Base Color is exact at any metallic
+# (measured: a 200/140/60 source round-trips byte-for-byte, where DIFFUSE gave
+# 144/100/41 at metallic 0.5 and 0/0/0 at metallic 1.0).
+#
 # Everything except base colour is DATA, not colour, so it is written Non-Color:
 # an sRGB-tagged roughness map would come back gamma-encoded and read wrong.
 #
-# Order matters and is the iteration order below: the metallic rewire replaces the
-# material's Surface link, so it has to run after any pass that reads the real
-# shader.
+# Order matters and is the iteration order below: a rewire replaces the material's
+# Surface link, so every pass that reads the real shader (ROUGHNESS) has to run
+# before the first rewired one.
 BAKE_PASSES = {
     "normal": ("NORMAL", "Non-Color", None),
     "ao": ("AO", "Non-Color", None),
-    "base_color": ("DIFFUSE", "sRGB", None),
     "roughness": ("ROUGHNESS", "Non-Color", None),
+    "base_color": ("EMIT", "sRGB", "Base Color"),
     "metallic": ("EMIT", "Non-Color", "Metallic"),
 }
 
-BAKE_ORDER = ["normal", "ao", "base_color", "roughness", "metallic"]
+BAKE_ORDER = ["normal", "ao", "roughness", "base_color", "metallic"]
 
 # Passes that bake natively but still map to a Principled input, so the "this came
 # from a constant, the map is flat" check applies to them as well.
@@ -97,19 +106,26 @@ def principled_input_is_linked(objects, input_name: str) -> bool:
     return False
 
 
-def rewire_to_emit(objects, input_name: str) -> bool:
+def rewire_to_emit(objects, input_name: str) -> tuple[bool, bool]:
     """Route a Principled BSDF input into an Emission shader so EMIT can bake it.
 
-    Returns True when a *texture* (or any node graph) actually drives the input on
-    at least one material. When it is only a constant, the bake still succeeds but
-    produces a flat map — which is strictly worse than the scalar it came from, so
-    the caller reports that rather than pretending the map is useful.
+    Returns (rewired, driven_by_graph).
+
+    `driven_by_graph` is True when a *texture* (or any node graph) actually drives
+    the input on at least one material. When it is only a constant, the bake still
+    succeeds but produces a flat map — which is strictly worse than the scalar it
+    came from, so the caller reports that rather than pretending the map is useful.
+
+    `rewired` is False when no material had a Principled BSDF to read, which the
+    caller has to know about: an EMIT bake against a shader graph we never touched
+    comes back black rather than wrong-but-plausible.
 
     Blender's glTF importer wires metallic/roughness through a Separate Color node
     fed by the packed ORM texture, so the upstream socket here is normally that
     node's B (or G) output. Linking a single float output into Emission's Color
     broadcasts it across RGB, which is exactly what a data bake wants.
     """
+    rewired = False
     driven_by_graph = False
     for obj in objects:
         for slot in obj.material_slots:
@@ -130,10 +146,18 @@ def rewire_to_emit(objects, input_name: str) -> bool:
                 tree.links.new(socket.links[0].from_socket, emission.inputs["Color"])
                 driven_by_graph = True
             else:
-                value = float(socket.default_value)
-                emission.inputs["Color"].default_value = (value, value, value, 1.0)
+                # Scalar inputs (Metallic) broadcast across RGB; Base Color is
+                # already a 4-float and is copied straight through.
+                raw = socket.default_value
+                try:
+                    value = float(raw)
+                    rgba = (value, value, value, 1.0)
+                except TypeError:
+                    rgba = (raw[0], raw[1], raw[2], 1.0)
+                emission.inputs["Color"].default_value = rgba
             tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
-    return driven_by_graph
+            rewired = True
+    return rewired, driven_by_graph
 
 
 def pack_orm(written: dict, outdir, resolution: int) -> tuple[str | None, list]:
@@ -251,9 +275,20 @@ def main() -> None:
         emit("bake", frac, f"Baking {map_name.replace('_', ' ')}…")
 
         # Either way, a channel whose source is a constant bakes to a flat map,
-        # which is strictly worse than the scalar it came from — report it.
+        # which is strictly worse than the scalar it came from — report it. Base
+        # colour is exempt: a constant there is still the colour the mesh should
+        # have, and the paint canvas has no other route to receive it.
         if rewire_input:
-            if not rewire_to_emit(high_objects, rewire_input):
+            rewired, driven = rewire_to_emit(high_objects, rewire_input)
+            if not rewired:
+                if map_name != "base_color":
+                    flat_channels.append(map_name)
+                else:
+                    # Nothing to rewire, so EMIT would bake black. DIFFUSE is the
+                    # only pass that reads an arbitrary shader: it loses metallic
+                    # surfaces, but a dark map beats an empty one.
+                    pass_type = "DIFFUSE"
+            elif not driven and map_name != "base_color":
                 flat_channels.append(map_name)
         elif map_name in PROBE_INPUTS:
             if not principled_input_is_linked(high_objects, PROBE_INPUTS[map_name]):
@@ -277,7 +312,8 @@ def main() -> None:
 
         bake_kwargs = {"type": pass_type, "use_clear": True}
         if pass_type == "DIFFUSE":
-            # Without this the transfer bakes lighting into the albedo.
+            # Only the base-colour fallback above reaches this. Without the filter
+            # the transfer would bake lighting into the albedo too.
             bake_kwargs["pass_filter"] = {"COLOR"}
 
         try:

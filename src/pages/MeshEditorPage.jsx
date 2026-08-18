@@ -5131,19 +5131,36 @@ export default function MeshEditorPage() {
       new THREE.TextureLoader().load(url, resolve, undefined, reject)
     })
 
-    // Assign to every material on the display root, and remember it so the export
-    // paths can reattach it to whatever material they build.
-    const assign = (slot, texture, tweak = null) => {
-      appliedMapsRef.current[slot] = texture
-      texturableMesh?.root?.traverse(child => {
+    const loadImage = url => new Promise((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => resolve(image)
+      image.onerror = reject
+      image.src = url
+    })
+
+    // Applying the base colour can REPLACE the texturable mesh (see below), so the
+    // root the material channels attach to is read from here rather than captured.
+    let target = texturableMesh
+
+    const forEachTargetMaterial = (fn) => {
+      target?.root?.traverse(child => {
         if (!child.isMesh) return
         const materials = Array.isArray(child.material) ? child.material : [child.material]
         materials.forEach(material => {
           if (!material) return
-          material[slot] = texture
-          tweak?.(material)
+          fn(material)
           material.needsUpdate = true
         })
+      })
+    }
+
+    // Assign to every material on the display root, and remember it so the export
+    // paths can reattach it to whatever material they build.
+    const assign = (slot, texture, tweak = null) => {
+      appliedMapsRef.current[slot] = texture
+      forEachTargetMaterial(material => {
+        material[slot] = texture
+        tweak?.(material)
       })
     }
 
@@ -5157,6 +5174,67 @@ export default function MeshEditorPage() {
     }
 
     try {
+      // Base colour goes first: when the bake is finer than the paint canvas the
+      // canvas has to grow, which rebuilds the texturable mesh — and anything
+      // attached to the old root before that would be thrown away with it. The
+      // canvas defaults to 1024 while the bake defaults to 2048, so this used to
+      // discard three quarters of the pixels the bake had just spent minutes on,
+      // while normal/ORM (which attach as textures, not through the canvas) kept
+      // their full resolution.
+      //
+      // Growing it is only safe because entering any non-painting mode flattens
+      // and clears the paint layers, so there are no layer canvases at the old
+      // size left to reconcile.
+      if (maps.base_color && target?.textureCanvas) {
+        const image = await loadImage(maps.base_color.url)
+        const canvas = target.textureCanvas
+
+        if (image.width > canvas.width || image.height > canvas.height) {
+          const grown = document.createElement('canvas')
+          grown.width = image.width
+          grown.height = image.height
+          grown.getContext('2d').drawImage(image, 0, 0)
+          const { object } = buildTexturedMeshObject({
+            root: target.root,
+            textureKey: target.textureKey,
+            textureCanvas: grown,
+            textureConfig: target.textureConfig,
+          })
+          const loaded = await loadTexturableMeshFromRoot(object, {
+            url: modelUrl,
+            blankTextureSize: image.width,
+          })
+          if (loaded?.textureCanvas) {
+            target = {
+              ...loaded,
+              maskCanvas: Object.assign(document.createElement('canvas'), {
+                width: loaded.textureCanvas.width,
+                height: loaded.textureCanvas.height,
+              }),
+            }
+            applied.push(`base colour at ${image.width}px`)
+          }
+        }
+
+        // Same size as the canvas, or the rebuild above did not take: draw into the
+        // canvas we already have.
+        if (target === texturableMesh) {
+          const context = canvas.getContext('2d')
+          context.save()
+          context.globalCompositeOperation = 'source-over'
+          context.drawImage(image, 0, 0, canvas.width, canvas.height)
+          context.restore()
+          updateCanvasTexture(displayTextureRef.current)
+          applied.push('base colour')
+        }
+
+        // The bake reads Base Color *after* the source's baseColorFactor, so the
+        // factor is already in these pixels — a tint left on the target material
+        // would apply it a second time. (The export path resets it for exactly
+        // this reason; see applyBakedMapsToMaterial in utils/meshExport.js.)
+        forEachTargetMaterial(material => material.color?.setRGB?.(1, 1, 1))
+      }
+
       if (maps.normal) {
         assign('normalMap', await prepare(maps.normal.url))
         applied.push('normal')
@@ -5189,26 +5267,15 @@ export default function MeshEditorPage() {
         }
       }
 
-      if (maps.base_color && texturableMesh?.textureCanvas) {
-        const image = await new Promise((resolve, reject) => {
-          const img = new Image()
-          img.onload = () => resolve(img)
-          img.onerror = reject
-          img.src = maps.base_color.url
-        })
-        const canvas = texturableMesh.textureCanvas
-        const context = canvas.getContext('2d')
-        context.save()
-        context.globalCompositeOperation = 'source-over'
-        context.drawImage(image, 0, 0, canvas.width, canvas.height)
-        context.restore()
-        updateCanvasTexture(displayTextureRef.current)
-        setTextureRevision(rev => rev + 1)
-        applied.push('base colour')
-      }
-
       // Remount the textured display so the new material channels take effect.
-      setTextureRevision(rev => rev + 1)
+      // Swapping the texturable mesh does that on its own (the effect watching it
+      // rebuilds the display texture and bumps the revision), and it also rebuilds
+      // the paint targets for the new canvas size.
+      if (target !== texturableMesh) {
+        setTexturableMesh(target)
+      } else {
+        setTextureRevision(rev => rev + 1)
+      }
       setFeedback(applied.length
         ? `Applied ${applied.join(' + ')} to the mesh.`
         : 'Nothing to apply.')
@@ -5216,7 +5283,7 @@ export default function MeshEditorPage() {
       console.error('Applying baked maps failed:', err)
       setError(err?.message || 'Could not apply the baked maps.')
     }
-  }, [bakedMaps, texturableMesh])
+  }, [bakedMaps, texturableMesh, modelUrl])
 
   // ── LOD chain ────────────────────────────────────────────────────────────
   const lodRatios = useMemo(() => defaultLodRatios(lodLevels), [lodLevels])
@@ -5511,7 +5578,9 @@ export default function MeshEditorPage() {
       return object
     }
 
-    const material = new THREE.MeshStandardMaterial({ color: '#cfd8ff', metalness: 0.08, roughness: 0.62 })
+    // White rather than the viewport placeholder tint — this becomes
+    // baseColorFactor in the exported file and would multiply the real colour.
+    const material = new THREE.MeshStandardMaterial({ color: '#ffffff', metalness: 0.08, roughness: 0.62 })
     // Carry any baked maps onto the fallback material too. The textured path gets
     // them for free (they live on the root's cloned materials); this branch builds
     // a material from scratch and would otherwise drop them.

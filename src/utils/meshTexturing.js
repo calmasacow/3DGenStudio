@@ -696,6 +696,14 @@ export async function loadTexturableMeshFromRoot(root, { url = '', startedAt: ex
       getMaterialList(child.material).forEach(material => {
         if (material) {
           material.map = placeholderTexture
+          // From here on the canvas IS the colour, so the material's own tint would
+          // multiply over everything painted, projected or baked into it — and ride
+          // out to every export as baseColorFactor. The placeholder colours exist
+          // to stop an untextured mesh reading as flat white; the moment a canvas is
+          // attached they are simply wrong. (A retopo'd mesh used to export
+          // baseColorFactor [0.624, 0.687, 1] — its albedo 20% down and blue-shifted
+          // in every renderer.)
+          material.color?.setRGB?.(1, 1, 1)
           material.needsUpdate = true
         }
       })
