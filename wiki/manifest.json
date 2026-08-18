@@ -273,11 +273,11 @@
     {
       "id": 31,
       "parentId": 12,
-      "title": "Optimize",
+      "title": "Optimize / LOD",
       "icon": "description",
       "position": 6,
       "createdAt": 1783518027458,
-      "updatedAt": 1783518036189
+      "updatedAt": 1787038698160
     },
     {
       "id": 32,
@@ -359,6 +359,24 @@
       "position": 3,
       "createdAt": 1786120745641,
       "updatedAt": 1786121288704
+    },
+    {
+      "id": 41,
+      "parentId": 12,
+      "title": "Bake",
+      "icon": "description",
+      "position": 8,
+      "createdAt": 1787038731678,
+      "updatedAt": 1787038741412
+    },
+    {
+      "id": 42,
+      "parentId": 12,
+      "title": "Game-Ready",
+      "icon": "description",
+      "position": 9,
+      "createdAt": 1787038770610,
+      "updatedAt": 1787038780405
     }
   ]
 }
