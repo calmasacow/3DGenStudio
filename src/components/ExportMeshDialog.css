@@ -11,16 +11,24 @@
 }
 
 .export-mesh {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   max-width: 460px;
+  /* Never taller than the overlay's content box, so the actions row below the
+     body is always on screen — the LOD bake options alone can outgrow a laptop
+     viewport. */
+  max-height: 100%;
   background: var(--surface-container-low);
   border: 1px solid rgba(143, 245, 255, 0.08);
   border-radius: var(--radius-xl);
   box-shadow: 0 32px 64px rgba(0, 0, 0, 0.45);
   overflow: hidden;
+  transition: max-width var(--transition-base);
 }
 
 .export-mesh__header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -55,10 +63,29 @@
 }
 
 .export-mesh__body {
+  flex: 1 1 auto;
+  min-height: 0; /* let the flex item shrink so overflow-y actually engages */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   padding: 1.25rem;
+}
+
+/* One column by default; two once the extras are expanded (see --wide below).
+   Progress and the result messages stay outside this grid, full width. */
+.export-mesh__columns {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+}
+
+.export-mesh__column {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
 }
 
 .export-mesh__field {
@@ -278,6 +305,7 @@
 .export-mesh__finding--pass { border-left-color: #9cffce; }
 
 .export-mesh__actions {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -325,4 +353,47 @@
 .export-mesh__btn--primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* The LOD bake's map checkboxes. A wrapping row rather than five stacked ones —
+   the dialog is tall enough already. */
+.export-mesh__map-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.85rem;
+}
+
+.export-mesh__map-row .export-mesh__check {
+  font-size: 0.78rem;
+  color: var(--on-surface-variant);
+}
+
+.export-mesh__input--inline {
+  height: 32px;
+  width: 4.5rem;
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+}
+
+/* Expanding the LOD chain (with its bake options) or the collision method makes
+   the extras taller than any viewport on their own, so they move beside the
+   fields rather than under them. Collapsed, the dialog stays narrow — it is a
+   four-field form and should not look like a settings page. Gated on viewport
+   width so a small window just scrolls instead. */
+@media (min-width: 900px) {
+  .export-mesh--wide {
+    max-width: 880px;
+  }
+
+  .export-mesh--wide .export-mesh__columns {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+
+  /* The rule above the extras separated them from the fields they sat under.
+     Side by side, the column gap does that job. */
+  .export-mesh--wide .export-mesh__extras {
+    padding-top: 0;
+    border-top: none;
+  }
 }

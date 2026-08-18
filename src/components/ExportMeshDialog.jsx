@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import FolderBrowserDialog from './FolderBrowserDialog'
 import {
   EXPORT_FORMATS,
+  attachBakedMaps,
   browseFolders,
   exportObject3D,
   isGlbUrl,
@@ -9,13 +10,17 @@ import {
   loadObject3DFromUrl,
   lodFileName,
   mergeCollisionForUnreal,
+  object3DHasUvs,
   sanitizeBaseName,
   writeExportedFiles
 } from '../utils/meshExport'
 import {
+  BAKE_MAP_LABELS,
   COLLISION_METHOD_OPTIONS,
+  DEFAULT_BAKE_OPTIONS,
   DEFAULT_COLLISION_OPTIONS,
   DEFAULT_INSPECT_OPTIONS,
+  bakeMaps,
   convertMesh,
   defaultLodRatios,
   ensureDesktopService,
@@ -26,6 +31,19 @@ import {
 import './ExportMeshDialog.css'
 
 const LAST_OUTPUT_FOLDER_KEY = 'exportMeshDialog:lastOutputFolder'
+
+// Bake request order. 'orm' is never requested — the service packs it from
+// ao/roughness/metallic — but it does come back in the result.
+const LOD_BAKE_MAPS = ['normal', 'ao', 'base_color', 'roughness', 'metallic']
+
+// Bake resolution for one level. Halving per level is what an engine wants
+// anyway (LOD3 covers a fraction of LOD1's pixels), and it is what keeps a
+// five-level chain from costing five full-resolution Blender bakes. Floors at
+// 512 so the deepest level still has somewhere for a normal map to live.
+function lodBakeResolution(base, level, falloff) {
+  if (!falloff) return base
+  return Math.max(512, Math.round(base / 2 ** Math.max(0, level - 1)))
+}
 
 // Reusable export popup. Provide either `getObject3D` (an async function that
 // returns the in-memory THREE.Object3D to export) or `meshUrl` (a mesh URL the
@@ -49,6 +67,14 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   // exports do not need them.
   const [lodEnabled, setLodEnabled] = useState(false)
   const [lodLevels, setLodLevels] = useState(4)
+  // Re-bake the original's textures onto each simplified level. Off by default:
+  // it is the single most expensive thing this dialog can do (one headless
+  // Blender bake per level, serialized by the service).
+  const [bakeEnabled, setBakeEnabled] = useState(false)
+  const [bakeMapNames, setBakeMapNames] = useState(['normal', 'ao', 'base_color'])
+  const [bakeResolution, setBakeResolution] = useState(2048)
+  const [bakeSamples, setBakeSamples] = useState(DEFAULT_BAKE_OPTIONS.samples)
+  const [bakeFalloff, setBakeFalloff] = useState(true)
   const [collisionEnabled, setCollisionEnabled] = useState(false)
   const [collisionMethod, setCollisionMethod] = useState(DEFAULT_COLLISION_OPTIONS.method)
   const [checking, setChecking] = useState(false)
@@ -60,6 +86,9 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   // Unreal is the one target that wants collision *inside* the render mesh file,
   // under its UCX naming convention. Everywhere else it ships as its own file.
   const embedsCollision = collisionEnabled && selectedFormat.preset === 'unreal'
+  // The extras only outgrow a single column once one of them is expanded (or a
+  // check report is on screen); until then the dialog stays a narrow form.
+  const wideLayout = lodEnabled || collisionEnabled || !!report
 
   // Recall the last folder used, but drop it silently if it no longer exists.
   useEffect(() => {
@@ -172,18 +201,76 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
         lods = await generateLods(sourceGlb, {
           ratios: lodRatios,
           fileName: `${base}.glb`,
-          onProgress: evt => setProgress({ frac: 0.12 + 0.2 * (evt.frac ?? 0), message: evt.message }),
+          onProgress: evt => setProgress({ frac: 0.12 + 0.1 * (evt.frac ?? 0), message: evt.message }),
         })
+      }
+
+      // Levels that were actually simplified. LOD0 is `passthrough` — the source
+      // bytes, textures included — so it never needs a bake and never gets one.
+      const reduced = lods.filter(lod => !lod.passthrough)
+
+      // ── Re-bake the original's textures onto each level ────────────────────
+      // Simplification moves vertices and can weld UV seams, so the source
+      // texture stops landing where it did and the level looks smeared. Baking
+      // from the original mesh onto the simplified UVs is the fix.
+      if (bakeEnabled && reduced.length && bakeMapNames.length) {
+        const span = 0.28 / reduced.length
+        for (let index = 0; index < reduced.length; index += 1) {
+          const lod = reduced[index]
+          const resolution = lodBakeResolution(bakeResolution, lod.level, bakeFalloff)
+          const levelBase = lodFileName(base, lod.level)
+          const at = 0.22 + span * index
+          setProgress({
+            frac: at,
+            message: `Baking LOD${lod.level} textures at ${resolution}px (${index + 1}/${reduced.length})…`,
+          })
+          try {
+            // Load first so a UV-less mesh is caught before a multi-minute bake,
+            // and so the scene the maps attach to is the one already in hand.
+            const scene = await loadGlbBlob(lod.blob)
+            if (!object3DHasUvs(scene)) {
+              notes.push('texture bake skipped — the mesh has no UVs to bake onto')
+              break
+            }
+            const { maps, stats } = await bakeMaps(lod.blob, sourceGlb, {
+              options: {
+                ...DEFAULT_BAKE_OPTIONS,
+                maps: bakeMapNames,
+                resolution,
+                samples: bakeSamples,
+              },
+              fileName: `${levelBase}.glb`,
+              sourceName: `${base}.glb`,
+              onProgress: evt => setProgress({
+                frac: at + span * (evt.frac ?? 0),
+                message: `Baking LOD${lod.level} (${index + 1}/${reduced.length}) — ${evt.message || 'working…'}`,
+              }),
+            })
+            await attachBakedMaps(scene, maps, { ormChannels: stats?.orm_channels || [] })
+            const baked = await exportObject3D(scene, { format: 'glb', baseName: levelBase })
+            lod.blob = baked[0].blob
+            lod.baked = true
+          } catch (bakeError) {
+            // A failed bake must not cost the export. The level still ships — it
+            // just keeps the textures simplification left it with.
+            console.error(`Baking LOD${lod.level} failed:`, bakeError)
+            notes.push(`LOD${lod.level} bake failed (${bakeError.message || 'unknown error'}), so that level keeps its simplified textures`)
+          }
+        }
+        const bakedCount = reduced.filter(lod => lod.baked).length
+        if (bakedCount) {
+          notes.push(`${bakedCount} level${bakedCount === 1 ? '' : 's'} re-baked from the original`)
+        }
       }
 
       let collisionGlb = null
       if (collisionEnabled) {
-        setProgress({ frac: 0.35, message: 'Generating collision hulls…' })
+        setProgress({ frac: 0.5, message: 'Generating collision hulls…' })
         const { blob, stats } = await generateCollision(sourceGlb, {
           options: { ...DEFAULT_COLLISION_OPTIONS, method: collisionMethod },
           fileName: `${base}.glb`,
           onProgress: evt => setProgress({
-            frac: 0.35 + 0.15 * (evt.frac ?? 0),
+            frac: 0.5 + 0.12 * (evt.frac ?? 0),
             message: evt.message || 'Generating collision hulls…',
           }),
         })
@@ -196,13 +283,13 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
       }
 
       // ── Primary file (LOD0) ────────────────────────────────────────────────
-      setProgress({ frac: 0.55, message: 'Exporting the mesh…' })
+      setProgress({ frac: 0.62, message: 'Exporting the mesh…' })
       if (embedsCollision) {
         // Unreal: the hulls have to travel inside the render mesh, so the primary
         // file is rebuilt from a merged GLB rather than the untouched source.
         const merged = await mergeCollisionForUnreal(sourceGlb, collisionGlb, primaryBase)
         files.push(...await filesFromGlb(merged.blob, primaryBase, evt => setProgress({
-          frac: 0.55 + 0.25 * (evt.frac ?? 0),
+          frac: 0.62 + 0.23 * (evt.frac ?? 0),
           message: evt.message || 'Converting to FBX…',
         })))
         notes.push(`${merged.hullCount} UCX collision node${merged.hullCount === 1 ? '' : 's'} embedded`)
@@ -221,7 +308,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
           options: { preset: selectedFormat.preset },
           fileName: `${primaryBase}.glb`,
           onProgress: evt => setProgress({
-            frac: 0.55 + 0.25 * (evt.frac ?? 0),
+            frac: 0.62 + 0.23 * (evt.frac ?? 0),
             message: evt.message || 'Converting to FBX…',
           }),
         })
@@ -234,12 +321,11 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
       }
 
       // ── Remaining LOD levels ───────────────────────────────────────────────
-      const reduced = lods.filter(lod => !lod.passthrough)
       for (let index = 0; index < reduced.length; index += 1) {
         const lod = reduced[index]
-        const span = 0.12 / Math.max(1, reduced.length)
+        const span = 0.1 / Math.max(1, reduced.length)
         setProgress({
-          frac: 0.8 + span * index,
+          frac: 0.85 + span * index,
           message: `Exporting LOD${lod.level} (${lod.triangles ? lod.triangles.toLocaleString() : '…'} triangles)…`,
         })
         files.push(...await filesFromGlb(lod.blob, lodFileName(base, lod.level)))
@@ -258,7 +344,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
 
       // ── Standalone collision file ──────────────────────────────────────────
       if (collisionEnabled && !embedsCollision) {
-        setProgress({ frac: 0.93, message: 'Exporting collision hulls…' })
+        setProgress({ frac: 0.96, message: 'Exporting collision hulls…' })
         files.push(...await filesFromGlb(collisionGlb, `${base}_collision`))
       }
 
@@ -279,7 +365,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   return (
     <div className="export-mesh-overlay" role="presentation" onClick={onClose}>
       <div
-        className="export-mesh"
+        className={`export-mesh${wideLayout ? ' export-mesh--wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label="Export mesh"
@@ -293,156 +379,235 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
         </div>
 
         <div className="export-mesh__body">
-          <label className="export-mesh__field">
-            <span className="export-mesh__label">Format</span>
-            <select
-              className="export-mesh__select"
-              value={format}
-              onChange={event => { setFormat(event.target.value); setSuccess('') }}
-            >
-              {formats.map(entry => (
-                <option key={entry.value} value={entry.value}>{entry.label}</option>
-              ))}
-            </select>
-          </label>
+          <div className="export-mesh__columns">
+            <div className="export-mesh__column">
+              <label className="export-mesh__field">
+                <span className="export-mesh__label">Format</span>
+                <select
+                  className="export-mesh__select"
+                  value={format}
+                  onChange={event => { setFormat(event.target.value); setSuccess('') }}
+                >
+                  {formats.map(entry => (
+                    <option key={entry.value} value={entry.value}>{entry.label}</option>
+                  ))}
+                </select>
+              </label>
 
-          <label className="export-mesh__field">
-            <span className="export-mesh__label">File name</span>
-            <div className="export-mesh__filename-row">
-              <input
-                className="export-mesh__input"
-                value={fileName}
-                onChange={event => setFileName(event.target.value)}
-                spellCheck={false}
-              />
-              <span className="export-mesh__ext">.{selectedFormat.extension}</span>
-            </div>
-          </label>
+              <label className="export-mesh__field">
+                <span className="export-mesh__label">File name</span>
+                <div className="export-mesh__filename-row">
+                  <input
+                    className="export-mesh__input"
+                    value={fileName}
+                    onChange={event => setFileName(event.target.value)}
+                    spellCheck={false}
+                  />
+                  <span className="export-mesh__ext">.{selectedFormat.extension}</span>
+                </div>
+              </label>
 
-          <label className="export-mesh__field">
-            <span className="export-mesh__label">Output folder</span>
-            <div className="export-mesh__folder-row">
-              <input
-                className="export-mesh__input"
-                value={outputFolder}
-                onChange={event => setOutputFolder(event.target.value)}
-                placeholder="Choose a folder to export to"
-                spellCheck={false}
-              />
-              <button
-                type="button"
-                className="export-mesh__browse"
-                onClick={() => setShowFolderBrowser(true)}
-              >
-                <span className="material-symbols-outlined">folder_open</span>
-                Browse
-              </button>
-            </div>
-          </label>
-
-          {selectedFormat.hint && (
-            <p className="export-mesh__hint">{selectedFormat.hint}</p>
-          )}
-
-          <div className="export-mesh__extras">
-            <label className="export-mesh__check">
-              <input
-                type="checkbox"
-                checked={lodEnabled}
-                onChange={event => { setLodEnabled(event.target.checked); setSuccess('') }}
-              />
-              <span>Generate LOD chain</span>
-            </label>
-            {lodEnabled && (
-              <div className="export-mesh__extra-body">
-                <label className="export-mesh__inline-field">
-                  <span>Levels</span>
-                  <select
-                    className="export-mesh__select export-mesh__select--inline"
-                    value={String(lodLevels)}
-                    onChange={event => setLodLevels(Number(event.target.value))}
+              <label className="export-mesh__field">
+                <span className="export-mesh__label">Output folder</span>
+                <div className="export-mesh__folder-row">
+                  <input
+                    className="export-mesh__input"
+                    value={outputFolder}
+                    onChange={event => setOutputFolder(event.target.value)}
+                    placeholder="Choose a folder to export to"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="export-mesh__browse"
+                    onClick={() => setShowFolderBrowser(true)}
                   >
-                    {[2, 3, 4, 5, 6].map(n => <option key={n} value={String(n)}>{n}</option>)}
-                  </select>
-                </label>
-                <p className="export-mesh__hint">
-                  Writes {lodRatios.map((_, index) => `${sanitizeBaseName(fileName)}_LOD${index}`).join(', ')}
-                  {' '}at {lodRatios.map(r => `${Math.round(r * 100)}%`).join(' / ')} of the source triangle count.
-                  Each level is simplified from the original, not from the level above it.
-                </p>
-              </div>
-            )}
+                    <span className="material-symbols-outlined">folder_open</span>
+                    Browse
+                  </button>
+                </div>
+              </label>
 
-            <label className="export-mesh__check">
-              <input
-                type="checkbox"
-                checked={collisionEnabled}
-                onChange={event => { setCollisionEnabled(event.target.checked); setSuccess('') }}
-              />
-              <span>Generate collision mesh</span>
-            </label>
-            {collisionEnabled && (
-              <div className="export-mesh__extra-body">
-                <label className="export-mesh__inline-field">
-                  <span>Method</span>
-                  <select
-                    className="export-mesh__select export-mesh__select--inline"
-                    value={collisionMethod}
-                    onChange={event => setCollisionMethod(event.target.value)}
-                  >
-                    {COLLISION_METHOD_OPTIONS.map(option => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <p className="export-mesh__hint">
-                  {embedsCollision
-                    ? `Hulls are embedded in the FBX as UCX_${sanitizeBaseName(fileName)}_01… nodes, which Unreal picks up automatically on import.`
-                    : `Written as a separate ${sanitizeBaseName(fileName)}_collision file. In Unity, add it under a Mesh Collider with Convex enabled.`}
-                </p>
-              </div>
-            )}
-
-            <div className="export-mesh__check-row">
-              <button
-                type="button"
-                className="export-mesh__btn export-mesh__btn--secondary"
-                onClick={handleCheck}
-                disabled={checking || exporting}
-                title="Analyze this mesh against engine-readiness budgets before exporting"
-              >
-                {checking ? 'Checking…' : 'Run Game-Ready check'}
-              </button>
-              {report && (
-                <span className={`export-mesh__verdict export-mesh__verdict--${
-                  report.summary.fail ? 'fail' : report.summary.warn ? 'warn' : 'pass'
-                }`}>
-                  {report.summary.fail
-                    ? `${report.summary.fail} blocking issue${report.summary.fail === 1 ? '' : 's'}`
-                    : report.summary.warn
-                      ? `${report.summary.warn} warning${report.summary.warn === 1 ? '' : 's'}`
-                      : 'Game-ready'}
-                </span>
+              {selectedFormat.hint && (
+                <p className="export-mesh__hint">{selectedFormat.hint}</p>
               )}
             </div>
 
-            {report && (
-              <ul className="export-mesh__findings">
-                {report.checks
-                  .filter(check => check.status === 'fail' || check.status === 'warn')
-                  .map(check => (
-                    <li key={check.id} className={`export-mesh__finding export-mesh__finding--${check.status}`}>
-                      <strong>{check.label}:</strong> {check.value}
-                      {check.detail ? ` — ${check.detail}` : ''}
-                    </li>
-                  ))}
-                {!report.summary.fail && !report.summary.warn && (
-                  <li className="export-mesh__finding export-mesh__finding--pass">
-                    Everything passed — nothing to fix before importing.
-                  </li>
+            <div className="export-mesh__column">
+              <div className="export-mesh__extras">
+                <label className="export-mesh__check">
+                  <input
+                    type="checkbox"
+                    checked={lodEnabled}
+                    onChange={event => { setLodEnabled(event.target.checked); setSuccess('') }}
+                  />
+                  <span>Generate LOD chain</span>
+                </label>
+                {lodEnabled && (
+                  <div className="export-mesh__extra-body">
+                    <label className="export-mesh__inline-field">
+                      <span>Levels</span>
+                      <select
+                        className="export-mesh__select export-mesh__select--inline"
+                        value={String(lodLevels)}
+                        onChange={event => setLodLevels(Number(event.target.value))}
+                      >
+                        {[2, 3, 4, 5, 6].map(n => <option key={n} value={String(n)}>{n}</option>)}
+                      </select>
+                    </label>
+                    <p className="export-mesh__hint">
+                      Writes {lodRatios.map((_, index) => `${sanitizeBaseName(fileName)}_LOD${index}`).join(', ')}
+                      {' '}at {lodRatios.map(r => `${Math.round(r * 100)}%`).join(' / ')} of the source triangle count.
+                      Each level is simplified from the original, not from the level above it.
+                    </p>
+
+                    <label className="export-mesh__check">
+                      <input
+                        type="checkbox"
+                        checked={bakeEnabled}
+                        onChange={event => { setBakeEnabled(event.target.checked); setSuccess('') }}
+                      />
+                      <span>Bake textures from the original</span>
+                    </label>
+                    {bakeEnabled && (
+                      <div className="export-mesh__extra-body">
+                        <div className="export-mesh__map-row">
+                          {LOD_BAKE_MAPS.map(name => (
+                            <label className="export-mesh__check" key={name}>
+                              <input
+                                type="checkbox"
+                                checked={bakeMapNames.includes(name)}
+                                onChange={event => setBakeMapNames(event.target.checked
+                                  // Keep the service's request order rather than click order.
+                                  ? LOD_BAKE_MAPS.filter(entry => entry === name || bakeMapNames.includes(entry))
+                                  : bakeMapNames.filter(entry => entry !== name))}
+                              />
+                              <span>{BAKE_MAP_LABELS[name] || name}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <label className="export-mesh__inline-field">
+                          <span>Resolution</span>
+                          <select
+                            className="export-mesh__select export-mesh__select--inline"
+                            value={String(bakeResolution)}
+                            onChange={event => setBakeResolution(Number(event.target.value))}
+                          >
+                            {[512, 1024, 2048, 4096].map(n => (
+                              <option key={n} value={String(n)}>{n} × {n}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="export-mesh__inline-field">
+                          <span>Samples</span>
+                          <input
+                            className="export-mesh__input export-mesh__input--inline"
+                            type="number"
+                            min={1}
+                            max={512}
+                            step={1}
+                            value={bakeSamples}
+                            onChange={event => setBakeSamples(Math.min(512, Math.max(1, Number(event.target.value) || 1)))}
+                          />
+                          <span className="export-mesh__hint">Only the AO pass needs more than a few</span>
+                        </label>
+                        <label className="export-mesh__check">
+                          <input
+                            type="checkbox"
+                            checked={bakeFalloff}
+                            onChange={event => setBakeFalloff(event.target.checked)}
+                          />
+                          <span>Halve the resolution each level</span>
+                        </label>
+                        <p className="export-mesh__hint">
+                          Bakes {bakeMapNames.length ? bakeMapNames.map(name => BAKE_MAP_LABELS[name] || name).join(', ') : 'nothing'}
+                          {' '}from the unsimplified mesh onto each level&apos;s own UVs, at{' '}
+                          {lodRatios.slice(1).map((_, index) => `${lodBakeResolution(bakeResolution, index + 1, bakeFalloff)}px`).join(' / ')}.
+                          LOD0 is untouched, so it keeps the original textures. This is what fixes
+                          the smearing you get when a simplified mesh reuses the original texture —
+                          levels whose UV seams had to be welded need it most.
+                        </p>
+                        <p className="export-mesh__hint">
+                          Runs headless Blender on the Mesh Tools service, one level at a time — a
+                          high-resolution AO bake against a dense mesh takes minutes per level.
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 )}
-              </ul>
-            )}
+
+                <label className="export-mesh__check">
+                  <input
+                    type="checkbox"
+                    checked={collisionEnabled}
+                    onChange={event => { setCollisionEnabled(event.target.checked); setSuccess('') }}
+                  />
+                  <span>Generate collision mesh</span>
+                </label>
+                {collisionEnabled && (
+                  <div className="export-mesh__extra-body">
+                    <label className="export-mesh__inline-field">
+                      <span>Method</span>
+                      <select
+                        className="export-mesh__select export-mesh__select--inline"
+                        value={collisionMethod}
+                        onChange={event => setCollisionMethod(event.target.value)}
+                      >
+                        {COLLISION_METHOD_OPTIONS.map(option => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <p className="export-mesh__hint">
+                      {embedsCollision
+                        ? `Hulls are embedded in the FBX as UCX_${sanitizeBaseName(fileName)}_01… nodes, which Unreal picks up automatically on import.`
+                        : `Written as a separate ${sanitizeBaseName(fileName)}_collision file. In Unity, add it under a Mesh Collider with Convex enabled.`}
+                    </p>
+                  </div>
+                )}
+
+                <div className="export-mesh__check-row">
+                  <button
+                    type="button"
+                    className="export-mesh__btn export-mesh__btn--secondary"
+                    onClick={handleCheck}
+                    disabled={checking || exporting}
+                    title="Analyze this mesh against engine-readiness budgets before exporting"
+                  >
+                    {checking ? 'Checking…' : 'Run Game-Ready check'}
+                  </button>
+                  {report && (
+                    <span className={`export-mesh__verdict export-mesh__verdict--${
+                      report.summary.fail ? 'fail' : report.summary.warn ? 'warn' : 'pass'
+                    }`}>
+                      {report.summary.fail
+                        ? `${report.summary.fail} blocking issue${report.summary.fail === 1 ? '' : 's'}`
+                        : report.summary.warn
+                          ? `${report.summary.warn} warning${report.summary.warn === 1 ? '' : 's'}`
+                          : 'Game-ready'}
+                    </span>
+                  )}
+                </div>
+
+                {report && (
+                  <ul className="export-mesh__findings">
+                    {report.checks
+                      .filter(check => check.status === 'fail' || check.status === 'warn')
+                      .map(check => (
+                        <li key={check.id} className={`export-mesh__finding export-mesh__finding--${check.status}`}>
+                          <strong>{check.label}:</strong> {check.value}
+                          {check.detail ? ` — ${check.detail}` : ''}
+                        </li>
+                      ))}
+                    {!report.summary.fail && !report.summary.warn && (
+                      <li className="export-mesh__finding export-mesh__finding--pass">
+                        Everything passed — nothing to fix before importing.
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            </div>
           </div>
 
           {progress && (

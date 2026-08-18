@@ -438,6 +438,112 @@ export function lodFileName(baseName, level) {
   return `${sanitizeBaseName(baseName)}_LOD${level}`
 }
 
+// Does this object carry the TEXCOORD_0 a bake needs to land on? gltfpack keeps
+// UVs through simplification (-kv), so an LOD level is bakeable whenever its
+// source was — but a UV-less mesh has nowhere for the maps to go, and finding
+// that out after a multi-minute Blender bake is the wrong time.
+export function object3DHasUvs(object) {
+  let found = false
+  object.traverse(child => {
+    if (!found && child.isMesh && child.geometry?.attributes?.uv?.count) {
+      found = true
+    }
+  })
+  return found
+}
+
+// Load one baked PNG into a texture. Data maps stay in NoColorSpace (they encode
+// values, not colour) and only base colour is sRGB; flipY is false throughout to
+// match the glTF convention the loader's own textures already use, and channel 0
+// stops aoMap being read from the uv1 three.js otherwise defaults it to.
+function textureFromBlob(blob, srgb) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    new THREE.TextureLoader().load(
+      url,
+      texture => {
+        URL.revokeObjectURL(url)
+        texture.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace
+        texture.flipY = false
+        texture.channel = 0
+        texture.needsUpdate = true
+        resolve(texture)
+      },
+      undefined,
+      error => {
+        URL.revokeObjectURL(url)
+        reject(error instanceof Error ? error : new Error('Could not read a baked texture.'))
+      },
+    )
+  })
+}
+
+// Attach maps from bakeMaps() to every material on `object`, in place. Returns
+// the channel names applied, for the caller's summary.
+//
+// This is the export-side twin of the mesh editor's "Apply to mesh", with one
+// deliberate difference: base colour becomes material.map here. The editor draws
+// it into its paint canvas because that canvas IS its base colour — an exported
+// LOD has no canvas, so the baked albedo has to become the texture itself.
+export async function attachBakedMaps(object, maps, { ormChannels = [] } = {}) {
+  const applied = []
+
+  const assign = (slot, texture, tweak = null) => {
+    object.traverse(child => {
+      if (!child.isMesh) return
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      materials.forEach(material => {
+        if (!material) return
+        material[slot] = texture
+        tweak?.(material)
+        material.needsUpdate = true
+      })
+    })
+  }
+
+  if (maps.normal) {
+    assign('normalMap', await textureFromBlob(maps.normal, false))
+    applied.push('normal')
+  }
+
+  // Prefer the packed ORM: one texture object across all three slots is the glTF
+  // layout, and it lets GLTFExporter skip recompositing the channels (it early
+  // returns when metalnessMap === roughnessMap).
+  if (maps.orm && ormChannels.length) {
+    const texture = await textureFromBlob(maps.orm, false)
+    if (ormChannels.includes('ao')) assign('aoMap', texture)
+    // A *Map is multiplied by its scalar factor, so a source material carrying
+    // roughness 0.5 would halve every baked value. glTF sets those factors to 1
+    // whenever a texture is present — match it.
+    if (ormChannels.includes('roughness')) assign('roughnessMap', texture, m => { m.roughness = 1 })
+    if (ormChannels.includes('metallic')) assign('metalnessMap', texture, m => { m.metalness = 1 })
+    applied.push(`packed ${ormChannels.join('/')}`)
+  } else {
+    // Fewer than two of ao/roughness/metallic were baked, so no ORM came back.
+    if (maps.ao) {
+      assign('aoMap', await textureFromBlob(maps.ao, false))
+      applied.push('ao')
+    }
+    if (maps.roughness) {
+      assign('roughnessMap', await textureFromBlob(maps.roughness, false), m => { m.roughness = 1 })
+      applied.push('roughness')
+    }
+    if (maps.metallic) {
+      assign('metalnessMap', await textureFromBlob(maps.metallic, false), m => { m.metalness = 1 })
+      applied.push('metallic')
+    }
+  }
+
+  if (maps.base_color) {
+    // The bake already carries the source's base-colour factor, so a tinted
+    // factor left on the material would apply it a second time.
+    assign('map', await textureFromBlob(maps.base_color, true), m => { m.color?.setRGB(1, 1, 1) })
+    applied.push('base colour')
+  }
+
+  return applied
+}
+
 // Merge collision hulls into the render mesh as Unreal-convention UCX nodes.
 //
 // Unreal only recognises collision that ships INSIDE the same file as the render
