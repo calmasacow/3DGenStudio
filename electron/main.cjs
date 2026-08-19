@@ -186,6 +186,11 @@ function startBackend() {
       // Lets the backend serve /api/logs — the desktop shell owns the log
       // directory, so it has to tell the backend where it is.
       GENSTUDIO_LOG_DIR: LOG_DIR,
+      // Lifetime tether: if this main process dies without running `shutdown`
+      // (Task Manager "End task", a crash), the backend polls this pid and exits
+      // on its own. Without it the orphan lives on as a window-less
+      // "3D Gen Studio.exe" and blocks the next install (see build/installer.nsh).
+      GENSTUDIO_PARENT_PID: String(process.pid),
     },
     // 4th fd = IPC channel: lets the headless backend ask the main process to
     // start a Python service on demand (e.g. to render a mesh thumbnail) —
