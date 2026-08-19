@@ -112,7 +112,7 @@ Connect with transport "Streamable HTTP" to `http://localhost:3001/mcp`.
 
 ### Context cost and loading only the groups you need
 
-An MCP client injects the **whole tool catalog into the model's system prompt on every request**, before the model reads your message. All 64 tools cost ~84 KB of JSON plus ~5 KB of server instructions — roughly **25,000 tokens per session**, whether or not a single tool is called. That is why even asking a model "are you connected to 3d-gen-studio?" appears to consume ~25k tokens: the question is ~10 tokens, the connection is the rest.
+An MCP client injects the **whole tool catalog into the model's system prompt on every request**, before the model reads your message. All 64 tools cost ~85 KB of JSON plus ~5 KB of server instructions — roughly **25,000 tokens per session**, whether or not a single tool is called. That is why even asking a model "are you connected to 3d-gen-studio?" appears to consume ~25k tokens: the question is ~10 tokens, the connection is the rest.
 
 Clients that load tool schemas lazily (Claude Code fetches them on demand) pay almost nothing. For clients that load everything eagerly — most local LLM stacks — load only the groups you need, either with the `--tools` flag or the `MCP_TOOLS` environment variable:
 
@@ -142,12 +142,12 @@ Two forms are accepted, comma- or space-separated:
 
 Unset, empty, or `all` loads every group, so nothing changes for an existing config. Unknown names are ignored with a warning on stderr rather than failing. Group names: `projects`, `cards`, `graph`, `workflows`, `actions`, `mesh`, `assets`, `settings`.
 
-| `MCP_TOOLS` | Tools | Catalog | Saved |
+| Selector | Tools | Catalog | Saved |
 |---|---|---|---|
-| *(unset)* / `all` | 64 | ~24,700 tokens | — |
-| `-mesh` | 51 | ~15,500 | 37% |
-| `-mesh,-actions` | 41 | ~10,000 | 60% |
-| `projects,graph,workflows,assets` | 31 | ~8,300 | 67% |
+| *(unset)* / `all` | 64 | ~25,100 tokens | — |
+| `-mesh` | 51 | ~15,900 | 37% |
+| `-mesh,-actions` | 41 | ~10,300 | 59% |
+| `projects,graph,workflows,assets` | 31 | ~8,600 | 66% |
 | `projects,mesh,assets` | 31 | ~13,200 | 47% |
 | `projects,cards,assets` | 25 | ~5,200 | 79% |
 | `projects,settings` | 10 | ~1,800 | 93% |
@@ -157,6 +157,23 @@ The server instructions are assembled to match, so dropping a group also drops i
 Over the HTTP endpoint the same selector is available per request as `POST /mcp?tools=graph,workflows`, or as `settings.mcp.tools` for a persistent default.
 
 The heaviest groups are `mesh` (~8,900 tokens across 13 tools) and `actions` (~5,400 across 10) — both are parameter-dense by design, since each tool documents its full option set with ranges and defaults.
+
+#### Tool *results* cost context too
+
+The catalog is a fixed per-session cost; a tool's **return value** is a per-call cost, and it can be much larger. `list_workflows` is the worst offender: returned in full, a 42-workflow library is ~382 KB / **~106,000 tokens** — more than three times a 32K context, from one call.
+
+It is therefore **tiered**, and defaults to the cheapest tier:
+
+| Call | Returns | Tokens |
+|---|---|---|
+| `list_workflows()` | id, name, parameter/output counts for every workflow | ~1,600 |
+| `list_workflows({name: "BiRefNet"})` | + the parameters and outputs needed to run it | ~380 |
+| `list_workflows({detail: "full"})` | full parameters for the entire library | ~11,800 |
+| `list_workflows({name: …, detail: "inputs"})` | + every candidate node input, for `update_workflow` | ~5,500 |
+
+`name` (a case-insensitive substring) and `workflowId` imply `detail: "full"`, since asking for a specific workflow means you intend to run it. An explicit `detail` always wins.
+
+The 82% that used to dominate the response was `availableInputs` — every literal node input in the graph, which only matters when *reconfiguring* a workflow's parameter selection. That is now behind `detail: "inputs"`. The remaining parameter records are trimmed to the fields a caller actually uses: `id` (what `run_workflow`'s `inputs` keys on), `name`, `valueType`, `defaultValue`, and `enums`. The redundant `nodeId`/`inputKey`/`nodeTitle`/`classType`/`label`/`type` fields are dropped — all are derivable from or duplicated by those.
 
 #### LM Studio
 

@@ -14,6 +14,69 @@ function summarizeWorkflow(workflow) {
   return rest;
 }
 
+// A stored workflow record carries far more than a caller needs, and a whole
+// library of them does not fit in a small model's context — 42 workflows came
+// to ~106k tokens raw. The bulk of that (82%) is availableInputs: every literal
+// node input in the graph, which only matters when RECONFIGURING a workflow.
+// The projections below keep each detail level to what that level is actually
+// for; see the `detail` parameter on list_workflows.
+
+// The fields needed to CALL a parameter through run_workflow. `id` is what
+// `inputs` keys on, `valueType` decides whether a value is an asset id or a
+// literal, and `enums` is the allowed-value list. nodeId/inputKey/nodeTitle/
+// classType/label/type are all derivable from or redundant with these.
+function callableParameter(parameter) {
+  if (!parameter || typeof parameter !== 'object') return parameter;
+  return {
+    id: parameter.id,
+    name: parameter.name,
+    valueType: parameter.valueType ?? parameter.type,
+    defaultValue: parameter.defaultValue,
+    ...(parameter.enums ? { enums: parameter.enums } : {})
+  };
+}
+
+function callableOutput(output) {
+  if (!output || typeof output !== 'object') return output;
+  return { nodeId: output.nodeId, name: output.name, valueType: output.valueType };
+}
+
+// summary — enough to pick a workflow (and to know whether it is worth asking
+// for its parameters). ~24 tokens per workflow instead of ~2,500.
+function workflowSummary(workflow) {
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    parameterCount: Array.isArray(workflow.parameters) ? workflow.parameters.length : 0,
+    outputCount: Array.isArray(workflow.outputs) ? workflow.outputs.length : 0
+  };
+}
+
+// full — everything needed to run it, nothing else.
+function workflowFull(workflow) {
+  return {
+    ...workflowSummary(workflow),
+    parameters: (workflow.parameters || []).map(callableParameter),
+    outputs: (workflow.outputs || []).map(callableOutput)
+  };
+}
+
+// inputs — adds the unconfigured candidates, for choosing a NEW parameter or
+// output selection via update_workflow. Expensive; ask for one workflow.
+function workflowWithCandidates(workflow) {
+  return {
+    ...workflowFull(workflow),
+    availableInputs: workflow.availableInputs || [],
+    availableOutputs: workflow.availableOutputs || []
+  };
+}
+
+const WORKFLOW_PROJECTIONS = {
+  summary: workflowSummary,
+  full: workflowFull,
+  inputs: workflowWithCandidates
+};
+
 async function resolveWorkflowJson({ workflowJson, filePath }) {
   if (workflowJson !== undefined && workflowJson !== null) {
     return typeof workflowJson === 'string' ? JSON.parse(workflowJson) : workflowJson;
@@ -31,11 +94,38 @@ async function resolveWorkflowJson({ workflowJson, filePath }) {
 export function registerWorkflowTools(server, { api, notifyMutation }) {
   server.registerTool('list_workflows', {
     title: 'List ComfyUI workflows',
-    description: 'List the ComfyUI workflows saved in the library, with their configured parameters (inputs the caller can set, each with id/name/valueType/defaultValue, plus enums when the parameter only accepts a fixed list of values) and output nodes.',
+    description: 'List the ComfyUI workflows saved in the library. Returns a compact summary by default (id, name, parameter/output counts) — a full library is far too large to return in detail, so narrow it down first. Pass `name` (or `workflowId`) to get one workflow\'s parameters, which is what run_workflow needs: each parameter has id/name/valueType/defaultValue, plus enums when it only accepts a fixed list of values. Use detail:"inputs" only when reconfiguring a workflow with update_workflow — it adds every candidate node input in the graph and is very large.',
+    inputSchema: {
+      name: z.string().optional().describe('Case-insensitive substring filter on the workflow name. Implies detail:"full" unless detail is set.'),
+      workflowId: z.number().int().optional().describe('Return just this workflow. Implies detail:"full" unless detail is set.'),
+      detail: z.enum(['summary', 'full', 'inputs']).optional()
+        .describe('summary = id/name/counts (default when listing everything); full = + the parameters and outputs needed to run it (default when name/workflowId is given); inputs = + every candidate node input, for update_workflow only.')
+    },
     annotations: { readOnlyHint: true }
-  }, toolHandler(async () => {
-    const workflows = await api.apiJson('GET', '/library/comfy-workflows');
-    return (Array.isArray(workflows) ? workflows : []).map(summarizeWorkflow);
+  }, toolHandler(async ({ name, workflowId, detail } = {}) => {
+    const workflows = (await api.apiJson('GET', '/library/comfy-workflows'))?.filter?.(Boolean) ?? [];
+
+    const needle = name?.trim().toLowerCase();
+    const matched = workflows.filter(workflow => {
+      if (workflowId !== undefined && workflow?.id !== workflowId) return false;
+      if (needle && !String(workflow?.name || '').toLowerCase().includes(needle)) return false;
+      return true;
+    });
+
+    // Asking for a specific workflow means you want to use it, so default to
+    // the detail that lets you — but never override an explicit choice.
+    const level = detail ?? ((needle || workflowId !== undefined) ? 'full' : 'summary');
+    const project = WORKFLOW_PROJECTIONS[level] ?? workflowSummary;
+
+    return {
+      count: matched.length,
+      totalInLibrary: workflows.length,
+      detail: level,
+      ...(level === 'summary' && matched.length > 0
+        ? { hint: 'Summary only — call again with name or workflowId to get a workflow\'s parameters before run_workflow.' }
+        : {}),
+      workflows: matched.map(workflow => project(summarizeWorkflow(workflow)))
+    };
   }));
 
   server.registerTool('inspect_workflow', {

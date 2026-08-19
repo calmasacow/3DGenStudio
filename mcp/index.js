@@ -45,7 +45,7 @@ const TOOL_GROUPS = {
   projects: { register: registerProjectTools, cost: 4035 },
   cards: { register: registerCardTools, cost: 4437 },
   graph: { register: registerGraphTools, cost: 5266 },
-  workflows: { register: registerWorkflowTools, cost: 7973 },
+  workflows: { register: registerWorkflowTools, cost: 8957 },
   actions: { register: registerActionTools, cost: 19385 },
   mesh: { register: registerMeshToolTools, cost: 31972 },
   assets: { register: registerAssetTools, cost: 9307 },
@@ -128,7 +128,7 @@ const INSTRUCTION_BLOCKS = [
   },
   {
     groups: ['workflows'],
-    text: '- ComfyUI: list_workflows for saved workflows and their parameters; import_workflow to add new ones (inspect_workflow first to discover inputs/outputs). run_workflow blocks with progress until the assets are ready. ComfyUI itself must be running (URL in get_settings).'
+    text: '- ComfyUI: list_workflows returns a COMPACT SUMMARY (id, name, parameter counts) — the library is far too large to return in full. Find the one you want, then call list_workflows again with its name (or workflowId) to get the parameters run_workflow needs. Do not ask for detail:"full" across the whole library. import_workflow adds new ones (inspect_workflow first to discover inputs/outputs). run_workflow blocks with progress until the assets are ready. ComfyUI itself must be running (URL in get_settings).'
   },
   {
     groups: ['workflows', 'graph'],
