@@ -45,6 +45,10 @@ files:
   # Read-only log reader mounted by server.js (/api/logs) — the Logs panel is
   # blank-to-broken without it: a missing import kills the whole backend.
   - logs.js
+  # glTF pivot placement behind /api/meshes/pivot. Same rule as logs.js: every
+  # root-level module server.js imports has to be listed here by name, or the
+  # packaged backend dies at startup on ERR_MODULE_NOT_FOUND.
+  - meshPivot.js
   # MCP automation server (POST /mcp on the backend + stdio bridge).
   - mcp/**/*
   - version.json
