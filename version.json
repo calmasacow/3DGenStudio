@@ -1,4 +1,4 @@
 {
-	"version": "2.4.0",
-	"message": "MeshEditor new modes: Game-Ready and Bake - LOD Export"
+	"version": "2.4.1",
+	"message": "Fixed Bake mode (colour too dark) + Fixed installer + Updated MCP"
 }

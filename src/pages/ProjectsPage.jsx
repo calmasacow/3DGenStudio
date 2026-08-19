@@ -27,6 +27,15 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.4.1',
+    date: '2026-08-19',
+    items: [
+			'Bake mode: Fixed colour too dark',
+			'Installer: Fixed process still open',
+			'MCP: Added missing features'
+    ],
+  },
+  {
     version: 'v2.4.0',
     date: '2026-08-18',
     items: [
