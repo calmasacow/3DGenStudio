@@ -47,7 +47,12 @@ export function mountMcp(app, { baseUrl, getSettings, notifyMutation }) {
         });
       }
 
-      const server = buildMcpServer({ baseUrl, notifyMutation });
+      // ?tools=graph,workflows (or ?tools=-mesh) lets a client load only the
+      // groups it needs, so it does not pay ~23k tokens of schema per request
+      // for a catalog it will not use. Falls back to settings.mcp.tools, then
+      // the MCP_TOOLS env var, then every group.
+      const groups = req.query?.tools ?? mcpSettings.tools ?? undefined;
+      const server = buildMcpServer({ baseUrl, notifyMutation, groups });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on('close', () => {
         transport.close();

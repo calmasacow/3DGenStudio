@@ -110,6 +110,61 @@ Connect with transport "Streamable HTTP" to `http://localhost:3001/mcp`.
 | Asset library | `import_library_assets`, `rename_library_asset`, `delete_library_asset` |
 | System | `get_settings` (secrets redacted), `update_settings`, `get_system_stats` |
 
+### Context cost and loading only the groups you need
+
+An MCP client injects the **whole tool catalog into the model's system prompt on every request**, before the model reads your message. All 64 tools cost ~84 KB of JSON plus ~5 KB of server instructions — roughly **25,000 tokens per session**, whether or not a single tool is called. That is why even asking a model "are you connected to 3d-gen-studio?" appears to consume ~25k tokens: the question is ~10 tokens, the connection is the rest.
+
+Clients that load tool schemas lazily (Claude Code fetches them on demand) pay almost nothing. For clients that load everything eagerly — most local LLM stacks — load only the groups you need, either with the `--tools` flag or the `MCP_TOOLS` environment variable:
+
+```jsonc
+{
+  "mcpServers": {
+    "3d-gen-studio": {
+      "command": "node",
+      "args": ["C:/Git/3DGenStudio/mcp/stdio.js", "--tools=projects,graph,workflows,assets"]
+    }
+  }
+}
+```
+
+```jsonc
+// equivalent, for clients that pass env through
+"args": ["C:/Git/3DGenStudio/mcp/stdio.js"],
+"env": { "MCP_TOOLS": "projects,graph,workflows,assets" }
+```
+
+**Prefer `--tools`.** Clients differ in whether they forward `env` to a spawned stdio server, but every client passes `args`. `--tools` wins over `MCP_TOOLS` when both are set.
+
+Two forms are accepted, comma- or space-separated:
+
+- **include** — `projects,graph,workflows` loads exactly those groups
+- **exclude** — `-mesh,-actions` loads everything except those
+
+Unset, empty, or `all` loads every group, so nothing changes for an existing config. Unknown names are ignored with a warning on stderr rather than failing. Group names: `projects`, `cards`, `graph`, `workflows`, `actions`, `mesh`, `assets`, `settings`.
+
+| `MCP_TOOLS` | Tools | Catalog | Saved |
+|---|---|---|---|
+| *(unset)* / `all` | 64 | ~24,700 tokens | — |
+| `-mesh` | 51 | ~15,500 | 37% |
+| `-mesh,-actions` | 41 | ~10,000 | 60% |
+| `projects,graph,workflows,assets` | 31 | ~8,300 | 67% |
+| `projects,mesh,assets` | 31 | ~13,200 | 47% |
+| `projects,cards,assets` | 25 | ~5,200 | 79% |
+| `projects,settings` | 10 | ~1,800 | 93% |
+
+The server instructions are assembled to match, so dropping a group also drops its guidance, and the model is told which groups were left out — it reports them as "not exposed in this session" rather than claiming the app can't do it.
+
+Over the HTTP endpoint the same selector is available per request as `POST /mcp?tools=graph,workflows`, or as `settings.mcp.tools` for a persistent default.
+
+The heaviest groups are `mesh` (~8,900 tokens across 13 tools) and `actions` (~5,400 across 10) — both are parameter-dense by design, since each tool documents its full option set with ranges and defaults.
+
+#### LM Studio
+
+LM Studio follows Cursor's `mcp.json` notation (`~/.lmstudio/mcp.json`) and loads every tool of every enabled server eagerly, so the full catalog lands in each request. It has **no per-tool toggle** — the chips under the chat box switch whole servers on and off — so `--tools` is the only way to trim the catalog. Two things to check when the context bar looks full:
+
+- **Use the `args` form above.** It does not depend on `env` being forwarded.
+- **Raise the model's context length.** LM Studio pins a load-time `contextLength` per model that is often far below what the model supports (its own default is commonly 32,768 against a 256K-capable model). It is in the model's load settings, and costs RAM/VRAM.
+
 ### Displaying results on graph nodes
 
 In graph projects, pass `nodeId` to `run_workflow`, `generate_image`, `edit_image`, or `generate_mesh` to display the results on that node — the first result becomes the node's asset, and additional results become new nodes stacked below it (wired to the same inputs). Without `nodeId` the generated assets are saved to the project but no node displays them.
