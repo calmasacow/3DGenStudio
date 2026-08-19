@@ -128,6 +128,23 @@ FunctionEnd
 ;     "please close it manually", advice that cannot be followed for a process
 ;     with no window. Restarting Windows was the only way out.
 ;
+; WHY ONLY "INSTALL FOR ME" HITS THIS
+; -----------------------------------
+; Reported from the field: the dialog appears for a per-user install but never
+; for an all-users one. That is not a difference in detection - the all-users
+; path never checks at all. With perMachine: false, picking "anyone who uses
+; this computer" makes the installer relaunch itself elevated, and the install
+; section then runs in that inner instance, where the vendor guards the call:
+;
+;   ${ifNot} ${UAC_IsInnerInstance}     ; installSection.nsh
+;     !insertmacro CHECK_APP_RUNNING
+;   ${endif}
+;
+; A per-user install needs no elevation, so it IS the outer instance and the
+; check runs. Worth knowing before chasing a per-user-only detection bug that
+; does not exist - and worth remembering that an all-users install therefore
+; happily writes over a running app.
+;
 ; WHAT CHANGES
 ; ------------
 ;   - the graceful pass gets a real window to finish in (~3 s of polling)
@@ -165,6 +182,8 @@ FunctionEnd
     Push $R1   ; attempt counter
     Push $R2   ; our own pid - never a kill target
     Push $R3   ; scratch for nsExec exit codes
+    Push $R4   ; diagnostic log path
+    Push $R5   ; diagnostic file handle
 
     System::Call 'kernel32::GetCurrentProcessId()i.R2'
     StrCpy $R1 0
@@ -205,6 +224,28 @@ FunctionEnd
         ; per-user Setup runs unelevated, so every attempt returns "Access is
         ; denied". One elevated taskkill fixes that; anything else (a process
         ; wedged in a driver call) needs the manual route below.
+        ; Capture evidence before prompting. The log separates the two causes we
+        ; cannot tell apart from here: a process we are not allowed to kill
+        ; (taskkill says "Access is denied" - elevated, or the USERNAME filter not
+        ; matching) versus one wedged in the kernel (taskkill reports SUCCESS and
+        ; the process is STILL listed afterwards - only a reboot clears that).
+        ; The second taskkill drops the USERNAME filter on purpose: if only that
+        ; one works, the filter is the problem.
+        ;
+        ; Deliberately no PowerShell and no nested quoting - both were tried and
+        ; came back empty, and a diagnostic that only works sometimes is worse
+        ; than none. What Setup already knows is written by NSIS itself.
+        StrCpy $R4 "$TEMP\3DGenStudio-setup-appcheck.log"
+        FileOpen $R5 "$R4" w
+        FileWrite $R5 "== setup ==$\r$\n"
+        FileWrite $R5 "installing to : $INSTDIR$\r$\n"
+        ReadRegStr $R3 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
+        FileWrite $R5 "per-user copy : $R3$\r$\n"
+        ReadRegStr $R3 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
+        FileWrite $R5 "all-users copy: $R3$\r$\n"
+        FileClose $R5
+        nsExec::Exec `"$SYSDIR\cmd.exe" /c (echo == tasklist == & tasklist /v /fi "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" & echo == taskkill, as Setup runs it == & taskkill /f /im "${APP_EXECUTABLE_FILENAME}" /fi "PID ne $R2" /fi "USERNAME eq %USERNAME%" & echo == taskkill, no user filter == & taskkill /f /im "${APP_EXECUTABLE_FILENAME}" /fi "PID ne $R2" & echo == still there? == & tasklist /fi "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}") >> "$R4" 2>&1`
+        Pop $R3
         MessageBox MB_YESNO|MB_ICONEXCLAMATION "${PRODUCT_NAME} is still running and Setup could not close it.$\r$\n$\r$\nThis usually means it was started with administrator rights, while Setup is running as the normal user.$\r$\n$\r$\nTry closing it as administrator? Windows will ask you to confirm." /SD IDNO IDYES tryElevated
         Goto askManual
       tryElevated:
@@ -216,13 +257,15 @@ FunctionEnd
       askManual:
         ; Name the process and the exact command: "close it manually" is useless
         ; advice for something that has no window to close.
-        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} could not be closed automatically.$\r$\n$\r$\nA process named $\"${APP_EXECUTABLE_FILENAME}$\" is still running. It may have no window, so it will not appear under Apps in the Task Manager: look for ${PRODUCT_NAME} under Background processes and end it there, or open a Command Prompt and run$\r$\n$\r$\n    taskkill /f /im $\"${APP_EXECUTABLE_FILENAME}$\"$\r$\n$\r$\nThen click Retry. If it still cannot be closed, restarting Windows always clears it." /SD IDCANCEL IDRETRY +2
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} could not be closed automatically.$\r$\n$\r$\nA process named $\"${APP_EXECUTABLE_FILENAME}$\" is still running. It may have no window, so it will not appear under Apps in the Task Manager: look for ${PRODUCT_NAME} under Background processes and end it there, or open a Command Prompt and run$\r$\n$\r$\n    taskkill /f /im $\"${APP_EXECUTABLE_FILENAME}$\"$\r$\n$\r$\nThen click Retry. If it still cannot be closed, restarting Windows always clears it.$\r$\n$\r$\nDetails for support were written to:$\r$\n$R4" /SD IDCANCEL IDRETRY +2
           Quit
         StrCpy $R1 3              ; Retry: straight back to the force-kill pass
       stuckHandled:
       ${EndIf}
     ${Loop}
 
+    Pop $R5
+    Pop $R4
     Pop $R3
     Pop $R2
     Pop $R1
