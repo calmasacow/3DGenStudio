@@ -264,6 +264,38 @@ FunctionEnd
       ${EndIf}
     ${Loop}
 
+    ; The processes are gone, but Windows releases their file handles slightly
+    ; later, and uninstallOldVersion runs immediately after this macro. If it
+    ; meets a file it cannot rename it aborts, and its own retry loop ends in
+    ; "$(appCannotBeClosed)" - the message users see for an app they did close.
+    ; Waiting for the OLD executable to become writable costs nothing when the
+    ; tree is already free (one FileOpen) and removes the race when it is not.
+    ;
+    ; This only probes the executable. A leftover Python service can hold the
+    ; tree too - electron/pysetup.cjs starts them with cwd inside the install
+    ; directory (python-server, thirdparty/skintokens) and they are named
+    ; python.exe, so nothing here can see them. That is what the busy-file log
+    ; written by customRemoveFiles is for.
+    ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+      StrCpy $R1 0
+      ${Do}
+        ClearErrors
+        FileOpen $R3 "$INSTDIR\${APP_EXECUTABLE_FILENAME}" a
+        ${IfNot} ${Errors}
+        ${AndIf} $R3 != ""
+          FileClose $R3            ; writable => nothing has it mapped any more
+          ${ExitDo}
+        ${EndIf}
+        IntOp $R1 $R1 + 1
+        ${If} $R1 >= 20            ; ~10 s, then let the uninstaller have its go
+          DetailPrint "Previous installation is still in use - continuing anyway."
+          ${ExitDo}
+        ${EndIf}
+        DetailPrint "Waiting for the previous installation to be released..."
+        Sleep 500
+      ${Loop}
+    ${EndIf}
+
     Pop $R5
     Pop $R4
     Pop $R3
@@ -276,6 +308,21 @@ FunctionEnd
 !ifdef BUILD_UNINSTALLER
 
   !insertmacro GEN_PURGE_LINKS "un."
+
+  ; Appends one "which file was busy" line to the same log the installer's
+  ; app-running check writes. Without it a slow update is indistinguishable from
+  ; a stuck one, and nobody can tell WHAT was holding the file.
+  !macro LOG_BUSY_FILE _ATTEMPT _PATH _HANDLE
+    FileOpen ${_HANDLE} "$TEMP\3DGenStudio-setup-appcheck.log" a
+    ${If} ${_HANDLE} == ""
+      FileOpen ${_HANDLE} "$TEMP\3DGenStudio-setup-appcheck.log" w
+    ${EndIf}
+    ${If} ${_HANDLE} != ""
+      FileSeek ${_HANDLE} 0 END
+      FileWrite ${_HANDLE} "uninstall: busy file (attempt ${_ATTEMPT}): ${_PATH}$\r$\n"
+      FileClose ${_HANDLE}
+    ${EndIf}
+  !macroend
 
   ; Replaces the vendor delete block in Section un.install.
   !macro customRemoveFiles
@@ -295,23 +342,47 @@ FunctionEnd
         DetailPrint "Neutralized $purgedLinkCount directory link(s) before uninstalling."
       ${EndIf}
 
-      ; From here on this mirrors the vendor block, which is now safe to run.
+      ; UPDATE PATH: rename the old tree aside first, so a failure can roll back.
+      ;
+      ; The vendor gives up the moment un.atomicRMDir reports a busy file, and
+      ; installUtil.nsh's uninstallOldVersion then re-runs this whole uninstaller
+      ; five times before showing "$(appCannotBeClosed)" - a message about the
+      ; APP being open, for what is really one file still held open. That is why
+      ; clicking Retry works: by then the handle is gone - which is exactly what
+      ; was reported from the field, on an app that was genuinely closed.
+      ;
+      ; Waiting here instead makes it invisible. Candidates for the holder, none
+      ; of which the app-running check can see: the app's own service teardown
+      ; (main.cjs kills the Python services with taskkill /T /F, which outlives
+      ; the app process), an AV scan of the ~190 MB executable, or the shell's
+      ; icon cache. The busy path is recorded either way.
       ${if} ${isUpdated}
         CreateDirectory "$PLUGINSDIR\old-install"
 
-        Push ""
-        Call un.atomicRMDir
-        Pop $R0
+        StrCpy $R1 0
+        ${Do}
+          Push ""
+          Call un.atomicRMDir
+          Pop $R0
+          ${If} $R0 == 0
+            ${ExitDo}                 ; whole tree renamed aside
+          ${EndIf}
 
-        ${if} $R0 != 0
-          DetailPrint "File is busy, aborting: $R0"
+          DetailPrint "File is busy, waiting: $R0"
+          !insertmacro LOG_BUSY_FILE $R1 $R0 $R3
 
+          ; atomicRMDir has already moved part of the tree; put it back before
+          ; trying again, or the next attempt starts from a half-moved install.
           Push ""
           Call un.restoreFiles
-          Pop $R0
+          Pop $R2
 
-          Abort `Can't rename "$INSTDIR" to "$PLUGINSDIR\old-install".`
-        ${endif}
+          IntOp $R1 $R1 + 1
+          ${If} $R1 >= 20            ; ~10 s of waiting, plus each attempt's own
+            Abort `Can't rename "$INSTDIR" to "$PLUGINSDIR\old-install" - $R0 is still in use.`
+          ${EndIf}
+          Sleep 500
+        ${Loop}
       ${endif}
 
       RMDir /r $INSTDIR

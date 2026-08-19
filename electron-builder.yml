@@ -82,6 +82,26 @@ files:
   - "!thirdparty/skintokens/tmp_ckpt/**"
   - "!thirdparty/skintokens/tmp_gradio/**"
   - "!thirdparty/skintokens/*.log"
+  # MAX_PATH. asar:false ships node_modules as real files, and npm nests a
+  # duplicate @radix-ui chain inside @excalidraw:
+  #   resources/app/node_modules/@excalidraw/excalidraw/node_modules/@radix-ui/
+  #   react-tabs/node_modules/@radix-ui/react-roving-focus/node_modules/...
+  # Under C:\Program Files\3D Gen Studio (31 chars) the longest path is 251 and
+  # everything installs. Under the per-user root, C:\Users\<name>\AppData\Local\
+  # Programs\3D Gen Studio (51 for a short name), it is 272 - past the 260-char
+  # limit of SHFileOperation, which is what NSIS CopyFiles uses to move the
+  # extracted payload into place. Those 6 files fail, and the vendor macro
+  # extractUsing7za retries 5x and then reports the appCannotBeClosed string -
+  # "3D Gen Studio cannot be closed" - for an app that was never running.
+  #
+  # @excalidraw is frontend-only: src/pages/BoardPage.jsx imports it and Vite
+  # bundles it into dist/. Nothing in server.js / storage.js / mcp requires it,
+  # so this copy was dead weight - 801 files, 42 MB. Dropping it takes the
+  # longest path to 192, i.e. 68 characters of headroom for longer user names.
+  - "!node_modules/@excalidraw/**"
+  # HuggingFace download cache from local runs - the models it belongs to are
+  # excluded above and provisioned per-user on opt-in.
+  - "!thirdparty/skintokens/.cache/**"
   - "!**/*.map"
 
 win:
