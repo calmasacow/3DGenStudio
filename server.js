@@ -17,6 +17,7 @@ import { WebSocket as WsWebSocket } from 'ws';
 import tencentcloudSdk from 'tencentcloud-sdk-nodejs-intl-en';
 import { mountMcp } from './mcp/http.js';
 import { mountLogs } from './logs.js';
+import { moveGlbPivot, PIVOT_MODES } from './meshPivot.js';
 
 // Node 20 (bundled by Electron 33) has no global WebSocket, so fall back to the
 // `ws` package. Newer Node runtimes (dev) expose a global WebSocket we can reuse.
@@ -128,6 +129,56 @@ process.on('uncaughtException', err => {
 process.on('unhandledRejection', reason => {
   console.error('Unhandled promise rejection (server kept alive):', reason);
 });
+
+// Parent watchdog (desktop app only). The Electron shell spawns this backend as
+// a child of the main process using the SAME executable with ELECTRON_RUN_AS_NODE
+// (electron/main.cjs startBackend), so on Windows it appears in Task Manager as
+// "3D Gen Studio.exe" - with no window, under "Background processes".
+//
+// main.cjs kills it from its `before-quit` shutdown, but that never runs when the
+// main process dies abruptly (Task Manager "End task", a GPU/renderer crash). The
+// installer's "app is still running" check matches on image name alone (see
+// build/installer.nsh), so a leftover backend blocks every update.
+//
+// libuv normally prevents that on its own: a non-detached child goes into a job
+// object that terminates it when the parent dies. Measured on Windows 11 - an
+// attached child dies with its parent, a `detached: true` one survives. This
+// watchdog is the belt to that safety net's braces, for the cases where the job
+// object does not apply (creation failed, the child gets re-parented, or a future
+// change passes `detached`).
+//
+// Two independent tripwires, because neither is reliable alone:
+//   - 'disconnect' fires when the IPC channel to main closes - the normal case.
+//   - polling GENSTUDIO_PARENT_PID covers a channel that broke silently or was
+//     never established (pid reuse could mask a dead parent; that only delays
+//     the exit until the next real check, it never kills a live app).
+// Both are inert outside the desktop app (no IPC channel, no parent pid env var),
+// so `npm start` / dev runs are unaffected.
+const PARENT_PID = Number(process.env.GENSTUDIO_PARENT_PID) || 0;
+
+function exitWithParent(why) {
+  console.error(`Parent process is gone (${why}) - shutting the backend down.`);
+  // Hard exit on purpose: the uncaughtException handler above keeps this process
+  // alive through almost anything, and a lingering backend is exactly the bug.
+  process.exit(0);
+}
+
+if (typeof process.send === 'function') {
+  process.on('disconnect', () => exitWithParent('IPC channel closed'));
+}
+
+if (PARENT_PID > 0) {
+  const parentWatchdog = setInterval(() => {
+    try {
+      // Signal 0 sends nothing: it only probes whether the pid still exists.
+      process.kill(PARENT_PID, 0);
+    } catch (err) {
+      // EPERM means the process exists but is not ours to signal - still alive.
+      if (err?.code === 'ESRCH') exitWithParent(`pid ${PARENT_PID} no longer exists`);
+    }
+  }, 5000);
+  parentWatchdog.unref(); // never keep the event loop alive on the watchdog's account
+}
 
 // Explicit override for the externally-reachable base URL. Set this when the
 // app sits behind a proxy that rewrites or drops the original host/port, e.g.
@@ -6925,6 +6976,44 @@ app.post('/api/meshes/lods', meshToolsUpload.single('meshFile'), async (req, res
   } catch (err) {
     console.error('LOD generation failed:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message || 'LOD generation failed' });
+  }
+});
+
+// Pivot placement — the headless twin of the Mesh Editor's "move pivot" buttons.
+// Runs in-process (see meshPivot.js): it rewrites the glTF node graph only, so
+// skins, animations, and textures survive, which a trimesh round trip would not
+// guarantee. Returns the mesh unchanged when the pivot is already in place.
+app.post('/api/meshes/pivot', meshToolsUpload.single('meshFile'), async (req, res) => {
+  try {
+    const meshFile = req.file;
+    if (!meshFile?.buffer?.length) {
+      return res.status(400).json({ error: 'meshFile is required' });
+    }
+
+    let options = {};
+    if (typeof req.body?.options === 'string' && req.body.options.length) {
+      try { options = JSON.parse(req.body.options); } catch { options = {}; }
+    }
+    const mode = options.mode || req.body?.mode || 'ground_pivot';
+    if (!PIVOT_MODES.includes(mode)) {
+      return res.status(400).json({ error: `mode must be one of ${PIVOT_MODES.join(', ')}` });
+    }
+
+    const result = moveGlbPivot(meshFile.buffer, mode);
+
+    res.json({
+      mesh_b64: result.buffer.toString('base64'),
+      stats: {
+        mode,
+        moved: result.moved,
+        offset: result.offset,
+        bounds_before: result.bounds,
+        bounds_after: result.boundsAfter,
+      },
+    });
+  } catch (err) {
+    console.error('Pivot move failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Pivot move failed' });
   }
 });
 
