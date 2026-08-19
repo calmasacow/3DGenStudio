@@ -237,4 +237,83 @@ export function registerAssetTools(server, { api, notifyMutation }) {
     notifyMutation(null);
     return { deleted: true, assetId };
   }));
+
+  // --- Global asset library -------------------------------------------------
+  // The library is project-independent storage, so its records are addressed by
+  // stored filename/filePath rather than by project + asset id. link_asset is
+  // what brings a library file into a project.
+
+  server.registerTool('import_library_assets', {
+    title: 'Import files into the asset library',
+    description: 'Import local files into the global (project-independent) asset library from absolute paths on this machine. The type is inferred per file from its extension unless assetType is set; brushes must be PNG. Imported files are NOT attached to any project — use link_asset with the returned filename to bring one into a project. To add a file straight to a project instead, use upload_asset.',
+    inputSchema: {
+      filePaths: z.array(z.string().min(1)).min(1).describe('Absolute local paths of the files to import'),
+      assetType: z.enum(['image', 'mesh', 'brush']).optional().describe('Force the asset type for every file (otherwise inferred from each extension)')
+    }
+  }, toolHandler(async ({ filePaths, assetType }) => {
+    const form = new FormData();
+    for (const filePath of filePaths) {
+      const buffer = await fs.readFile(filePath);
+      const fileName = path.basename(filePath);
+      const mime = MIME_BY_EXT[path.extname(fileName).toLowerCase()] || 'application/octet-stream';
+      form.append('files', new Blob([buffer], { type: mime }), fileName);
+    }
+    if (assetType) form.append('assetType', assetType);
+    const result = await api.apiForm('POST', '/assets/library/import', form);
+    notifyMutation(null);
+    return result;
+  }));
+
+  server.registerTool('rename_library_asset', {
+    title: 'Rename a library asset',
+    description: 'Rename an asset in the global library. Pass kind "asset" for a root library image/mesh/brush (identified by type + filename, both from list_library_assets), or kind "edit" for an image edit (identified by its filePath). Renaming changes the display name only — the stored file is untouched. Mesh versions cannot be renamed; save a new version with the name you want instead.',
+    inputSchema: {
+      kind: z.enum(['asset', 'edit']).default('asset').describe('"asset" = a root library asset, "edit" = an image edit'),
+      name: z.string().min(1).describe('New display name'),
+      type: z.enum(['image', 'mesh', 'brush']).optional().describe('kind "asset" only: the asset type'),
+      filename: z.string().min(1).optional().describe('kind "asset" only: the stored filename from list_library_assets'),
+      filePath: z.string().min(1).optional().describe('kind "edit" only: the edit\'s stored filePath')
+    }
+  }, toolHandler(async ({ kind = 'asset', name, type, filename, filePath }) => {
+    let renamed;
+    if (kind === 'edit') {
+      if (!filePath) throw new Error('kind "edit" requires filePath.');
+      renamed = await api.apiJson('PUT', '/assets/library/edits', { body: { filePath, name } });
+    } else {
+      if (!type || !filename) throw new Error('kind "asset" requires type and filename.');
+      renamed = await api.apiJson('PUT', '/assets/library', { body: { type, filename, name } });
+    }
+    notifyMutation(null);
+    return withAssetUrls(api, renamed);
+  }));
+
+  server.registerTool('delete_library_asset', {
+    title: 'Delete a library asset',
+    description: 'PERMANENTLY delete an entry from the global asset library: kind "asset" for a root library image/mesh/brush (type + filename from list_library_assets), "edit" for an image edit (filePath), or "version" for a mesh version (filePath). Set confirm=true to proceed. Root assets and mesh versions that are still linked to a project are refused unless force=true, which unlinks them from that project as it deletes.',
+    inputSchema: {
+      kind: z.enum(['asset', 'edit', 'version']).describe('What to delete'),
+      confirm: z.boolean().describe('Must be true — confirms the permanent deletion'),
+      type: z.enum(['image', 'mesh', 'brush']).optional().describe('kind "asset" only: the asset type'),
+      filename: z.string().min(1).optional().describe('kind "asset" only: the stored filename from list_library_assets'),
+      filePath: z.string().min(1).optional().describe('kind "edit"/"version" only: the stored filePath'),
+      force: z.boolean().default(false).describe('Delete even when the entry is linked to a project (kind "asset" and "version").')
+    },
+    annotations: { destructiveHint: true }
+  }, toolHandler(async ({ kind, confirm, type, filename, filePath, force = false }) => {
+    if (confirm !== true) throw new Error('Refusing to delete: pass confirm=true to permanently delete this library entry.');
+
+    if (kind === 'asset') {
+      if (!type || !filename) throw new Error('kind "asset" requires type and filename.');
+      await api.apiJson('DELETE', '/assets/library', { query: { type, filename, force: String(force) } });
+    } else if (kind === 'edit') {
+      if (!filePath) throw new Error('kind "edit" requires filePath.');
+      await api.apiJson('DELETE', '/assets/library/edits', { query: { filePath } });
+    } else {
+      if (!filePath) throw new Error('kind "version" requires filePath.');
+      await api.apiJson('DELETE', '/assets/library/versions', { query: { filePath, force: String(force) } });
+    }
+
+    notifyMutation(null);
+    return { deleted: true, kind, ...(filename ? { filename } : {}), ...(filePath ? { filePath } : {}) };
+  }));
 }

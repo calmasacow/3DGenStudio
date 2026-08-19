@@ -1,6 +1,6 @@
 # 3D Gen Studio — MCP Server
 
-3D Gen Studio ships an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server so any AI — Claude Desktop/Code, ChatGPT, local LLM stacks — can automate the app: create projects, build node graphs, run ComfyUI workflows, generate images and meshes, run mesh tools (auto UV, retopo, repair, rig, optimize), and export/import projects.
+3D Gen Studio ships an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server so any AI — Claude Desktop/Code, ChatGPT, local LLM stacks — can automate the app: create projects, build node graphs, run ComfyUI workflows, generate images and meshes, run the whole mesh finishing pipeline (auto UV, retopo, repair, rig, optimize, LOD, bake, collision, pivot, Game-Ready check), and export/import projects.
 
 ## Endpoint
 
@@ -104,9 +104,11 @@ Connect with transport "Streamable HTTP" to `http://localhost:3001/mcp`.
 | Graph | `get_graph`, `create_node`, `update_node`, `move_node`, `delete_node`, `connect_nodes`, `disconnect_nodes` |
 | ComfyUI workflows | `list_workflows`, `inspect_workflow`, `import_workflow`, `update_workflow`, `run_workflow`, `get_run_status` |
 | AI actions | `generate_image`, `edit_image`, `generate_mesh`, `generate_mesh_tencent`, `generate_mesh_tripo`, `generate_mesh_hitem`, `get_mesh_result`, `edit_mesh`, `texture_mesh`, `rig_mesh_api` |
-| Mesh tools | `auto_uv_mesh`, `auto_retopo_mesh` (fully-typed parameters), `run_mesh_tool` (auto_uv / auto_retopo / repair / auto_rig / optimize / convert_fbx), `export_mesh` |
-| Assets | `list_assets`, `list_library_assets`, `view_asset`, `download_asset`, `upload_asset`, `link_asset`, `delete_asset` |
-| System | `get_settings` (secrets redacted), `get_system_stats` |
+| Mesh tools | `auto_uv_mesh`, `auto_retopo_mesh`, `repair_mesh`, `auto_rig_mesh`, `optimize_mesh`, `convert_mesh_fbx` (all fully-typed), `run_mesh_tool` (the same operations, untyped), `export_mesh` |
+| Mesh finishing | `inspect_mesh` (Game-Ready check), `bake_mesh_maps`, `generate_lods`, `generate_collision`, `move_mesh_pivot` |
+| Assets | `list_assets`, `list_library_assets`, `view_asset`, `download_asset`, `upload_asset`, `link_asset`, `unlink_asset`, `delete_asset` |
+| Asset library | `import_library_assets`, `rename_library_asset`, `delete_library_asset` |
+| System | `get_settings` (secrets redacted), `update_settings`, `get_system_stats` |
 
 ### Displaying results on graph nodes
 
@@ -122,7 +124,26 @@ When you *do* pass an image/mesh parameter in `inputs` (e.g. in a kanban project
 
 ### Parameter-heavy mesh tools
 
-Auto UV and Auto Retopo have many tuning parameters (14 and 20 respectively) that materially change the output. Use the dedicated `auto_uv_mesh` and `auto_retopo_mesh` tools rather than `run_mesh_tool` for these: each declares every parameter in its schema with type, range, default, and description (mirroring the Python service's models), so a client can set exactly what it needs and see the valid bounds. Any subset of options may be set; unset keys fall back to the documented default. For Auto Retopo, the `shell_*` options apply only when `watertight` is `true`. `run_mesh_tool` still accepts `auto_uv`/`auto_retopo` (options ride along as a free-form object) for backward compatibility.
+Every mesh operation has a dedicated tool that declares each parameter in its schema with type, range, default, and description (mirroring the Python service's Pydantic models 1:1), so a client can set exactly what it needs and see the valid bounds: `auto_uv_mesh` (14 parameters), `auto_retopo_mesh` (20), `repair_mesh`, `auto_rig_mesh`, `optimize_mesh`, `convert_mesh_fbx`, `inspect_mesh`, `bake_mesh_maps`, `generate_collision`, `generate_lods`, `move_mesh_pivot`. Any subset of options may be set; unset keys fall back to the documented default. For Auto Retopo, the `shell_*` options apply only when `watertight` is `true`. `run_mesh_tool` still accepts every operation with a free-form options object for backward compatibility, but prefer the typed tools.
+
+### The finishing pipeline
+
+`inspect_mesh` is the entry point: it grades a mesh against engine-readiness budgets (triangles, UVs, texel density, materials, scale, manifoldness, pivot) and never modifies it. Each finding carries a `status` (`pass`/`warn`/`fail`/`info`) and, where one exists, a `fixTool` naming the MCP tool that resolves it — `repair_mesh`, `auto_uv_mesh`, `auto_retopo_mesh`, `optimize_mesh`, or `move_mesh_pivot` (with `fixArgs` carrying the pivot mode). A typical run:
+
+1. `inspect_mesh` — see what's wrong.
+2. `repair_mesh` — non-manifold edges, degenerate/duplicate faces.
+3. `auto_retopo_mesh` or `optimize_mesh` / `generate_lods` — hit the triangle budget.
+4. `auto_uv_mesh` — missing or overlapping UVs (required before baking).
+5. `bake_mesh_maps` — bake the **original** high-poly onto the reduced mesh so the lost detail comes back as a normal/AO map.
+6. `move_mesh_pivot` — drop the pivot to the ground (or the bbox centre).
+7. `generate_collision`, then `convert_mesh_fbx` or `export_mesh`.
+8. `inspect_mesh` again to confirm.
+
+Where results are saved differs by tool, deliberately: most save a **new version** of the source mesh, but `generate_collision` and `bake_mesh_maps` save **separate assets** (a collider is a sibling of the render mesh, not a newer take on it, and baked maps are images). `generate_lods` saves one version per reduced level, skipping a ratio of `1` since that level is the source itself. `move_mesh_pivot` saves nothing when the pivot is already in place and says so in the response.
+
+**The UV-seam trap.** gltfpack (behind `optimize_mesh` and `generate_lods`) will not collapse a vertex that sits on a UV seam, so a heavily-seamed textured mesh can barely reduce at all no matter what `simplify_ratio` you ask for. Always read `stats.achieved_ratio` and `stats.seam_limited` rather than assuming the request was met; setting `allow_seam_breaking: true` reaches the target but distorts the UVs, so re-unwrap or re-bake afterwards.
+
+**Baking returns maps, not a textured mesh.** `bake_mesh_maps` saves the baked PNGs as project image assets (and optionally writes them to a folder). Attaching them to the mesh's material is a Mesh Editor operation that runs in the browser, so over MCP use the maps as workflow inputs or wire them up in the engine.
 
 ### External mesh-generation providers
 
@@ -149,11 +170,14 @@ Image generation (`generate_image`) is prompt-only by design: OpenAI/Google imag
 | Projects / cards / graph / assets / export / import | just the app running |
 | `run_workflow`, ComfyUI-based edits | ComfyUI running (URL in Settings, default `127.0.0.1:8188`) |
 | `generate_image`, `edit_image`, `generate_mesh`, `generate_mesh_tencent`, `generate_mesh_tripo`, `generate_mesh_hitem`, `edit_mesh`, `texture_mesh`, `rig_mesh_api` | provider API keys in Settings |
-| `auto_uv_mesh`, `auto_retopo_mesh`, `run_mesh_tool` auto_uv / auto_retopo / repair / convert_fbx | Python mesh-tools service (`:8200`) running — the desktop app can start it from Settings |
-| `run_mesh_tool` auto_rig | rigging service (`:8300`) running |
-| `run_mesh_tool` optimize | nothing extra (bundled gltfpack) |
+| `auto_uv_mesh`, `auto_retopo_mesh`, `repair_mesh`, `convert_mesh_fbx`, `inspect_mesh`, `bake_mesh_maps`, `generate_collision` | Python mesh-tools service (`:8200`) running — the desktop app can start it from Settings |
+| `auto_rig_mesh` | rigging service (`:8300`) running |
+| `optimize_mesh`, `generate_lods` | nothing extra (bundled gltfpack) |
+| `move_mesh_pivot` | nothing extra (runs in the app backend) |
 
 ## Limitations
 
-- The interactive **Mesh Editor** operations (sculpt, modeling, boolean, painting, projection, texture bake) and **Image Editor** pixel operations (crop, filters, shadow remover) run in the browser (WebGL/canvas) and are not exposed over MCP. AI-driven alternatives: ComfyUI workflows (`run_workflow`), prompt-based edits (`edit_image`), and the mesh-tool services.
+- The **Mesh Editor** modes that run in the browser (WebGL/canvas) are not exposed over MCP: sculpting, modeling, displace/boolean, painting, projection, applying baked maps to a material, and animation retargeting (Auto Rig -> Animations). **Image Editor** pixel operations (crop, filters, shadow remover) are browser-only too. AI-driven alternatives: ComfyUI workflows (`run_workflow`), prompt-based edits (`edit_image`), and the mesh-tool services. Note that *running* a bake is available (`bake_mesh_maps`) — only applying the result to a material is not.
+- `update_settings` refuses to write any field whose key looks like an API key, secret, token, password, or credential. Reads are redacted, so a client that round-tripped a settings object would otherwise overwrite a real key with the redaction placeholder. Set credentials (including `mcp.token`) in the app's Settings dialog or with a direct `POST /api/settings`.
+- Not yet exposed: Brainstorming Boards, Batch project configuration, the Wiki, and tasks.
 - If the app UI is open in a browser while an MCP client mutates data, open Graph/Kanban pages refresh automatically via the app event stream; other pages may need a manual refresh.
