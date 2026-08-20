@@ -628,79 +628,97 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               {draft?.mode === 'api' && isMeshGen && (
                 <div className={panelClassName}>
                   <span className="graph-node__panel-title font-label">MESH GEN API</span>
-                  <input
-                    type="text"
-                    className="params-card__input nodrag"
-                    placeholder="Result name"
-                    value={draft.name || ''}
-                    onChange={event => data.onDraftFieldChange?.(data.id, 'name', event.target.value)}
-                  />
-                  <select
-                    className="api-select nodrag"
-                    value={draft.selectedApi || ''}
-                    onChange={event => data.onDraftFieldChange?.(data.id, 'selectedApi', event.target.value)}
-                  >
-                    {data.meshGenerationApis.map(api => (
-                      <option key={api.id} value={api.id}>{api.name}</option>
-                    ))}
-                  </select>
+                  <div className="params-card__field">
+                    <label className="params-card__label font-label">Result Name</label>
+                    <input
+                      type="text"
+                      className="params-card__input nodrag"
+                      placeholder="Result name"
+                      value={draft.name || ''}
+                      onChange={event => data.onDraftFieldChange?.(data.id, 'name', event.target.value)}
+                    />
+                  </div>
+                  <div className="params-card__field">
+                    <label className="params-card__label font-label">API</label>
+                    <select
+                      className="api-select nodrag"
+                      value={draft.selectedApi || ''}
+                      onChange={event => data.onDraftFieldChange?.(data.id, 'selectedApi', event.target.value)}
+                    >
+                      {data.meshGenerationApis.map(api => (
+                        <option key={api.id} value={api.id}>{api.name}</option>
+                      ))}
+                    </select>
+                  </div>
                   {/* Hitem3D is image-only and does not take a prompt. */}
                   {!isHitemMeshApi && (
-                    <textarea
-                      className="gen-prompt-input nodrag"
-                      placeholder="Describe the mesh to generate"
-                      value={draft.prompt || ''}
-                      onChange={event => data.onDraftFieldChange?.(data.id, 'prompt', event.target.value)}
-                    />
+                    <div className="params-card__field">
+                      <label className="params-card__label font-label">Prompt</label>
+                      <textarea
+                        className="gen-prompt-input nodrag"
+                        placeholder="Describe the mesh to generate"
+                        value={draft.prompt || ''}
+                        onChange={event => data.onDraftFieldChange?.(data.id, 'prompt', event.target.value)}
+                      />
+                    </div>
                   )}
-                  <select
-                    className="params-card__select nodrag"
-                    value={draft.selectedInputSource || ''}
-                    onChange={event => data.onDraftFieldChange?.(data.id, 'selectedInputSource', event.target.value)}
-                  >
-                    {(isTencentMeshApi || isTripoMeshApi) && (
-                      <option value="">No image source (use prompt)</option>
-                    )}
-                    {imageInputSources.length > 0 && (
-                      <optgroup label="Connected inputs">
-                        {imageInputSources.map(source => (
-                          <option key={source.connectorId} value={getInputSourceSelectionValue(source)}>
-                            {`${getConnectorTypeMeta(source.type).letter} · ${source.label}`}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {!isTencentMeshApi && !isTripoMeshApi && data.libraryImageOptions.length > 0 && (
-                      <optgroup label="Asset library">
-                        {data.libraryImageOptions.map(asset => (
-                          <option key={asset.id} value={asset.sourceReference || asset.id}>
-                            {asset.name}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {imageInputSources.length === 0 && (isTencentMeshApi || isTripoMeshApi || data.libraryImageOptions.length === 0) && (
-                      <option value="">No image sources available</option>
-                    )}
-                  </select>
+                  <div className="params-card__field">
+                    <label className="params-card__label font-label">Image Source</label>
+                    <select
+                      className="params-card__select nodrag"
+                      value={draft.selectedInputSource || ''}
+                      onChange={event => data.onDraftFieldChange?.(data.id, 'selectedInputSource', event.target.value)}
+                    >
+                      {(isTencentMeshApi || isTripoMeshApi) && (
+                        <option value="">No image source (use prompt)</option>
+                      )}
+                      {imageInputSources.length > 0 && (
+                        <optgroup label="Connected inputs">
+                          {imageInputSources.map(source => (
+                            <option key={source.connectorId} value={getInputSourceSelectionValue(source)}>
+                              {`${getConnectorTypeMeta(source.type).letter} · ${source.label}`}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {!isTencentMeshApi && !isTripoMeshApi && data.libraryImageOptions.length > 0 && (
+                        <optgroup label="Asset library">
+                          {data.libraryImageOptions.map(asset => (
+                            <option key={asset.id} value={asset.sourceReference || asset.id}>
+                              {asset.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {imageInputSources.length === 0 && (isTencentMeshApi || isTripoMeshApi || data.libraryImageOptions.length === 0) && (
+                        <option value="">No image sources available</option>
+                      )}
+                    </select>
+                  </div>
                   {isTripoMeshApi && (
                     <>
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.modelVersion || 'v2.5-20250123'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'modelVersion', event.target.value)}
-                      >
-                        {TRIPO_MODEL_VERSION_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        className="params-card__input nodrag"
-                        placeholder="Model seed (optional)"
-                        value={draft.modelSeed ?? ''}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'modelSeed', event.target.value)}
-                      />
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Model</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={draft.modelVersion || 'v2.5-20250123'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'modelVersion', event.target.value)}
+                        >
+                          {TRIPO_MODEL_VERSION_OPTIONS.map(option => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Model Seed (Optional)</label>
+                        <input
+                          type="number"
+                          className="params-card__input nodrag"
+                          placeholder="Model seed (optional)"
+                          value={draft.modelSeed ?? ''}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'modelSeed', event.target.value)}
+                        />
+                      </div>
                       {!isTripoP1Model && (
                         <label className="params-card__checkbox-label nodrag">
                           <div
@@ -712,15 +730,18 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                           <span>Enable image autofix</span>
                         </label>
                       )}
-                      <input
-                        type="number"
-                        min="1000"
-                        max="300000"
-                        className="params-card__input nodrag"
-                        placeholder="Face limit (1000-300000, optional)"
-                        value={draft.faceLimit ?? ''}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'faceLimit', event.target.value)}
-                      />
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Face Limit (Optional)</label>
+                        <input
+                          type="number"
+                          min="1000"
+                          max="300000"
+                          className="params-card__input nodrag"
+                          placeholder="Face limit (1000-300000, optional)"
+                          value={draft.faceLimit ?? ''}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'faceLimit', event.target.value)}
+                        />
+                      </div>
                       <label className="params-card__checkbox-label nodrag">
                         <div
                           className={`params-card__checkbox ${draft.texture ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
@@ -739,33 +760,42 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         </div>
                         <span>PBR</span>
                       </label>
-                      <input
-                        type="number"
-                        className="params-card__input nodrag"
-                        placeholder="Texture seed (optional)"
-                        value={draft.textureSeed ?? ''}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'textureSeed', event.target.value)}
-                      />
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Texture Seed (Optional)</label>
+                        <input
+                          type="number"
+                          className="params-card__input nodrag"
+                          placeholder="Texture seed (optional)"
+                          value={draft.textureSeed ?? ''}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'textureSeed', event.target.value)}
+                        />
+                      </div>
                       {!isTripoP1Model && (
+                        <div className="params-card__field">
+                          <label className="params-card__label font-label">Texture Alignment</label>
+                          <select
+                            className="params-card__select nodrag"
+                            value={draft.textureAlignment || 'original_image'}
+                            onChange={event => data.onDraftFieldChange?.(data.id, 'textureAlignment', event.target.value)}
+                          >
+                            {TRIPO_TEXTURE_ALIGNMENT_OPTIONS.map(option => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Texture Quality</label>
                         <select
                           className="params-card__select nodrag"
-                          value={draft.textureAlignment || 'original_image'}
-                          onChange={event => data.onDraftFieldChange?.(data.id, 'textureAlignment', event.target.value)}
+                          value={draft.textureQuality || 'standard'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'textureQuality', event.target.value)}
                         >
-                          {TRIPO_TEXTURE_ALIGNMENT_OPTIONS.map(option => (
+                          {TRIPO_TEXTURE_QUALITY_OPTIONS.map(option => (
                             <option key={option} value={option}>{option}</option>
                           ))}
                         </select>
-                      )}
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.textureQuality || 'standard'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'textureQuality', event.target.value)}
-                      >
-                        {TRIPO_TEXTURE_QUALITY_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
+                      </div>
                       <label className="params-card__checkbox-label nodrag">
                         <div
                           className={`params-card__checkbox ${draft.autoSize ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
@@ -776,15 +806,18 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         <span>Auto size</span>
                       </label>
                       {!isTripoP1Model && (
-                        <select
-                          className="params-card__select nodrag"
-                          value={draft.orientation || 'default'}
-                          onChange={event => data.onDraftFieldChange?.(data.id, 'orientation', event.target.value)}
-                        >
-                          {TRIPO_ORIENTATION_OPTIONS.map(option => (
-                            <option key={option} value={option}>{option}</option>
-                          ))}
-                        </select>
+                        <div className="params-card__field">
+                          <label className="params-card__label font-label">Orientation</label>
+                          <select
+                            className="params-card__select nodrag"
+                            value={draft.orientation || 'default'}
+                            onChange={event => data.onDraftFieldChange?.(data.id, 'orientation', event.target.value)}
+                          >
+                            {TRIPO_ORIENTATION_OPTIONS.map(option => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
                       )}
                       {!isTripoP1Model && (
                         <label className="params-card__checkbox-label nodrag">
@@ -829,15 +862,18 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         <span>Export UV</span>
                       </label>
                       {!isTripoP1Model && (
-                        <select
-                          className="params-card__select nodrag"
-                          value={draft.geometryQuality || 'standard'}
-                          onChange={event => data.onDraftFieldChange?.(data.id, 'geometryQuality', event.target.value)}
-                        >
-                          {TRIPO_GEOMETRY_QUALITY_OPTIONS.map(option => (
-                            <option key={option} value={option}>{option}</option>
-                          ))}
-                        </select>
+                        <div className="params-card__field">
+                          <label className="params-card__label font-label">Geometry Quality</label>
+                          <select
+                            className="params-card__select nodrag"
+                            value={draft.geometryQuality || 'standard'}
+                            onChange={event => data.onDraftFieldChange?.(data.id, 'geometryQuality', event.target.value)}
+                          >
+                            {TRIPO_GEOMETRY_QUALITY_OPTIONS.map(option => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
                       )}
                       {!isTripoP1Model && draft.generateParts && (draft.texture || draft.pbr || draft.quad) && (
                         <div className="graph-node__linked-input font-label">
@@ -848,53 +884,68 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                   )}
                   {isTencentMeshApi && (
                     <>
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.region || 'eu-frankfurt'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'region', event.target.value)}
-                      >
-                        {TENCENT_REGION_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.modelVersion || '3.0'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'modelVersion', event.target.value)}
-                      >
-                        {TENCENT_MODEL_VERSION_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.generationType || 'Normal'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'generationType', event.target.value)}
-                      >
-                        {TENCENT_GENERATION_TYPE_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      {draft.generationType === 'LowPoly' && (
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Region</label>
                         <select
                           className="params-card__select nodrag"
-                          value={draft.polygonType || 'triangle'}
-                          onChange={event => data.onDraftFieldChange?.(data.id, 'polygonType', event.target.value)}
+                          value={draft.region || 'eu-frankfurt'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'region', event.target.value)}
                         >
-                          {TENCENT_POLYGON_TYPE_OPTIONS.map(option => (
+                          {TENCENT_REGION_OPTIONS.map(option => (
                             <option key={option} value={option}>{option}</option>
                           ))}
                         </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Model</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={draft.modelVersion || '3.0'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'modelVersion', event.target.value)}
+                        >
+                          {TENCENT_MODEL_VERSION_OPTIONS.map(option => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Generation Type</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={draft.generationType || 'Normal'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'generationType', event.target.value)}
+                        >
+                          {TENCENT_GENERATION_TYPE_OPTIONS.map(option => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {draft.generationType === 'LowPoly' && (
+                        <div className="params-card__field">
+                          <label className="params-card__label font-label">Polygon Type</label>
+                          <select
+                            className="params-card__select nodrag"
+                            value={draft.polygonType || 'triangle'}
+                            onChange={event => data.onDraftFieldChange?.(data.id, 'polygonType', event.target.value)}
+                          >
+                            {TENCENT_POLYGON_TYPE_OPTIONS.map(option => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
                       )}
-                      <input
-                        type="number"
-                        min="3000"
-                        max="1500000"
-                        className="params-card__input nodrag"
-                        placeholder="Face count"
-                        value={draft.faceCount ?? 500000}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'faceCount', event.target.value)}
-                      />
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Face Count</label>
+                        <input
+                          type="number"
+                          min="3000"
+                          max="1500000"
+                          className="params-card__input nodrag"
+                          placeholder="Face count"
+                          value={draft.faceCount ?? 500000}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'faceCount', event.target.value)}
+                        />
+                      </div>
                       <label className="params-card__checkbox-label nodrag">
                         <div
                           className={`params-card__checkbox ${draft.enablePBR ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
@@ -908,43 +959,55 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                   )}
                   {isHitemMeshApi && (
                     <>
-                      <select
-                        className="params-card__select nodrag"
-                        value={draft.hitemModel || 'hitem3dv2.1'}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemModel', event.target.value)}
-                      >
-                        {HITEM_MODEL_VERSION_OPTIONS.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      <select
-                        className="params-card__select nodrag"
-                        value={hitemResolutionOptions.includes(draft.hitemResolution) ? draft.hitemResolution : hitemResolutionOptions[0]}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemResolution', event.target.value)}
-                      >
-                        {hitemResolutionOptions.map(option => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                      <select
-                        className="params-card__select nodrag"
-                        value={Number(draft.hitemRequestType) || 3}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemRequestType', Number(event.target.value))}
-                      >
-                        {HITEM_REQUEST_TYPE_OPTIONS.map(option => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        min={HITEM_FACE_MIN}
-                        max={HITEM_FACE_MAX}
-                        step="10000"
-                        className="params-card__input nodrag"
-                        placeholder="Face count"
-                        value={draft.hitemFace ?? 300000}
-                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemFace', event.target.value)}
-                      />
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Model</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={draft.hitemModel || 'hitem3dv2.1'}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'hitemModel', event.target.value)}
+                        >
+                          {HITEM_MODEL_VERSION_OPTIONS.map(option => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Resolution</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={hitemResolutionOptions.includes(draft.hitemResolution) ? draft.hitemResolution : hitemResolutionOptions[0]}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'hitemResolution', event.target.value)}
+                        >
+                          {hitemResolutionOptions.map(option => (
+                            <option key={option} value={option}>{option}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Generation Type</label>
+                        <select
+                          className="params-card__select nodrag"
+                          value={Number(draft.hitemRequestType) || 3}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'hitemRequestType', Number(event.target.value))}
+                        >
+                          {HITEM_REQUEST_TYPE_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Face Count</label>
+                        <input
+                          type="number"
+                          min={HITEM_FACE_MIN}
+                          max={HITEM_FACE_MAX}
+                          step="10000"
+                          className="params-card__input nodrag"
+                          placeholder="Face count"
+                          value={draft.hitemFace ?? 300000}
+                          onChange={event => data.onDraftFieldChange?.(data.id, 'hitemFace', event.target.value)}
+                        />
+                      </div>
                       <label className="params-card__checkbox-label nodrag">
                         <div
                           className={`params-card__checkbox ${draft.hitemPbr ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
