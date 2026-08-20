@@ -275,16 +275,17 @@ const TRIPO_SUCCESS_STATUS = 'success';
 const TRIPO_FAILURE_STATUSES = new Set(['failed', 'banned', 'expired', 'cancelled', 'unknown']);
 const HITEM_MESH_GENERATION_API_ID = 'hitem_meshgeneration';
 const HITEM_API_BASE_URL = 'https://api.hitem3d.ai/open-api/v1';
-const HITEM_MODEL_VERSIONS = new Set(['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1']);
+const HITEM_MODEL_VERSIONS = new Set(['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1', 'hi3dv3.0']);
 // Allowed resolution enum values per model (v2.1 differs from v1.5/v2.0).
 const HITEM_RESOLUTIONS_BY_MODEL = {
   'hitem3dv1.5': new Set(['512', '1024', '1536', '1536pro']),
   'hitem3dv2.0': new Set(['512', '1024', '1536', '1536pro']),
-  'hitem3dv2.1': new Set(['1536fast', '1536pro'])
+  'hitem3dv2.1': new Set(['1536fast', '1536pro']),
+  'hi3dv3.0': new Set(['2048quality','2048master'])
 };
 const HITEM_REQUEST_TYPES = new Set([1, 3]); // 1 = Mesh Only, 3 = Textured Mesh
 const HITEM_FACE_MIN = 100000;
-const HITEM_FACE_MAX = 2000000;
+const HITEM_FACE_MAX = 5000000;
 const HITEM_FORMAT_GLB = 2; // GLB output (never surfaced in the UI)
 const HITEM_RUNNING_STATUSES = new Set(['processing', 'queued', 'queueing', 'pending', 'running', 'waiting']);
 const HITEM_SUCCESS_STATUS = 'success';

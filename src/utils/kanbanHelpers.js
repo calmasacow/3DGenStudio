@@ -26,19 +26,20 @@ export const TRIPO_TEXTURE_ALIGNMENT_OPTIONS = ['original_image', 'geometry']
 export const TRIPO_TEXTURE_QUALITY_OPTIONS = ['standard', 'detailed']
 export const TRIPO_ORIENTATION_OPTIONS = ['default', 'align_image']
 export const TRIPO_GEOMETRY_QUALITY_OPTIONS = ['standard', 'detailed']
-export const HITEM_MODEL_VERSION_OPTIONS = ['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1']
+export const HITEM_MODEL_VERSION_OPTIONS = ['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1', 'hi3dv3.0']
 // Resolution enum values are model-dependent (v2.1 differs from v1.5/v2.0).
 export const HITEM_RESOLUTION_OPTIONS_BY_MODEL = {
   'hitem3dv1.5': ['512', '1024', '1536', '1536pro'],
   'hitem3dv2.0': ['512', '1024', '1536', '1536pro'],
-  'hitem3dv2.1': ['1536fast', '1536pro']
+  'hitem3dv2.1': ['1536fast', '1536pro'],
+	'hi3dv3.0': ['2048quality','2048master']
 }
 export const HITEM_REQUEST_TYPE_OPTIONS = [
   { value: 1, label: 'Mesh Only' },
   { value: 3, label: 'Textured Mesh' }
 ]
 export const HITEM_FACE_MIN = 100000
-export const HITEM_FACE_MAX = 2000000
+export const HITEM_FACE_MAX = 5000000
 
 export function getHitemResolutionOptions(model) {
   return HITEM_RESOLUTION_OPTIONS_BY_MODEL[model] || HITEM_RESOLUTION_OPTIONS_BY_MODEL['hitem3dv2.1']
