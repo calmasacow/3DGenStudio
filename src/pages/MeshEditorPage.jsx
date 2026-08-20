@@ -160,8 +160,8 @@ import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBone
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
 import BakeToolsPanel from '../components/meshEditor/BakeToolsPanel'
-import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, bakeMaps, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS, DEFAULT_BAKE_OPTIONS } from '../utils/meshTools'
-import { exportObject3D } from '../utils/meshExport'
+import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService, repairMesh as runRepairService, autoRig as runAutoRigService, inspectMesh as runInspectService, generateLods, defaultLodRatios, bakeMaps, ensureDesktopService, DEFAULT_AUTO_RIG_OPTIONS, DEFAULT_INSPECT_OPTIONS, DEFAULT_BAKE_OPTIONS, DEFAULT_SIMPLIFY_OPTIONS, DEFAULT_AUTO_UV_OPTIONS } from '../utils/meshTools'
+import { exportObject3D, measureUvHealth, uvsAreBroken } from '../utils/meshExport'
 import { extractRigFromObject, buildRiggedObject, geometryHasSkin, translateRig } from '../utils/meshRig'
 import BoneTransformGizmo from '../components/meshEditor/BoneTransformGizmo'
 import {
@@ -179,23 +179,6 @@ import {
 // Default option sets for the Python mesh-tools panels. These mirror the
 // defaults of autouv.unwrap() and autoretopo.RetopoConfig 1:1 (see
 // python-server/app/schemas.py).
-const DEFAULT_AUTO_UV_OPTIONS = {
-  max_cone_deg: 50,
-  sharp_weight: 0.35,
-  min_faces: 20,
-  min_area_frac: 0.004,
-  fold_cap_deg: 88,
-  refine: true,
-  refine_target_faces: 80,
-  refine_ad_thresh: 1.32,
-  method: 'auto',
-  arap_iters: 4,
-  resolution: 1024,
-  padding_texels: 4,
-  weld: true,
-  weld_tol_frac: 0.1,
-}
-
 const DEFAULT_AUTO_RETOPO_OPTIONS = {
   target_faces: 6000,
   quads: false,
@@ -240,10 +223,14 @@ const MAX_BAKE_SOURCES = 10
 
 const DEFAULT_OPTIMIZE_OPTIONS = {
   simplify_ratio: 0.5,
-  // Off by default: welding UV seams is the only way past a seamed mesh's
-  // simplification floor, and it scrambles the texture. Under-simplifying and
-  // saying so beats silently ruining the asset.
+  // Off by default: welding attribute seams is the only way past a seamed mesh's
+  // simplification floor, and it scrambles the texture and the hard edges alike.
+  // Under-simplifying and saying so beats silently ruining the asset.
   allow_seam_breaking: false,
+  // simplify_error / permissive / lock_border / aggressive. The error budget is
+  // the knob that reaches most targets, and unlike seam welding it costs nothing
+  // in normals or UVs — see DEFAULT_SIMPLIFY_OPTIONS.
+  ...DEFAULT_SIMPLIFY_OPTIONS,
 }
 
 // ── Projection per-layer mask helpers ───────────────────────────────────────
@@ -4291,7 +4278,18 @@ export default function MeshEditorPage() {
       label: 'Optimize',
       preserveTexture: true,
       buildRows: (stats, geo) => {
-        const rows = [{ label: 'Simplify ratio', value: optimizeOptions.simplify_ratio }]
+        const rows = [
+          { label: 'Simplify ratio', value: optimizeOptions.simplify_ratio },
+          { label: 'Error budget', value: optimizeOptions.simplify_error },
+        ]
+        // The ratio actually reached: the number that says whether the target
+        // was met, without making anyone do the arithmetic.
+        if (stats?.achieved_ratio != null) {
+          rows.push({ label: 'Achieved ratio', value: Number(stats.achieved_ratio.toFixed(3)) })
+        }
+        if (stats?.seams_broken) {
+          rows.push({ label: 'Seams welded', value: 'yes — check hard edges and texture' })
+        }
         if (geo?.index) rows.push({ label: 'Faces', value: geo.index.count / 3 })
         if (geo?.attributes?.position) rows.push({ label: 'Vertices', value: geo.attributes.position.count })
         return rows
@@ -5084,6 +5082,17 @@ export default function MeshEditorPage() {
       setError('The mesh has no UVs, so there is nowhere to bake to. Run Auto UV first.')
       return
     }
+    // Having UVs is not the same as having usable ones. A bake writes each
+    // triangle wherever the layout says it goes, so if two surfaces claim the
+    // same texels the bake reproduces that faithfully and the mesh comes back a
+    // kaleidoscope — which is exactly what simplifying past the seam floor
+    // leaves behind. The bake cannot fix it and costs minutes finding out, so
+    // stop here and name the fix.
+    const uvHealth = measureUvHealth(new THREE.Mesh(geometry))
+    if (uvsAreBroken(uvHealth)) {
+      setError(`The UV layout is unusable — the atlas is written ${uvHealth.atlasWrites.toFixed(0)}x over, so several surfaces share the same texels and a bake would reproduce that rather than fix it. Run Auto UV to rebuild the UVs, then bake.`)
+      return
+    }
     setBakeRunning(true)
     setBakedMaps(null)
     setError('')
@@ -5309,6 +5318,9 @@ export default function MeshEditorPage() {
       const chain = await generateLods(sourceBlob, {
         ratios: lodRatios,
         allowSeamBreaking: !!optimizeOptions.allow_seam_breaking,
+        // Every level is built with the same simplifier settings the Optimize
+        // section shows, so the chain and a single run cannot disagree.
+        simplify: optimizeOptions,
         fileName: 'mesh.glb',
         onProgress: evt => setLodProgress(evt),
       })
@@ -5333,7 +5345,7 @@ export default function MeshEditorPage() {
       setLodGenerating(false)
       setLodProgress(null)
     }
-  }, [geometry, lodGenerating, lodRatios, optimizeOptions.allow_seam_breaking])
+  }, [geometry, lodGenerating, lodRatios, optimizeOptions])
 
   // Swap the mesh for one of the generated levels. Routed through runMeshTool so
   // it behaves exactly like Optimize does — undo entry, texture carried over,

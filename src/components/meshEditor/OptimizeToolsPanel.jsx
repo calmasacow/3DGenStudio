@@ -86,13 +86,50 @@ export default function OptimizeToolsPanel({
           </div>
         ) : null}
 
-        <ToggleField label="Allow UV seams to break" value={!!o.allow_seam_breaking}
-          onChange={v => setOption('allow_seam_breaking', v)} disabled={fieldsDisabled}
-          hint="The simplifier cannot collapse edges across UV seams, so a heavily-seamed mesh stops well short of the target. Allowing seams to weld reaches the target but scrambles the texture — only useful when the mesh is untextured or you will re-bake it." />
-        {o.allow_seam_breaking && (
+        {/* The knob that actually decides whether a mesh reaches its target.
+            gltfpack's own default is 1%, which is strict enough that most meshes
+            stall well above the requested ratio — and the stall used to be read
+            as "UV seams are blocking this", sending the run to the destructive
+            pass that reshades the whole mesh. Raising this reaches the target by
+            moving the surface instead, which leaves normals and UVs alone. */}
+        <RangeField label="Error budget" min={0.1} max={50} step={0.1} decimals={1} suffix="%"
+          value={Number(((o.simplify_error ?? 0.05) * 100).toFixed(1))}
+          onChange={v => setOption('simplify_error', v / 100)} disabled={fieldsDisabled}
+          hint="How far the simplifier may move the surface away from the original. This, not the UV seams, is usually what stops a mesh short of its target — raising it reaches the target without touching normals or UVs. gltfpack's own default is 1%." />
+        {(o.simplify_error ?? 0.05) >= 0.3 && (
           <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
-            The texture will be distorted on any mesh that needs it.
+            Budgets this large deform the silhouette, and at the extreme they collapse
+            the mesh outright — a run that empties the mesh is refused rather than kept.
           </span>
+        )}
+
+        <ToggleField label="Lock border vertices" value={!!o.lock_border}
+          onChange={v => setOption('lock_border', v)} disabled={fieldsDisabled}
+          hint="Pins vertices on an open edge, so a mesh that is one piece of a larger set does not pull away from its neighbours along the shared edge. Costs some reduction." />
+
+        <ToggleField label="Allow attribute seams to break" value={!!o.allow_seam_breaking}
+          onChange={v => setOption('allow_seam_breaking', v)} disabled={fieldsDisabled}
+          hint="The simplifier will not collapse an edge across an attribute discontinuity, and on a UV-mapped mesh every island boundary is one — so a heavily-seamed mesh has a floor it will not pass however high the error budget goes. Allowing seams to weld reaches the target, at the cost of the texture and of every hard edge. Raise the error budget first: it is the cheaper fix and it is usually the real limit." />
+        {o.allow_seam_breaking && (
+          <>
+            <ToggleField label="Permissive collapses" value={!!o.permissive}
+              onChange={v => setOption('permissive', v)} disabled={fieldsDisabled}
+              hint="gltfpack's -sp: cross attribute discontinuities while still picking collapses by quality. It made no difference on any mesh measured here, so treat it as worth trying rather than as the fix." />
+            <ToggleField label="Aggressive pass (last resort)" value={!!o.aggressive}
+              onChange={v => setOption('aggressive', v)} disabled={fieldsDisabled}
+              hint="gltfpack's -sa: reach the ratio regardless of quality. It is the only thing that breaks a real seam floor, and it does so by rebuilding the vertex set — normals and UVs are both reassigned, so hard edges smooth over and the texture scrambles. Turn it off to keep the shading and accept a coarser mesh." />
+            {o.aggressive ? (
+              <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
+                On a mesh that needs this pass, hard edges and the texture are both rebuilt.
+                This is the setting that makes a simplified mesh come back wrongly shaded.
+              </span>
+            ) : (
+              <span className="mesh-editor-panel__hint">
+                Shading is protected: a mesh that cannot reach its target will stop above it
+                and say so, rather than come back reshaded.
+              </span>
+            )}
+          </>
         )}
       </div>
 
@@ -166,14 +203,16 @@ export default function OptimizeToolsPanel({
 
             {lodChain.some(lod => lod.seamLimited) && (
               <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
-                Marked levels stopped short of their target: the simplifier cannot collapse edges
-                across UV seams without welding them, which would scramble the texture. Enable
-                “Allow UV seams to break” above to reach the target anyway.
+                Marked levels stopped short of their target. Raise the <em>Error budget</em> first —
+                that is the usual limit, and it costs nothing in normals or UVs. If they still stop
+                short, the mesh has a real attribute-seam floor and only “Allow attribute seams to
+                break” will pass it.
               </span>
             )}
             {lodChain.some(lod => lod.seamsBroken) && (
               <span className="mesh-editor-panel__hint" style={{ color: '#e0a030' }}>
-                Some levels welded UV seams to reach their target — check the texture on those.
+                Some levels welded attribute seams to reach their target — check the texture
+                <em>and the hard edges</em> on those.
               </span>
             )}
           </>
@@ -190,7 +229,12 @@ export default function OptimizeToolsPanel({
         <span className="mesh-editor-panel__hint">Optimize runs the bundled gltfpack (meshoptimizer) binary.</span>
         <span className="mesh-editor-panel__hint">The result replaces the mesh; use Keep or Revert to decide.</span>
         <span className="mesh-editor-panel__hint">
-          Simplifying a UV-mapped mesh may weld some UV seams — gltfpack cannot reach the target ratio otherwise.
+          Reaching a low ratio is usually a matter of the error budget, not the seams. Seam welding
+          is the last step, and the only one that changes how the mesh is shaded.
+        </span>
+        <span className="mesh-editor-panel__hint">
+          Normals are recomputed from the simplified topology when the result loads, so a mesh whose
+          look depended on authored (custom or weighted) normals will shade differently either way.
         </span>
       </div>
     </>

@@ -9,9 +9,11 @@ import {
   loadGlbBlob,
   loadObject3DFromUrl,
   lodFileName,
+  measureUvHealth,
   mergeCollisionForUnreal,
   object3DHasUvs,
   sanitizeBaseName,
+  uvsAreBroken,
   writeExportedFiles
 } from '../utils/meshExport'
 import {
@@ -20,6 +22,9 @@ import {
   DEFAULT_BAKE_OPTIONS,
   DEFAULT_COLLISION_OPTIONS,
   DEFAULT_INSPECT_OPTIONS,
+  DEFAULT_SIMPLIFY_OPTIONS,
+  DEFAULT_AUTO_UV_OPTIONS,
+  autoUv,
   bakeMaps,
   convertMesh,
   defaultLodRatios,
@@ -75,6 +80,15 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   const [bakeResolution, setBakeResolution] = useState(2048)
   const [bakeSamples, setBakeSamples] = useState(DEFAULT_BAKE_OPTIONS.samples)
   const [bakeFalloff, setBakeFalloff] = useState(true)
+  // On by default: a bake onto a scrambled layout is worse than no bake at all,
+  // and by the time you can see that, the export has already cost minutes.
+  const [reunwrapBroken, setReunwrapBroken] = useState(true)
+  // How gltfpack is driven for the levels above. Only reachable while the chain
+  // is on, because this dialog runs the simplifier nowhere else.
+  const [simplifyOptions, setSimplifyOptions] = useState({
+    allow_seam_breaking: false,
+    ...DEFAULT_SIMPLIFY_OPTIONS,
+  })
   const [collisionEnabled, setCollisionEnabled] = useState(false)
   const [collisionMethod, setCollisionMethod] = useState(DEFAULT_COLLISION_OPTIONS.method)
   const [checking, setChecking] = useState(false)
@@ -86,9 +100,12 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   // Unreal is the one target that wants collision *inside* the render mesh file,
   // under its UCX naming convention. Everywhere else it ships as its own file.
   const embedsCollision = collisionEnabled && selectedFormat.preset === 'unreal'
+  const setSimplifyOption = (key, value) => setSimplifyOptions(prev => ({ ...prev, [key]: value }))
   // The extras only outgrow a single column once one of them is expanded (or a
   // check report is on screen); until then the dialog stays a narrow form.
   const wideLayout = lodEnabled || collisionEnabled || !!report
+  // The simplifier column exists only while there are levels to simplify.
+  const showSimplifyColumn = lodEnabled
 
   // Recall the last folder used, but drop it silently if it no longer exists.
   useEffect(() => {
@@ -200,6 +217,10 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
         setProgress({ frac: 0.12, message: `Generating ${lodRatios.length} LOD levels…` })
         lods = await generateLods(sourceGlb, {
           ratios: lodRatios,
+          // Without these the chain ran on backend defaults, so the simplifier
+          // settings shown here had no way to reach it.
+          allowSeamBreaking: !!simplifyOptions.allow_seam_breaking,
+          simplify: simplifyOptions,
           fileName: `${base}.glb`,
           onProgress: evt => setProgress({ frac: 0.12 + 0.1 * (evt.frac ?? 0), message: evt.message }),
         })
@@ -224,10 +245,45 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
             frac: at,
             message: `Baking LOD${lod.level} textures at ${resolution}px (${index + 1}/${reduced.length})…`,
           })
+          // Kept so a failed bake can put the level back. Re-unwrapping moves
+          // where the existing texture lands, so a level that got new UVs but no
+          // new texture is worse off than one that was left alone — and a bake
+          // failure below is explicitly non-fatal.
+          const blobBeforeUnwrap = lod.blob
           try {
             // Load first so a UV-less mesh is caught before a multi-minute bake,
             // and so the scene the maps attach to is the one already in hand.
-            const scene = await loadGlbBlob(lod.blob)
+            let scene = await loadGlbBlob(lod.blob)
+
+            // A bake writes each triangle where the UV layout says it goes, so
+            // baking onto a scrambled layout faithfully reproduces the scramble —
+            // the level comes back a kaleidoscope no matter how good the bake was.
+            // Re-unwrapping first is the only fix, and it has to happen here,
+            // before the maps are generated against the old layout.
+            //
+            // Measured rather than inferred from `seamsBroken`: that flag knows
+            // which pass gltfpack ran, not whether the UVs are usable, so it
+            // misses a source whose layout was already broken on the way in. Both
+            // are checked, because each catches what the other cannot.
+            const health = measureUvHealth(scene)
+            const brokenUvs = uvsAreBroken(health) || !!lod.seamsBroken
+            if (brokenUvs && reunwrapBroken) {
+              setProgress({ frac: at, message: `Re-unwrapping LOD${lod.level} before baking…` })
+              const unwrapped = await autoUv(lod.blob, {
+                options: DEFAULT_AUTO_UV_OPTIONS,
+                fileName: `${levelBase}.glb`,
+                onProgress: evt => setProgress({
+                  frac: at,
+                  message: `Re-unwrapping LOD${lod.level} — ${evt.message || 'working…'}`,
+                }),
+              })
+              // The level ships with these UVs, so the bake target and the file
+              // written at the end have to be the same mesh.
+              lod.blob = unwrapped.blob
+              lod.reunwrapped = true
+              scene = await loadGlbBlob(lod.blob)
+            }
+
             if (!object3DHasUvs(scene)) {
               notes.push('texture bake skipped — the mesh has no UVs to bake onto')
               break
@@ -254,12 +310,23 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
             // A failed bake must not cost the export. The level still ships — it
             // just keeps the textures simplification left it with.
             console.error(`Baking LOD${lod.level} failed:`, bakeError)
+            if (lod.reunwrapped) {
+              // Undo the unwrap along with it: new UVs without the bake that was
+              // supposed to fill them would ship the old texture in the wrong
+              // places, which is a worse mesh than the one we started with.
+              lod.blob = blobBeforeUnwrap
+              lod.reunwrapped = false
+            }
             notes.push(`LOD${lod.level} bake failed (${bakeError.message || 'unknown error'}), so that level keeps its simplified textures`)
           }
         }
         const bakedCount = reduced.filter(lod => lod.baked).length
         if (bakedCount) {
           notes.push(`${bakedCount} level${bakedCount === 1 ? '' : 's'} re-baked from the original`)
+        }
+        const unwrappedCount = reduced.filter(lod => lod.reunwrapped).length
+        if (unwrappedCount) {
+          notes.push(`${unwrappedCount} level${unwrappedCount === 1 ? '' : 's'} re-unwrapped before baking (their UVs were unusable)`)
         }
       }
 
@@ -339,7 +406,13 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
       // saying why.
       const seamLimited = lods.filter(lod => lod.seamLimited).length
       if (seamLimited) {
-        notes.push(`${seamLimited} level${seamLimited === 1 ? '' : 's'} stopped short of target to protect the UV seams`)
+        notes.push(`${seamLimited} level${seamLimited === 1 ? '' : 's'} stopped short of target — raise the error budget, or allow attribute seams to break`)
+      }
+      // Worth its own note: this is the one outcome that changes how the level is
+      // shaded, and it is easy to miss in a folder of files that all look right.
+      const seamsBroken = lods.filter(lod => lod.seamsBroken).length
+      if (seamsBroken) {
+        notes.push(`${seamsBroken} level${seamsBroken === 1 ? '' : 's'} welded attribute seams — check the hard edges and the texture`)
       }
 
       // ── Standalone collision file ──────────────────────────────────────────
@@ -365,7 +438,7 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
   return (
     <div className="export-mesh-overlay" role="presentation" onClick={onClose}>
       <div
-        className={`export-mesh${wideLayout ? ' export-mesh--wide' : ''}`}
+        className={`export-mesh${wideLayout ? ' export-mesh--wide' : ''}${showSimplifyColumn ? ' export-mesh--wide3' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label="Export mesh"
@@ -519,6 +592,22 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
                           />
                           <span>Halve the resolution each level</span>
                         </label>
+                        <label className="export-mesh__check">
+                          <input
+                            type="checkbox"
+                            checked={reunwrapBroken}
+                            onChange={event => setReunwrapBroken(event.target.checked)}
+                          />
+                          <span>Re-unwrap levels whose UVs are unusable</span>
+                        </label>
+                        <p className="export-mesh__hint">
+                          Checks each level&apos;s UV layout before baking and runs Auto UV on the ones
+                          that come back contested — where two surfaces claim the same texels, which
+                          is what the aggressive simplifier leaves behind. Baking onto that layout
+                          reproduces it exactly, so the bake alone cannot save the level; it needs
+                          new UVs first. Adds an unwrap per affected level, and replaces that
+                          level&apos;s UVs in the exported file.
+                        </p>
                         <p className="export-mesh__hint">
                           Bakes {bakeMapNames.length ? bakeMapNames.map(name => BAKE_MAP_LABELS[name] || name).join(', ') : 'nothing'}
                           {' '}from the unsimplified mesh onto each level&apos;s own UVs, at{' '}
@@ -608,36 +697,144 @@ export default function ExportMeshDialog({ getObject3D, meshUrl, defaultName = '
                 )}
               </div>
             </div>
-          </div>
 
-          {progress && (
-            <div className="export-mesh__progress" role="status">
-              <div className="export-mesh__progress-track">
-                <div
-                  className="export-mesh__progress-bar"
-                  style={{ width: `${Math.round(Math.min(1, Math.max(0, progress.frac)) * 100)}%` }}
-                />
+            {showSimplifyColumn && (
+              <div className="export-mesh__column">
+                <div className="export-mesh__extras">
+                  <span className="export-mesh__label">Simplifier (meshoptimizer)</span>
+
+                  {/* The knob that decides whether a level reaches its ratio at
+                      all. gltfpack's own default is 1%, strict enough that a
+                      level routinely stalls well above its target — and the
+                      stall reads as "the UV seams did this", which sends the run
+                      to the pass that reshades the mesh. */}
+                  <label className="export-mesh__inline-field">
+                    <span>Error budget</span>
+                    <input
+                      className="export-mesh__input export-mesh__input--inline"
+                      type="number"
+                      min={0.1}
+                      max={50}
+                      step={0.1}
+                      value={Number(((simplifyOptions.simplify_error ?? 0.05) * 100).toFixed(1))}
+                      onChange={event => setSimplifyOption(
+                        'simplify_error',
+                        Math.min(50, Math.max(0.1, Number(event.target.value) || 0.1)) / 100
+                      )}
+                    />
+                    <span>%</span>
+                  </label>
+                  <p className="export-mesh__hint">
+                    How far a level may move off the original surface. This, not the UV seams,
+                    is usually what stops a level short of its ratio — raising it reaches the
+                    target while leaving normals and UVs alone. gltfpack&apos;s own default is 1%.
+                  </p>
+
+                  <label className="export-mesh__check">
+                    <input
+                      type="checkbox"
+                      checked={!!simplifyOptions.lock_border}
+                      onChange={event => setSimplifyOption('lock_border', event.target.checked)}
+                    />
+                    <span>Lock border vertices</span>
+                  </label>
+                  <p className="export-mesh__hint">
+                    Pins open edges, so a level of one piece of a larger set does not pull away
+                    from its neighbours at the shared edge. Costs some reduction.
+                  </p>
+
+                  <label className="export-mesh__check">
+                    <input
+                      type="checkbox"
+                      checked={!!simplifyOptions.allow_seam_breaking}
+                      onChange={event => setSimplifyOption('allow_seam_breaking', event.target.checked)}
+                    />
+                    <span>Allow attribute seams to break</span>
+                  </label>
+                  {simplifyOptions.allow_seam_breaking && (
+                    <div className="export-mesh__extra-body">
+                      <label className="export-mesh__check">
+                        <input
+                          type="checkbox"
+                          checked={!!simplifyOptions.permissive}
+                          onChange={event => setSimplifyOption('permissive', event.target.checked)}
+                        />
+                        <span>Permissive collapses</span>
+                      </label>
+                      <label className="export-mesh__check">
+                        <input
+                          type="checkbox"
+                          checked={!!simplifyOptions.aggressive}
+                          onChange={event => setSimplifyOption('aggressive', event.target.checked)}
+                        />
+                        <span>Aggressive pass (last resort)</span>
+                      </label>
+                      {simplifyOptions.aggressive ? (
+                        <p className="export-mesh__hint">
+                          The aggressive pass rebuilds the vertex set, so normals and UVs are both
+                          reassigned: hard edges smooth over and the texture scrambles. It is the
+                          only thing that breaks a real seam floor. Turn it off to keep the shading
+                          and ship coarser levels instead.
+                        </p>
+                      ) : (
+                        <p className="export-mesh__hint">
+                          Shading is protected: a level that cannot reach its target stops above it
+                          and is reported, rather than shipped reshaded.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <p className="export-mesh__hint">
+                    A level will not collapse an edge across an attribute discontinuity, and on a
+                    UV-mapped mesh every island boundary is one — so a seam-heavy mesh has a floor
+                    no error budget will pass. Raise the budget first; it is the cheaper fix and
+                    usually the real limit. Welded seams are exactly what the texture bake above
+                    repairs.
+                  </p>
+                </div>
               </div>
-              <span className="export-mesh__progress-message">{progress.message}</span>
+            )}
+          </div>
+        </div>
+
+        {/* Progress and the result messages belong to the pinned footer, not to
+            the scrolling body. With the LOD and simplifier columns expanded the
+            body is far taller than the viewport, so a progress bar at the end of
+            it sits below the fold at exactly the moment it matters: you press
+            Export and the dialog looks inert until you happen to scroll. */}
+        <div className="export-mesh__footer">
+          {(progress || error || success) && (
+            <div className="export-mesh__status">
+              {progress && (
+                <div className="export-mesh__progress" role="status">
+                  <div className="export-mesh__progress-track">
+                    <div
+                      className="export-mesh__progress-bar"
+                      style={{ width: `${Math.round(Math.min(1, Math.max(0, progress.frac)) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="export-mesh__progress-message">{progress.message}</span>
+                </div>
+              )}
+
+              {error && <div className="export-mesh__message export-mesh__message--error">{error}</div>}
+              {success && <div className="export-mesh__message export-mesh__message--success">{success}</div>}
             </div>
           )}
 
-          {error && <div className="export-mesh__message export-mesh__message--error">{error}</div>}
-          {success && <div className="export-mesh__message export-mesh__message--success">{success}</div>}
-        </div>
-
-        <div className="export-mesh__actions">
-          <button type="button" className="export-mesh__btn export-mesh__btn--secondary" onClick={onClose}>
-            Close
-          </button>
-          <button
-            type="button"
-            className="export-mesh__btn export-mesh__btn--primary"
-            onClick={handleExport}
-            disabled={exporting}
-          >
-            {exporting ? 'Exporting…' : 'Export'}
-          </button>
+          <div className="export-mesh__actions">
+            <button type="button" className="export-mesh__btn export-mesh__btn--secondary" onClick={onClose}>
+              Close
+            </button>
+            <button
+              type="button"
+              className="export-mesh__btn export-mesh__btn--primary"
+              onClick={handleExport}
+              disabled={exporting}
+            >
+              {exporting ? 'Exporting…' : 'Export'}
+            </button>
+          </div>
         </div>
       </div>
 

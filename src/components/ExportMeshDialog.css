@@ -73,7 +73,8 @@
   padding: 1.25rem;
 }
 
-/* One column by default; two once the extras are expanded (see --wide below).
+/* One column by default; two once the extras are expanded, three once the LOD
+   chain is on and the simplifier options appear (see --wide / --wide3 below).
    Progress and the result messages stay outside this grid, full width. */
 .export-mesh__columns {
   display: grid;
@@ -304,6 +305,33 @@
 .export-mesh__finding--warn { border-left-color: #e0a030; }
 .export-mesh__finding--pass { border-left-color: #9cffce; }
 
+/* Everything pinned below the scrolling body: progress, the result message, and
+   the buttons. The first two used to be the last children of .export-mesh__body,
+   which put them below the fold whenever the extras were expanded — the dialog
+   appeared to do nothing when Export was pressed. The panel background and top
+   rule live here now rather than on the actions row, so the whole footer reads as
+   one surface however much of it is showing. */
+.export-mesh__footer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: rgba(30, 32, 34, 0.78);
+  border-top: 1px solid rgba(71, 72, 74, 0.18);
+}
+
+.export-mesh__status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.9rem 1.25rem 0;
+  /* A success line names every file written and every note collected, which on a
+     six-level chain runs long. Cap it and scroll inside, so the buttons below can
+     never be pushed off screen by the message telling you the job is done. */
+  max-height: 30vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .export-mesh__actions {
   flex: 0 0 auto;
   display: flex;
@@ -311,8 +339,6 @@
   justify-content: flex-end;
   gap: 0.6rem;
   padding: 1rem 1.25rem;
-  background: rgba(30, 32, 34, 0.78);
-  border-top: 1px solid rgba(71, 72, 74, 0.18);
 }
 
 .export-mesh__btn {
@@ -395,5 +421,20 @@
   .export-mesh--wide .export-mesh__extras {
     padding-top: 0;
     border-top: none;
+  }
+}
+
+/* Three columns once the LOD chain is on: the simplifier knobs are their own
+   group, and stacking them under the bake options buries the one setting that
+   decides whether a level reaches its ratio at all. Deliberately a wider
+   breakpoint than --wide, so a mid-width window keeps two columns and lets the
+   third wrap underneath rather than squeezing all three. */
+@media (min-width: 1180px) {
+  .export-mesh--wide3 {
+    max-width: 1240px;
+  }
+
+  .export-mesh--wide3 .export-mesh__columns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

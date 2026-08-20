@@ -113,6 +113,25 @@ async function callMeshTool(endpoint, meshBlob, { options = {}, fileName = 'mesh
   }
 }
 
+// Lived in MeshEditorPage until the export dialog needed to unwrap too. Kept
+// here with the other DEFAULT_*_OPTIONS so both callers unwrap identically.
+export const DEFAULT_AUTO_UV_OPTIONS = {
+  max_cone_deg: 50,
+  sharp_weight: 0.35,
+  min_faces: 20,
+  min_area_frac: 0.004,
+  fold_cap_deg: 88,
+  refine: true,
+  refine_target_faces: 80,
+  refine_ad_thresh: 1.32,
+  method: 'auto',
+  arap_iters: 4,
+  resolution: 1024,
+  padding_texels: 4,
+  weld: true,
+  weld_tol_frac: 0.1,
+}
+
 export function autoUv(meshBlob, opts = {}) {
   return callMeshTool('/meshes/auto-uv', meshBlob, opts)
 }
@@ -256,14 +275,46 @@ export const DEFAULT_INSPECT_OPTIONS = {
   expect_ground_pivot: false,
 }
 
+// The gltfpack simplifier knobs, shared by Optimize and the LOD chain so a new
+// option cannot reach one path and quietly miss the other.
+//
+// simplify_error is the important one: it maps to gltfpack's -se, whose own
+// default (0.01) is what stops most meshes short of their target ratio. Raising
+// it reaches the target by moving the surface, which costs nothing in normals or
+// UVs — unlike `aggressive`, which reaches it by rebuilding the vertex set.
+export const DEFAULT_SIMPLIFY_OPTIONS = {
+  simplify_error: 0.05,
+  permissive: false,
+  lock_border: false,
+  // Left on so a mesh that asks to break seams still reaches its target as it
+  // always did. It is separated from allow_seam_breaking only so it can be
+  // turned off on its own, which is the setting that protects hard edges.
+  aggressive: true,
+}
+
+function simplifyPayload(options = {}) {
+  return {
+    simplify_error: options.simplify_error ?? DEFAULT_SIMPLIFY_OPTIONS.simplify_error,
+    permissive: !!options.permissive,
+    lock_border: !!options.lock_border,
+    aggressive: options.aggressive ?? DEFAULT_SIMPLIFY_OPTIONS.aggressive,
+  }
+}
+
 // LOD chain. Runs the bundled gltfpack binary once per ratio server-side (not the
 // Python service) and returns one GLB per level, each simplified from the
 // original. `ratios` is ordered LOD0 → LODn, e.g. [1, 0.5, 0.25, 0.12].
+// `simplify` carries the same option bag Optimize uses, so a chain is built with
+// the settings shown in the panel rather than the server's defaults.
 // Resolves to [{ level, ratio, blob, triangles, passthrough }].
-export async function generateLods(meshBlob, { ratios = [], allowSeamBreaking = false, fileName = 'mesh.glb', onProgress = null } = {}) {
+export async function generateLods(meshBlob, { ratios = [], allowSeamBreaking = false, simplify = null, fileName = 'mesh.glb', onProgress = null } = {}) {
   const form = new FormData()
   form.append('meshFile', meshBlob, fileName)
-  form.append('options', JSON.stringify({ ratios, allow_seam_breaking: allowSeamBreaking }))
+  form.append('options', JSON.stringify({
+    ratios,
+    allow_seam_breaking: allowSeamBreaking,
+    ...simplifyPayload(simplify || {}),
+  }))
 
   onProgress?.({ type: 'progress', stage: 'run', frac: 0.2, message: `Generating ${ratios.length} LOD levels…` })
 

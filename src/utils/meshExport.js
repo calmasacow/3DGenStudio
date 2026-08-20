@@ -454,6 +454,154 @@ export function object3DHasUvs(object) {
   return found
 }
 
+// How many times over the used atlas may be written before the layout counts as
+// unusable rather than merely untidy.
+//
+// Measured, and measured twice — the first attempt gated on the fraction of
+// contested texels and was wrong. That statistic scales with how much of a
+// layout is island *border*, which is negligible on a dense mesh and large on a
+// sparse one, so it read a perfectly good 756-triangle unwrap as 18% contested
+// while a 37.9k-triangle mesh read 1%. Raising the raster to 1024 moved it to
+// 18.4%, which is what ruled out a rasterizing artefact: the overlap was real,
+// just harmless. A threshold that separates those two cannot exist.
+//
+// Total written area over union area has no such bias — it asks how many times
+// the atlas is painted, which is exactly the thing a bake cannot survive:
+//
+//   healthy 37.9k source ........ 1.01x
+//   healthy 9.2k seam-preserving  1.01x
+//   healthy 756 Auto UV output .. 1.24x
+//   gltfpack -sa at 758 tris .... 39.6x
+//
+// Identical at raster 256, 512 and 1024, so it is a property of the layout and
+// not of the measurement. 4x sits ~3x above the worst healthy case and ~10x
+// below the broken one.
+export const UV_ATLAS_WRITES_BROKEN = 4
+
+// One place decides, because the export dialog and the mesh editor must agree on
+// what "broken" means. A mesh with no UVs at all counts as broken here: for the
+// callers that ask this question, the answer to both is the same unwrap.
+export function uvsAreBroken(health) {
+  return !health?.uvs || health.atlasWrites > UV_ATLAS_WRITES_BROKEN
+}
+
+// Is this object's UV layout still usable as a bake target?
+//
+// A bake writes each triangle's appearance to wherever that triangle sits in the
+// atlas. If several surfaces claim the same texels the bake cannot satisfy them
+// all, and the result is the kaleidoscope the aggressive simplifier leaves behind
+// — the bake did its job, the layout it was given was the problem.
+//
+// `atlasWrites` is the figure to read and the only one gated on (see
+// UV_ATLAS_WRITES_BROKEN): total UV triangle area over the area actually covered,
+// i.e. how many times over the atlas gets painted. `overlap` and `spread` are
+// reported because they are cheap and informative, but neither is trustworthy as
+// a threshold — overlap in particular moves with mesh density.
+//
+// The union area comes from a raster, as it does in the Python inspect service and
+// for the same reason: exact triangle-triangle area is far more work for an answer
+// that agrees to within a texel. 256 is ample, and unlike the overlap fraction the
+// ratio does not shift with it. Runs in ~3-35ms on meshes up to 38k triangles,
+// which is nothing beside the Blender bake it protects.
+export function measureUvHealth(object, { grid = 256 } = {}) {
+  const hits = new Uint16Array(grid * grid)
+  const densities = []
+  let uvs = false
+  let triangles = 0
+  let writtenArea = 0
+
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const ab = new THREE.Vector3()
+  const ac = new THREE.Vector3()
+
+  object.updateMatrixWorld(true)
+  object.traverse(child => {
+    const geometry = child.isMesh ? child.geometry : null
+    const position = geometry?.attributes?.position
+    const uv = geometry?.attributes?.uv
+    if (!position?.count || !uv?.count) return
+    uvs = true
+
+    const index = geometry.index
+    const count = index ? index.count : position.count
+    for (let t = 0; t + 2 < count; t += 3) {
+      const i0 = index ? index.getX(t) : t
+      const i1 = index ? index.getX(t + 1) : t + 1
+      const i2 = index ? index.getX(t + 2) : t + 2
+
+      // World space, so a scaled node cannot skew the density figure.
+      a.fromBufferAttribute(position, i0).applyMatrix4(child.matrixWorld)
+      b.fromBufferAttribute(position, i1).applyMatrix4(child.matrixWorld)
+      c.fromBufferAttribute(position, i2).applyMatrix4(child.matrixWorld)
+      const area3d = ab.subVectors(b, a).cross(ac.subVectors(c, a)).length() * 0.5
+
+      const u0 = uv.getX(i0), v0 = uv.getY(i0)
+      const u1 = uv.getX(i1), v1 = uv.getY(i1)
+      const u2 = uv.getX(i2), v2 = uv.getY(i2)
+      const det = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0)
+
+      triangles += 1
+      // |det| / 2 is this triangle's footprint in UV space. Summed over the mesh
+      // and divided by the union below, it says how many times the atlas is
+      // written — the one number that separates a scrambled layout from a sparse
+      // but valid one.
+      const uvArea = Math.abs(det) * 0.5
+      writtenArea += uvArea
+      if (area3d > 1e-12 && uvArea > 1e-16) {
+        densities.push(Math.sqrt(uvArea / area3d))
+      }
+      if (Math.abs(det) < 1e-20) continue
+
+      // Mark every texel whose centre falls inside this UV triangle.
+      const minX = Math.max(0, Math.floor(Math.min(u0, u1, u2) * grid))
+      const maxX = Math.min(grid - 1, Math.ceil(Math.max(u0, u1, u2) * grid))
+      const minY = Math.max(0, Math.floor(Math.min(v0, v1, v2) * grid))
+      const maxY = Math.min(grid - 1, Math.ceil(Math.max(v0, v1, v2) * grid))
+      for (let py = minY; py <= maxY; py += 1) {
+        const y = (py + 0.5) / grid
+        for (let px = minX; px <= maxX; px += 1) {
+          const x = (px + 0.5) / grid
+          const w0 = ((x - u0) * (v2 - v0) - (u2 - u0) * (y - v0)) / det
+          const w1 = ((u1 - u0) * (y - v0) - (x - u0) * (v1 - v0)) / det
+          if (w0 >= 0 && w1 >= 0 && w0 + w1 <= 1) {
+            const at = py * grid + px
+            if (hits[at] < 65535) hits[at] += 1
+          }
+        }
+      }
+    }
+  })
+
+  if (!uvs) return { uvs: false, atlasWrites: 0, overlap: 0, spread: 0, triangles: 0 }
+
+  let covered = 0
+  let contested = 0
+  for (let i = 0; i < hits.length; i += 1) {
+    if (hits[i] > 0) covered += 1
+    if (hits[i] > 1) contested += 1
+  }
+  densities.sort((x, y) => x - y)
+  const at = q => densities[Math.min(densities.length - 1, Math.max(0, Math.round(q * (densities.length - 1))))] || 0
+  const low = at(0.05)
+
+  // Union of the covered atlas, from the raster. A sliver counts whole texels, so
+  // this runs slightly high, which pushes atlasWrites slightly low — erring
+  // towards calling a layout healthy rather than condemning a good one.
+  const unionArea = covered / (grid * grid)
+
+  return {
+    uvs: true,
+    triangles,
+    atlasWrites: unionArea > 0 ? writtenArea / unionArea : 0,
+    // Both reported, neither gated on. Overlap scales with mesh density (see
+    // UV_ATLAS_WRITES_BROKEN); spread just tracks atlasWrites at a distance.
+    overlap: covered ? contested / covered : 0,
+    spread: low > 0 ? at(0.95) / low : 0,
+  }
+}
+
 // Load one baked PNG into a texture. Data maps stay in NoColorSpace (they encode
 // values, not colour) and only base colour is sRGB; flipY is false throughout to
 // match the glTF convention the loader's own textures already use, and channel 0

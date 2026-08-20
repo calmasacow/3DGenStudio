@@ -108,12 +108,18 @@ const AUTO_RIG_OPTIONS = {
 };
 
 // gltfpack (meshoptimizer) simplification. Runs in the Node backend, not the
-// Python service. allow_seam_breaking matters more than it looks: gltfpack locks
-// vertices on a UV seam, so a fully seamed mesh can ignore simplify_ratio
-// entirely until this is turned on — the result then needs a re-bake or re-unwrap.
+// Python service. Two separate things stop a mesh short of simplify_ratio and
+// they want different fixes: simplify_error (the surface-deviation cap, and the
+// one that binds first on most meshes) is free to raise, while
+// allow_seam_breaking reaches the target by welding attribute seams, which
+// reassigns normals and UVs and needs a re-bake or re-unwrap afterwards.
 const OPTIMIZE_OPTIONS = {
   simplify_ratio: z.number().min(0.01).max(1).default(0.5).describe('Target fraction of the original triangle count (0.5 = half). 1 leaves the mesh untouched.'),
-  allow_seam_breaking: z.boolean().default(false).describe('Let the simplifier collapse vertices that sit on a UV seam. Off (default) preserves the texture mapping but caps how far a seam-heavy mesh can reduce — check stats.seam_limited. On reaches the target but distorts UVs, so re-unwrap or re-bake afterwards.')
+  simplify_error: z.number().min(0.001).max(1).default(0.05).describe("How far the simplifier may move the surface, as a fraction of the mesh size (gltfpack's -se). This is normally what caps a reduction, NOT the UV seams: raising it reaches the target while leaving normals and UVs untouched, so try it before allow_seam_breaking. gltfpack's own default is 0.01; this defaults to 0.05. Values near 1 can collapse the mesh entirely, which is refused rather than saved."),
+  allow_seam_breaking: z.boolean().default(false).describe('Let the simplifier weld vertices sitting on an attribute (UV or normal) seam. Off (default) preserves the mapping and the hard edges but caps how far a seam-heavy mesh can reduce — check stats.seam_limited. On reaches the target but reassigns UVs and normals, so re-unwrap or re-bake afterwards.'),
+  permissive: z.boolean().default(false).describe("gltfpack's -sp: collapse across attribute discontinuities while still choosing by quality. Measured as a no-op on every mesh tested, so it is offered but not relied on. Only applies when allow_seam_breaking is on."),
+  aggressive: z.boolean().optional().describe("gltfpack's -sa: hit the ratio regardless of quality. The only thing that breaks a genuine seam floor, and the most destructive — it rebuilds the vertex set, so hard edges smooth over and the texture scrambles. Defaults to following allow_seam_breaking; set false to keep shading intact and accept a coarser mesh."),
+  lock_border: z.boolean().default(false).describe('Pin vertices on an open edge so a mesh that is one piece of a larger set does not pull away from its neighbours at the shared edge. Costs some reduction.')
 };
 
 // Mirrors InspectOptions in python-server/app/schemas.py. These budgets are what
@@ -341,7 +347,7 @@ export function registerMeshToolTools(server, { api, notifyMutation }) {
 
   server.registerTool('optimize_mesh', {
     title: 'Optimize / simplify mesh',
-    description: 'Simplify a project mesh asset with the bundled gltfpack (meshoptimizer) binary and save the result as a new version. Runs in the app backend, so it needs no Python service. IMPORTANT: gltfpack locks vertices that sit on a UV seam, so a seam-heavy textured mesh can barely reduce at all until allow_seam_breaking is on — always read stats.seam_limited and stats.achieved_ratio rather than assuming the requested ratio was met. To simplify AND keep the look, bake_mesh_maps the original detail onto the result afterwards. For a whole LOD chain use generate_lods instead.',
+    description: 'Simplify a project mesh asset with the bundled gltfpack (meshoptimizer) binary and save the result as a new version. Runs in the app backend, so it needs no Python service. IMPORTANT: the requested ratio is often NOT met — always read stats.seam_limited and stats.achieved_ratio rather than assuming it was. When it falls short, raise simplify_error first (it is the cap that binds on most meshes, and it costs nothing in normals or UVs); only reach for allow_seam_breaking if the mesh still will not budge, because that welds attribute seams and reassigns both UVs and normals. To simplify AND keep the look, bake_mesh_maps the original detail onto the result afterwards. For a whole LOD chain use generate_lods instead.',
     inputSchema: {
       ...meshTarget,
       options: z.object(OPTIMIZE_OPTIONS).default({}).describe('Simplification parameters.'),
@@ -479,22 +485,43 @@ export function registerMeshToolTools(server, { api, notifyMutation }) {
 
   server.registerTool('generate_lods', {
     title: 'Generate LOD chain',
-    description: 'Build a level-of-detail chain from a project mesh asset with the bundled gltfpack binary. Each level is simplified from the ORIGINAL mesh, not from the level above it — chaining compounds the error. Ratios are ordered LOD0 → LODn; a ratio of 1 means "the source untouched", so the conventional chain starts with 1. Levels are saved as versions of the asset named "<name> LOD<n>" and/or written to a folder. The same UV-seam caveat as optimize_mesh applies: read seam_limited on each level. Runs in the app backend, so no Python service is needed. To keep the silhouette readable at distance, bake_mesh_maps each reduced level against the original.',
+    description: 'Build a level-of-detail chain from a project mesh asset with the bundled gltfpack binary. Each level is simplified from the ORIGINAL mesh, not from the level above it — chaining compounds the error. Ratios are ordered LOD0 → LODn; a ratio of 1 means "the source untouched", so the conventional chain starts with 1. Levels are saved as versions of the asset named "<name> LOD<n>" and/or written to a folder. The same caveats as optimize_mesh apply: read seam_limited on each level, and raise simplify_error before allow_seam_breaking. Runs in the app backend, so no Python service is needed. To keep the silhouette readable at distance, bake_mesh_maps each reduced level against the original.',
     inputSchema: {
       ...meshTarget,
       ratios: z.array(z.number().min(0.01).max(1)).min(1).max(8).default([1, 0.5, 0.25, 0.12]).describe('Triangle-count fractions, ordered LOD0 → LODn. At most 8 levels.'),
-      allow_seam_breaking: z.boolean().default(false).describe('Let the simplifier collapse UV-seam vertices. Off preserves the texture mapping but caps how far a seam-heavy mesh can reduce.'),
+      simplify_error: z.number().min(0.001).max(1).default(0.05).describe("Surface-deviation cap (gltfpack's -se), applied to every level. Usually the reason a level stops short of its ratio; raising it reaches the target without touching normals or UVs."),
+      allow_seam_breaking: z.boolean().default(false).describe('Let the simplifier weld attribute-seam vertices. Off preserves the texture mapping and the hard edges but caps how far a seam-heavy mesh can reduce.'),
+      permissive: z.boolean().default(false).describe("gltfpack's -sp. Only applies when allow_seam_breaking is on; measured as a no-op on every mesh tested."),
+      aggressive: z.boolean().optional().describe("gltfpack's -sa, the destructive pass that rebuilds the vertex set. Defaults to following allow_seam_breaking; set false to protect shading and accept coarser levels."),
+      lock_border: z.boolean().default(false).describe('Pin open-edge vertices so levels do not pull away from neighbouring meshes.'),
       save: z.boolean().default(true).describe('Save each reduced level as a new version of the asset.'),
       targetFolder: z.string().optional().describe('Also write the chain as <name>_LOD<n>.glb into this absolute folder.')
     }
-  }, toolHandler(async ({ projectId, assetId, ratios, allow_seam_breaking: allowSeamBreaking = false, save = true, targetFolder }, extra) => {
+  }, toolHandler(async ({
+    projectId, assetId, ratios,
+    allow_seam_breaking: allowSeamBreaking = false,
+    simplify_error: simplifyError = 0.05,
+    permissive = false,
+    aggressive,
+    lock_border: lockBorder = false,
+    save = true, targetFolder
+  }, extra) => {
     const reportProgress = createProgressReporter(extra);
     const { asset, buffer, fileName } = await loadMeshAsset(api, projectId, assetId);
     await reportProgress(10, 100, `Generating ${ratios.length} LOD levels`);
 
     const form = new FormData();
     form.append('meshFile', meshBlob(buffer), fileName);
-    form.append('options', JSON.stringify({ ratios, allow_seam_breaking: allowSeamBreaking }));
+    form.append('options', JSON.stringify({
+      ratios,
+      allow_seam_breaking: allowSeamBreaking,
+      simplify_error: simplifyError,
+      permissive,
+      // Left out when unset so the backend keeps following the seam permission,
+      // which is what callers written against the old schema expect.
+      ...(aggressive == null ? {} : { aggressive }),
+      lock_border: lockBorder
+    }));
     const done = await api.apiForm('POST', '/meshes/lods', form);
 
     const base = baseNameOf(asset);
