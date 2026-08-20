@@ -6810,6 +6810,15 @@ app.post('/api/meshes/rig', meshToolsUpload.single('meshFile'), async (req, res)
 // plain-float and loads cleanly into the editable geometry pipeline.
 const MESHOPTIMIZER_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'tools', 'meshoptimizer');
 
+// gltfpack's own -se default is 0.01, which is strict enough that most meshes
+// stop well short of the ratio they were asked for. 0.05 was picked by measuring
+// the bundled binary: it reaches the target wherever 0.01 stalled on the test
+// meshes, and never collapsed one to nothing (which -se 1 does — see the guard
+// in spawnGltfpack). Callers that want the old behaviour can pass 0.01.
+const DEFAULT_SIMPLIFY_ERROR = 0.05;
+const MIN_SIMPLIFY_ERROR = 0.001;
+const MAX_SIMPLIFY_ERROR = 1;
+
 function resolveGltfpackPath() {
   const platform = process.platform;
   if (platform === 'win32') {
@@ -6825,10 +6834,17 @@ function resolveGltfpackPath() {
   throw new Error(`Unsupported platform for gltfpack: ${platform}`);
 }
 
-// One gltfpack invocation. `aggressive` adds -sa; see runSimplify for why.
+// One gltfpack invocation. `flags` picks the simplifier's behaviour; see
+// runGltfpack for how they are chosen.
 // Returns { buffer, triangles, inputTriangles } — the counts come from the -v
 // report, which gltfpack only prints when asked.
-async function spawnGltfpack(inputBuffer, ratio, aggressive) {
+async function spawnGltfpack(inputBuffer, ratio, flags = {}) {
+  const {
+    error = DEFAULT_SIMPLIFY_ERROR,
+    permissive = false,
+    aggressive = false,
+    lockBorder = false,
+  } = flags;
   const binaryPath = resolveGltfpackPath();
   if (!existsSync(binaryPath)) {
     throw new Error(`gltfpack binary not found at ${binaryPath}`);
@@ -6850,8 +6866,26 @@ async function spawnGltfpack(inputBuffer, ratio, aggressive) {
     // loses its UVs (disabling the texture/paint/projection modes).
     // -v makes gltfpack report the triangle counts we parse below; its output is
     // captured, never shown.
-    const args = ['-i', inputPath, '-o', outputPath, '-si', String(ratio), '-noq', '-kv', '-v'];
+    // -se caps how far the simplifier may move the surface. gltfpack defaults
+    // it to 0.01 (1%), and that — not UV seams — is what stops most meshes
+    // short of their target: on a 37.9k-triangle textured mesh, -si 0.25 stalls
+    // at 11,740 triangles under the default and reaches its 9,475 target at
+    // -se 0.05, welding nothing. Passing it explicitly is what keeps -sa (which
+    // does weld, taking normals and UVs with it) from being the only way down.
+    const args = [
+      '-i', inputPath, '-o', outputPath,
+      '-si', String(ratio), '-se', String(error),
+      '-noq', '-kv', '-v',
+    ];
+    // -sp allows collapses across attribute discontinuities while staying
+    // quality-driven. It measured as a no-op on every mesh tried here (identical
+    // triangle counts with and without, at every ratio), so it is an opt-in knob
+    // rather than an automatic step on the way to -sa.
+    if (permissive) args.push('-sp');
     if (aggressive) args.push('-sa');
+    // -slb pins border vertices, so a mesh that is one piece of a larger set
+    // does not pull away from its neighbours along the shared edge.
+    if (lockBorder) args.push('-slb');
 
     const report = await new Promise((resolve, reject) => {
       const proc = spawn(binaryPath, args, { windowsHide: true });
@@ -6874,7 +6908,18 @@ async function spawnGltfpack(inputBuffer, ratio, aggressive) {
       return match ? Number(match[1]) : null;
     };
 
-    return { buffer, triangles: count('output'), inputTriangles: count('input') };
+    const triangles = count('output');
+    const inputTriangles = count('input');
+    // A loose error budget can collapse the mesh outright, and gltfpack still
+    // exits 0 when it does: the GLB comes back with zero primitives and the
+    // images still attached, so it is neither an error nor suspiciously small.
+    // Catch it here, where the cause is still known, rather than let an empty
+    // mesh reach the editor as "No editable mesh geometry found".
+    if (inputTriangles && !triangles) {
+      throw new Error('Simplification removed the whole mesh. Lower the simplification error, or raise the target ratio.');
+    }
+
+    return { buffer, triangles, inputTriangles };
   } finally {
     await Promise.all([inputPath, outputPath].map(f => fs.rm(f, { force: true }).catch(() => {})));
   }
@@ -6896,26 +6941,50 @@ function glbHasUvs(buffer) {
 
 // Simplify a GLB to `ratio` of its triangle count.
 //
-// gltfpack's simplifier will not collapse edges across attribute seams, and on a
-// UV-mapped mesh every island boundary is one. Past a certain reduction it
-// therefore stalls: a 12.8k-triangle textured mesh comes back at 11.7k whether
-// you ask for 50% or 12%. Its -sa flag lifts the restriction and hits the target
-// — by welding seams, which scrambles the texture across the whole model.
+// Two different things stop a mesh short of its target, and they were previously
+// conflated. Measured on the bundled gltfpack 1.2:
 //
-// There is no third option. pymeshlab's texture-aware decimator was measured on
-// the same mesh: it preserves UVs beautifully and stalls at 12.7k, i.e. it hits
-// exactly the same wall. So the choice is real, and it belongs to the caller:
+//   1. The error budget (-se, default 0.01). This is the one that bites first
+//      and most often. A 37.9k-triangle textured mesh asked for -si 0.25 stalls
+//      at 11,740 triangles under the default and lands on its 9,475 target at
+//      -se 0.05 — no seams welded, normals and UVs untouched. This is a knob,
+//      not a wall, which is why simplifyError is now a caller-facing option.
+//
+//   2. A genuine attribute-seam floor. The same mesh will not go below ~9,200
+//      triangles at any error budget, because the simplifier will not collapse
+//      across attribute discontinuities. Only -sa breaks that floor, and it does
+//      so by rebuilding the vertex set: normals and UVs are both reassigned, so
+//      hard edges smooth over and the texture scrambles together.
+//
+// -sp ("permissive") reads like the middle ground and is exposed as one, but it
+// measured as a no-op here: identical triangle counts with and without, on every
+// mesh and ratio tried. It is passed through when asked for and nothing more.
+//
+// So the ladder only escalates to the destructive pass, and only when the caller
+// has said yes to it:
 //
 //   * no UVs            -> nothing to protect, use -sa and hit the target.
-//   * UVs, not allowed  -> stop at whatever the seam-preserving pass reached and
+//   * UVs, not allowed  -> stop where the seam-preserving pass reached and
 //                          report `seamLimited` so the UI can say why.
 //   * UVs, allowed      -> the caller opted in with eyes open.
 //
-// Falling back to -sa automatically (as this did) trades a silently
-// under-simplified mesh for a silently ruined texture. Both are silent; the
-// second is worse, because it looks like it worked.
-async function runGltfpack(inputBuffer, ratio, { allowSeamBreaking = false } = {}) {
-  const first = await spawnGltfpack(inputBuffer, ratio, false);
+// Falling back to -sa automatically (as this did, before the error budget was
+// even in play) trades a silently under-simplified mesh for a silently ruined
+// one. Both are silent; the second is worse, because it looks like it worked.
+async function runGltfpack(inputBuffer, ratio, {
+  allowSeamBreaking = false,
+  simplifyError = DEFAULT_SIMPLIFY_ERROR,
+  permissive = false,
+  lockBorder = false,
+  aggressive = null,
+} = {}) {
+  // `aggressive` splits the destructive pass out from the seam permission so the
+  // UI can offer it separately. Existing callers (MCP tools, saved Kanban steps)
+  // send only allow_seam_breaking and must keep reaching their target, so when
+  // it is unset it follows the seam permission exactly as before.
+  const allowAggressive = aggressive == null ? !!allowSeamBreaking : !!aggressive;
+  const base = { error: simplifyError, permissive, lockBorder };
+  const first = await spawnGltfpack(inputBuffer, ratio, base);
   const achieved = (result) => ({
     ...result,
     achievedRatio: result.inputTriangles && result.triangles
@@ -6938,15 +7007,41 @@ async function runGltfpack(inputBuffer, ratio, { allowSeamBreaking = false } = {
     return achieved({ ...first, seamLimited: true });
   }
 
-  const aggressive = await spawnGltfpack(inputBuffer, ratio, true);
-  const best = aggressive.triangles && aggressive.triangles < first.triangles ? aggressive : first;
-  return achieved({ ...best, seamLimited: false, seamsBroken: best === aggressive });
+  // Seams may be broken but the destructive pass was refused outright: report it
+  // the same way, because the outcome the caller sees is the same — short of
+  // target, nothing scrambled.
+  if (!allowAggressive) {
+    return achieved({ ...first, seamLimited: true });
+  }
+
+  const sloppy = await spawnGltfpack(inputBuffer, ratio, { ...base, aggressive: true });
+  const best = sloppy.triangles && sloppy.triangles < first.triangles ? sloppy : first;
+  return achieved({ ...best, seamLimited: false, seamsBroken: best === sloppy });
 }
 
 function clampSimplifyRatio(value, fallback = 1) {
   const ratio = Number(value);
   if (!Number.isFinite(ratio)) return fallback;
   return Math.min(1, Math.max(0.001, ratio));
+}
+
+// Unset means "use the measured default", not 0 — gltfpack treats -se 0 as
+// "deviate by nothing", which returns the mesh completely unsimplified.
+function clampSimplifyError(value, fallback = DEFAULT_SIMPLIFY_ERROR) {
+  const error = Number(value);
+  if (!Number.isFinite(error)) return fallback;
+  return Math.min(MAX_SIMPLIFY_ERROR, Math.max(MIN_SIMPLIFY_ERROR, error));
+}
+
+// The simplifier options shared by /optimize and /lods.
+function readSimplifyOptions(options = {}) {
+  return {
+    allowSeamBreaking: !!options.allow_seam_breaking,
+    simplifyError: clampSimplifyError(options.simplify_error),
+    permissive: !!options.permissive,
+    lockBorder: !!options.lock_border,
+    aggressive: options.aggressive == null ? null : !!options.aggressive,
+  };
 }
 
 app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req, res) => {
@@ -6961,14 +7056,15 @@ app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req,
       try { options = JSON.parse(req.body.options); } catch { options = {}; }
     }
     const ratio = clampSimplifyRatio(options.simplify_ratio);
-    const allowSeamBreaking = !!options.allow_seam_breaking;
+    const simplify = readSimplifyOptions(options);
 
-    const result = await runGltfpack(meshFile.buffer, ratio, { allowSeamBreaking });
+    const result = await runGltfpack(meshFile.buffer, ratio, simplify);
 
     res.json({
       mesh_b64: result.buffer.toString('base64'),
       stats: {
         simplify_ratio: ratio,
+        simplify_error: simplify.simplifyError,
         triangles: result.triangles,
         input_triangles: result.inputTriangles,
         achieved_ratio: result.achievedRatio,
@@ -7006,7 +7102,7 @@ app.post('/api/meshes/lods', meshToolsUpload.single('meshFile'), async (req, res
       return res.status(400).json({ error: 'At most 8 LOD levels can be generated at once.' });
     }
     const ratios = requested.map(value => clampSimplifyRatio(value));
-    const allowSeamBreaking = !!options.allow_seam_breaking;
+    const simplify = readSimplifyOptions(options);
 
     const lods = [];
     for (let level = 0; level < ratios.length; level += 1) {
@@ -7019,7 +7115,7 @@ app.post('/api/meshes/lods', meshToolsUpload.single('meshFile'), async (req, res
         lods.push({ level, ratio, mesh_b64: null, triangles: null, passthrough: true });
         continue;
       }
-      const result = await runGltfpack(meshFile.buffer, ratio, { allowSeamBreaking });
+      const result = await runGltfpack(meshFile.buffer, ratio, simplify);
       lods.push({
         level,
         ratio,
