@@ -1,8 +1,9 @@
 ; Custom NSIS logic for the 3D Gen Studio Windows installer/uninstaller.
 ;
-; Two independent overrides live here:
+; Three independent overrides live here:
 ;   1. customRemoveFiles / customInit - directory-link (junction) safety.
 ;   2. customCheckAppRunning          - the "app is still running" check.
+;   3. customUnInstall                - "delete your data too?" on uninstall.
 ;
 ; WHY THE LINK PURGE EXISTS
 ; -------------------------
@@ -18,6 +19,11 @@
 ; Reproduced against the exact toolchain we ship with (NSIS 3.0.4.1, the version
 ; electron-builder 25.x pins): a junction inside $INSTDIR pointing at a folder on
 ; another drive had its entire contents destroyed by `RMDir /r $INSTDIR`.
+; Re-confirmed for a directory SYMLINK (mklink /D, the other thing people use to
+; move model folders off the system drive): models\checkpoints -> elsewhere, and
+; a stock `RMDir /r` on the parent emptied the target folder as well. Both link
+; kinds carry FILE_ATTRIBUTE_REPARSE_POINT, so the purge below covers both, plus
+; volume mount points.
 ;
 ; The update path is affected too, and worse: un.atomicRMDir `Rename`s each entry
 ; into $PLUGINSDIR\old-install for rollback, and NSIS wipes $PLUGINSDIR
@@ -309,6 +315,313 @@ FunctionEnd
 
   !insertmacro GEN_PURGE_LINKS "un."
 
+  ; -------------------------------------------------------------------------
+  ; "DO YOU WANT YOUR DATA DELETED TOO?"
+  ; -------------------------------------------------------------------------
+  ; The app keeps everything it writes in one per-user folder:
+  ;   %APPDATA%\3DGenStudio          (electron/main.cjs: app.setName + userData)
+  ; and the stock uninstaller leaves it behind. That is the safe default, but it
+  ; also means a "clean" reinstall is never clean, and a user who does want their
+  ; data gone has to know the path.
+  ;
+  ; WHY NOT deleteAppDataOnUninstall
+  ; -------------------------------
+  ; electron-builder has that option, but it (a) never asks and (b) deletes the
+  ; WRONG folders: its block removes $APPDATA\${APP_FILENAME} ("3D Gen Studio",
+  ; the installation directory name), $APPDATA\${APP_PRODUCT_FILENAME} and
+  ; $APPDATA\${APP_PACKAGE_NAME} ("app", from package.json name). None of those
+  ; is where the data lives, because main.cjs calls app.setName('3DGenStudio')
+  ; before the first getPath('userData') - so the option would delete nothing of
+  ; ours and possibly something of somebody else's.
+  ;
+  ; WHY TWO QUESTIONS
+  ; -----------------
+  ; The folder mixes two very different things:
+  ;   small and irreplaceable - data\app.db, data\assets, wiki, settings, logs
+  ;   huge and re-downloadable - comfyui, comfy-venv, comfy-data (models),
+  ;                              rig-venv, rig-data (model weights), python-venv
+  ; Wiping the second group can mean re-downloading tens of gigabytes and
+  ; rebuilding three Python environments, so someone who only wants a clean slate
+  ; for their projects gets the middle option. What is kept is enough for the
+  ; managed installs to be recognized again: comfysetup.cjs reads its receipt
+  ; from the venv dir, not from the database. The ComfyUI port and the "use the
+  ; managed install" toggle do live in settings, so those return to their
+  ; defaults and are re-applied on the next start.
+  ;
+  ; WHEN NOTHING IS ASKED AND NOTHING IS DELETED
+  ; --------------------------------------------
+  ;   - updates: installUtil.nsh runs the OLD uninstaller as
+  ;     `/S /KEEP_APP_DATA --updated`, and an update must never touch data;
+  ;   - silent uninstalls, unless --delete-app-data is passed - the same flag
+  ;     electron-builder's own uninstaller accepts, rather than a second
+  ;     spelling of it. It means "delete everything".
+  ;
+  ; Junctions are as dangerous here as they are in the install dir - relocating
+  ; comfy-data\models to another drive with `mklink /J` is common practice - so
+  ; every recursive delete below is preceded by un.PurgeLinks.
+
+  ; Must match app.setName('3DGenStudio') in electron/main.cjs: Electron derives
+  ; userData from the app name, so renaming it there renames this folder.
+  !define GENSTUDIO_DATA_DIRNAME "3DGenStudio"
+
+  Var /GLOBAL appDataDir        ; absolute path of the per-user data folder
+  Var /GLOBAL appDataMode       ; 0 = keep everything, 1 = delete all, 2 = keep the heavy parts
+  Var /GLOBAL appDataHeavyList  ; the heavy components found, formatted for the dialog
+  Var /GLOBAL appDataSkipNames  ; "|name|name|" of top-level entries to leave alone
+  Var /GLOBAL appDataFailed     ; how many entries could not be removed
+
+  ; Is "<name>" one of the "|a|b|c|" entries in $appDataSkipNames?
+  ; Push "<name>" -> Pop "1" (skip it) or "0".
+  ; A plain sliding-window compare: NSIS has no substring search of its own, and
+  ; the delimiters stop "comfy-venv" from matching inside "comfy-venv-old".
+  Function un.IsSkippedName
+    Exch $R0                    ; name to test (caller's $R0 goes to the stack)
+    Push $R1                    ; "|name|"
+    Push $R2                    ; its length
+    Push $R3                    ; scan offset
+    Push $R4                    ; window of that length at that offset
+
+    StrCpy $R1 "|$R0|"
+    StrLen $R2 $R1
+    StrCpy $R3 0
+    StrCpy $R0 "0"
+
+    ${Do}
+      StrCpy $R4 $appDataSkipNames $R2 $R3
+      ${If} $R4 == ""
+        ${ExitDo}               ; ran past the end of the set
+      ${EndIf}
+      ${If} $R4 == $R1
+        StrCpy $R0 "1"
+        ${ExitDo}
+      ${EndIf}
+      IntOp $R3 $R3 + 1
+    ${Loop}
+
+    Pop $R4
+    Pop $R3
+    Pop $R2
+    Pop $R1
+    Exch $R0                    ; result out, caller's $R0 restored
+  FunctionEnd
+
+  ; Fills $appDataHeavyList (dialog text) and $appDataSkipNames (match set) with
+  ; the multi-gigabyte components that actually exist. Both are built in one pass
+  ; so the two lists cannot drift apart.
+  !macro HEAVY_ENTRY _NAME _DESC
+    ${If} ${FileExists} "$appDataDir\${_NAME}\*.*"
+      StrCpy $appDataHeavyList "$appDataHeavyList$\r$\n    ${_NAME} - ${_DESC}"
+      StrCpy $appDataSkipNames "$appDataSkipNames${_NAME}|"
+    ${EndIf}
+  !macroend
+
+  Function un.DetectHeavyData
+    StrCpy $appDataHeavyList ""
+    StrCpy $appDataSkipNames "|"
+    !insertmacro HEAVY_ENTRY "comfyui"     "ComfyUI itself, installed and managed by the app"
+    !insertmacro HEAVY_ENTRY "comfy-venv"  "ComfyUI's Python environment"
+    !insertmacro HEAVY_ENTRY "comfy-data"  "ComfyUI models, inputs and outputs"
+    !insertmacro HEAVY_ENTRY "rig-venv"    "the rigging service's Python environment"
+    !insertmacro HEAVY_ENTRY "rig-data"    "the rigging model weights"
+    !insertmacro HEAVY_ENTRY "python-venv" "the mesh tools' Python environment"
+  FunctionEnd
+
+  ; Removes the contents of $appDataDir. Entries listed in $appDataSkipNames
+  ; survive; for mode 1 that set is empty and the folder itself goes too.
+  Function un.RemoveAppData
+    Push $R0                    ; pass counter (loop guard)
+    Push $R1                    ; FindFirst handle
+    Push $R2                    ; current entry name
+    Push $R3                    ; the entry picked for removal
+    Push $R4                    ; un.IsSkippedName result / bit-test scratch
+    Push $0                     ; attributes (System::Call writes $0)
+
+    StrCpy $appDataFailed 0
+    StrCpy $R0 0
+
+    ${Do}
+      IntOp $R0 $R0 + 1
+      ${If} $R0 > 500           ; far above the ~25 entries this folder holds
+        DetailPrint "Stopping data removal after 500 passes - please check $appDataDir yourself."
+        ${ExitDo}
+      ${EndIf}
+
+      ; Pick the first entry that has to go. Deleting while a FindFirst/FindNext
+      ; enumeration is open is not reliable, so the search is closed first and the
+      ; next pass starts over - cheap for a directory this small. An entry that
+      ; cannot be removed joins the skip set below, so the loop always progresses.
+      StrCpy $R3 ""
+      FindFirst $R1 $R2 "$appDataDir\*.*"
+      ${Do}
+        ${If} $R2 == ""
+          ${ExitDo}
+        ${EndIf}
+        ${If} $R2 != "."
+        ${AndIf} $R2 != ".."
+          Push "$R2"
+          Call un.IsSkippedName
+          Pop $R4
+          ${If} $R4 != "1"
+            StrCpy $R3 "$R2"
+            ${ExitDo}
+          ${EndIf}
+        ${EndIf}
+        FindNext $R1 $R2
+      ${Loop}
+      FindClose $R1
+
+      ${If} $R3 == ""
+        ${ExitDo}               ; nothing left that should go
+      ${EndIf}
+
+      ; What kind of entry is this? GetFileAttributesW reports the entry's own
+      ; attributes and never follows a reparse point, so a link is recognized as
+      ; a link - junction, directory symlink and volume mount point alike, they
+      ; all carry FILE_ATTRIBUTE_REPARSE_POINT.
+      System::Call 'kernel32::GetFileAttributesW(w "$appDataDir\$R3") i .r0'
+      ${If} $0 == -1
+        ; Unreadable (a link whose target is gone, or something we may not stat).
+        ; It must NOT be classified by guessing, so only the two non-recursive
+        ; removals are tried - both of which remove a link and never its target.
+        Delete "$appDataDir\$R3"
+        RMDir "$appDataDir\$R3"
+      ${Else}
+        IntOp $R4 $0 & 0x400
+        ${If} $R4 <> 0
+          ; A link. RMDir / DeleteFile on a reparse point removes the LINK; the
+          ; folder or file it points at is not touched.
+          DetailPrint "Removing link (its target is left intact): $R3"
+          IntOp $R4 $0 & 0x10
+          ${If} $R4 <> 0
+            RMDir "$appDataDir\$R3"
+          ${Else}
+            Delete "$appDataDir\$R3"
+          ${EndIf}
+        ${Else}
+          IntOp $R4 $0 & 0x10
+          ${If} $R4 <> 0
+            DetailPrint "Removing $R3..."
+            ; Every link ANYWHERE below this folder is unlinked first, because
+            ; RMDir /r walks straight through them and would delete the contents
+            ; of whatever they point at - on any drive.
+            Push "$appDataDir\$R3"
+            Call un.PurgeLinks
+            RMDir /r "$appDataDir\$R3"
+          ${Else}
+            Delete "$appDataDir\$R3"
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+
+      ${If} ${FileExists} "$appDataDir\$R3\*.*"
+      ${OrIf} ${FileExists} "$appDataDir\$R3"
+        ; Held open by something, or not ours to delete. Skip it from here on so
+        ; the remaining entries still go, and report it at the end.
+        DetailPrint "Could not remove: $appDataDir\$R3"
+        StrCpy $appDataSkipNames "$appDataSkipNames$R3|"
+        IntOp $appDataFailed $appDataFailed + 1
+      ${EndIf}
+    ${Loop}
+
+    ${If} $appDataMode == "1"
+      RMDir "$appDataDir"       ; not /r: only succeeds once it is empty
+    ${EndIf}
+
+    Pop $0
+    Pop $R4
+    Pop $R3
+    Pop $R2
+    Pop $R1
+    Pop $R0
+  FunctionEnd
+
+  ; Asks the two questions and records the answer in $appDataMode. Inserted at
+  ; the start of customRemoveFiles, i.e. once the user has committed to
+  ; uninstalling - not from un.onInit, which runs before the welcome page.
+  !macro ASK_ABOUT_APP_DATA
+    StrCpy $appDataMode "0"
+
+    ; Electron always writes to the CURRENT user's roaming folder, so resolve the
+    ; path in that context even when an all-users install is being removed.
+    ${If} $installMode == "all"
+      SetShellVarContext current
+    ${EndIf}
+    StrCpy $appDataDir "$APPDATA\${GENSTUDIO_DATA_DIRNAME}"
+    ${If} $installMode == "all"
+      SetShellVarContext all
+    ${EndIf}
+
+    ${If} ${isUpdated}
+      ; An update runs this uninstaller; the data belongs to the new version.
+    ${ElseIf} ${Silent}
+      ${If} ${isDeleteAppData}
+        StrCpy $appDataMode "1"
+      ${EndIf}
+    ${ElseIf} ${FileExists} "$appDataDir\*.*"
+      Call un.DetectHeavyData
+
+      StrCpy $R9 ""
+      ${If} $appDataHeavyList != ""
+        StrCpy $R9 ", plus the AI models and Python environments the app downloaded"
+      ${EndIf}
+
+      MessageBox MB_YESNO|MB_ICONQUESTION "Do you also want to delete your ${PRODUCT_NAME} data?$\r$\n$\r$\n$appDataDir$\r$\n$\r$\nThis folder holds your projects, the images and meshes in them, boards, wiki pages, settings and logs$R9.$\r$\n$\r$\nChoose No to keep it: a later installation of ${PRODUCT_NAME} finds your projects again." /SD IDNO IDYES appDataYes
+        Goto appDataAsked
+
+      appDataYes:
+        StrCpy $appDataMode "1"
+        ${If} $appDataHeavyList != ""
+          MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "Delete the downloaded AI models and Python environments as well?$\r$\n$appDataHeavyList$\r$\n$\r$\nTogether these are usually several gigabytes, and a reinstall has to download and rebuild them from scratch.$\r$\n$\r$\nYes - delete everything, models and environments included.$\r$\nNo - keep those, delete only your projects, settings and logs.$\r$\nCancel - keep all data; nothing in this folder is deleted." /SD IDCANCEL IDYES appDataAsked IDNO appDataKeepHeavy
+            StrCpy $appDataMode "0"
+            Goto appDataAsked
+          appDataKeepHeavy:
+            StrCpy $appDataMode "2"   ; $appDataSkipNames already lists them
+        ${EndIf}
+    ${EndIf}
+
+    appDataAsked:
+    ${If} $appDataMode == "1"
+      StrCpy $appDataSkipNames "|"    ; keep nothing
+    ${EndIf}
+  !macroend
+
+  ; Runs at the very end of Section un.install, after the app files and the
+  ; registry keys are gone - where the vendor deletes app data too.
+  !macro customUnInstall
+    ${If} $appDataMode == "1"
+    ${OrIf} $appDataMode == "2"
+      ${If} $installMode == "all"
+        SetShellVarContext current
+      ${EndIf}
+
+      ; Same guard as customRemoveFiles: never let an empty or absurdly short
+      ; path turn this into a volume wipe.
+      StrLen $0 "$appDataDir"
+      ${If} "$appDataDir" == ""
+      ${OrIf} $0 < 4
+        DetailPrint "Refusing to remove an implausible data directory: $appDataDir"
+      ${ElseIf} ${FileExists} "$appDataDir\*.*"
+        ${If} $appDataMode == "2"
+          DetailPrint "Removing projects, settings and logs from $appDataDir..."
+        ${Else}
+          DetailPrint "Removing $appDataDir..."
+        ${EndIf}
+        Call un.RemoveAppData
+
+        ${If} $appDataFailed <> 0
+          DetailPrint "$appDataFailed item(s) could not be removed from $appDataDir."
+          ${IfNot} ${Silent}
+            MessageBox MB_OK|MB_ICONEXCLAMATION "$appDataFailed item(s) in$\r$\n$appDataDir$\r$\ncould not be deleted, most likely because a program still has them open.$\r$\n$\r$\nRestarting Windows and deleting that folder by hand removes the rest."
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+
+      ${If} $installMode == "all"
+        SetShellVarContext all
+      ${EndIf}
+    ${EndIf}
+  !macroend
+
   ; Appends one "which file was busy" line to the same log the installer's
   ; app-running check writes. Without it a slow update is indistinguishable from
   ; a stuck one, and nobody can tell WHAT was holding the file.
@@ -326,6 +639,10 @@ FunctionEnd
 
   ; Replaces the vendor delete block in Section un.install.
   !macro customRemoveFiles
+    ; Ask about the per-user data folder now, while nothing has been deleted yet;
+    ; customUnInstall acts on the answer at the end of the section.
+    !insertmacro ASK_ABOUT_APP_DATA
+
     StrCpy $purgedLinkCount 0
 
     ; Sanity guard. $INSTDIR comes from the registry (InstallLocation), and a
