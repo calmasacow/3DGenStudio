@@ -399,3 +399,22 @@
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   }
 }
+.asset-selector-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.asset-selector-tag {
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-full);
+  border: 1px solid rgba(143, 245, 255, 0.22);
+  background: rgba(143, 245, 255, 0.08);
+  color: var(--primary);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

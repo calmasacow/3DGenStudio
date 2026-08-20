@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useProjects } from '../context/ProjectContext';
 import { assetUrl } from '../config';
+import TagFilter from './TagFilter';
 import './AssetSelectorModal.css'; // we'll create a separate CSS or reuse AssetsPage.css
 
 function formatDimensions(width, height) {
@@ -26,6 +27,7 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [projectFilter, setProjectFilter] = useState('all');
+  const [tagFilter, setTagFilter] = useState([]);
 
   // Valid types: 'image', 'mesh', or 'brush'
   const validType = assetType === 'mesh' ? 'mesh' : (assetType === 'brush' ? 'brush' : 'image');
@@ -66,6 +68,9 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
                 // Inherit the parent's project links so edits/versions filter with it
                 projectId: child.projectId ?? asset.projectId,
                 projectIds: child.projectIds ?? asset.projectIds,
+                // Same for tags: tagging happens on the root, so an edit that
+                // has none of its own is filtered by whatever its root carries.
+                tags: (child.tags?.length ? child.tags : asset.tags) || [],
                 selectorKey: getAssetSelectorKey({ ...child, isChild: true })
               });
             });
@@ -122,6 +127,20 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
     }
   }, [projectFilter, projectFilterOptions]);
 
+  // Tag options with counts, derived from what is actually listed here.
+  const tagFilterOptions = useMemo(() => {
+    const counts = new Map();
+    assets.forEach(asset => {
+      (asset.tags || []).forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1));
+    });
+    // Keep a selected tag listed even at count 0, so it stays unselectable-able
+    // once it has filtered the list down to nothing.
+    tagFilter.forEach(tag => { if (!counts.has(tag)) counts.set(tag, 0); });
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag));
+  }, [assets, tagFilter]);
+
   const filteredAssets = useMemo(() => {
     return assets.filter(asset => {
       if (normalizedSearch) {
@@ -131,13 +150,18 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
       if (projectFilter !== 'all' && !getAssetProjectKeys(asset).includes(projectFilter)) {
         return false;
       }
+      // Every selected tag must be present — each one narrows the list.
+      if (tagFilter.length > 0) {
+        const tags = asset.tags || [];
+        if (!tagFilter.every(tag => tags.includes(tag))) return false;
+      }
       return true;
     });
-  }, [assets, normalizedSearch, projectFilter]);
+  }, [assets, normalizedSearch, projectFilter, tagFilter]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [normalizedSearch, projectFilter]);
+  }, [normalizedSearch, projectFilter, tagFilter]);
 
   const assetsPerPage = validType === 'mesh' ? MESHES_PER_PAGE : ASSETS_PER_PAGE;
   const totalPages = Math.max(1, Math.ceil(filteredAssets.length / assetsPerPage));
@@ -209,6 +233,13 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
                 </button>
               )}
             </div>
+            {tagFilterOptions.length > 0 && (
+              <TagFilter
+                options={tagFilterOptions}
+                selected={tagFilter}
+                onChange={setTagFilter}
+              />
+            )}
             {projectFilterOptions.length > 0 && (
               <label className="asset-selector-project-select">
                 <span className="material-symbols-outlined">filter_list</span>
@@ -285,6 +316,13 @@ export default function AssetSelectorModal({ assetType, onSelect, onClose, showE
 											</div>
 											<div className="asset-selector-info">
 												<span className="asset-selector-name">{asset.name}</span>
+												{(asset.tags || []).length > 0 && (
+													<div className="asset-selector-tags">
+														{(asset.tags || []).slice(0, 4).map(tag => (
+															<span key={tag} className="asset-selector-tag">{tag}</span>
+														))}
+													</div>
+												)}
 												<div className="asset-selector-meta">
 													<span className="asset-selector-badge">{extension}</span>
 													{isChild && asset.parentName && (

@@ -989,6 +989,49 @@ export function ProjectProvider({ children }) {
     return await res.json()
   }
 
+  // Tags are keyed by the real Assets.id (library listings expose it as
+  // `assetId`, next to the prefixed `library:<id>` display id).
+  const getAssetTags = async (assetId) => {
+    const res = await fetch(`${API_BASE}/assets/${assetId}/tags`)
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to load asset tags')
+    }
+
+    return data.tags || []
+  }
+
+  // Replaces the asset's whole tag set with `tags`.
+  const saveAssetTags = async (assetId, tags = []) => {
+    const res = await fetch(`${API_BASE}/assets/${assetId}/tags`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags })
+    })
+
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to save asset tags')
+    }
+
+    return data.tags || []
+  }
+
+  // Every tag currently in use (with counts), optionally scoped to one type.
+  const getAllAssetTags = async ({ type = null } = {}) => {
+    const query = type ? `?type=${encodeURIComponent(type)}` : ''
+    const res = await fetch(`${API_BASE}/assets/tags${query}`)
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to load tags')
+    }
+
+    return data.tags || []
+  }
+
   const importLibraryAssets = async (assets, options = {}) => {
     const formData = new FormData()
 
@@ -1395,6 +1438,9 @@ export function ProjectProvider({ children }) {
       moveKanbanCard,
       deleteCard,
       getLibraryAssets,
+      getAssetTags,
+      saveAssetTags,
+      getAllAssetTags,
       importLibraryAssets,
       importBrushChildAssets,
       deleteLibraryAsset,

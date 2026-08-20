@@ -416,6 +416,7 @@ function mapChildAssetRow(row) {
     parentId: row.parentId ?? null,
     parentProjectId: row.parentProjectId ?? null,
     projectIds: Array.isArray(row.projectIds) ? row.projectIds : [],
+    tags: Array.isArray(row.tags) ? row.tags : [],
     editId: metadata?.editId || null,
     name: row.name || '',
     filePath: row.filePath,
@@ -796,6 +797,172 @@ export async function unlinkAssetFromProjectById(projectId, assetId, { cascadeCh
   return { status: 'unlinked', remainingProjectIds: await listAssetProjectIds(asset.id) };
 }
 
+// ---------------------------------------------------------------------------
+// Asset tags (Assets_Tags)
+// ---------------------------------------------------------------------------
+
+// Longest tag we store. Long enough for "hand painted stylized", short enough
+// that a tag stays a label and never becomes a description.
+const MAX_TAG_LENGTH = 48;
+// Per-asset ceiling, so a runaway caller cannot bury an asset under hundreds of
+// tags and make the library filter useless.
+const MAX_TAGS_PER_ASSET = 50;
+
+// Tags are compared and stored in one canonical form: trimmed, inner whitespace
+// collapsed, lower-cased. Without this "Sci-Fi", "sci-fi " and "sci  fi" would
+// all be distinct primary keys and the tag list would fill with near-duplicates.
+export function normalizeTagValue(value) {
+  const text = String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  return text.slice(0, MAX_TAG_LENGTH).trim();
+}
+
+// Normalize a whole list, dropping empties and duplicates while preserving the
+// order the caller gave (first occurrence wins), then cap it.
+export function normalizeTagList(values = []) {
+  const seen = new Set();
+  const tags = [];
+
+  for (const value of Array.isArray(values) ? values : [values]) {
+    const tag = normalizeTagValue(value);
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    tags.push(tag);
+    if (tags.length >= MAX_TAGS_PER_ASSET) break;
+  }
+
+  return tags;
+}
+
+// Batch variant used by the listings: assetId -> [tag, …].
+async function listTagsByAssetIds(db, assetIds = []) {
+  const uniqueIds = [...new Set(assetIds.map(Number).filter(Number.isFinite))];
+  const byAssetId = new Map();
+
+  if (uniqueIds.length === 0) {
+    return byAssetId;
+  }
+
+  const rows = await all(
+    db,
+    `SELECT assetId, tag FROM Assets_Tags
+     WHERE assetId IN (${uniqueIds.map(() => '?').join(', ')})
+     ORDER BY tag ASC`,
+    uniqueIds
+  );
+
+  for (const row of rows) {
+    if (!byAssetId.has(row.assetId)) {
+      byAssetId.set(row.assetId, []);
+    }
+    byAssetId.get(row.assetId).push(row.tag);
+  }
+
+  return byAssetId;
+}
+
+export async function listAssetTags(assetId) {
+  const db = await getDb();
+  const rows = await all(
+    db,
+    'SELECT tag FROM Assets_Tags WHERE assetId = ? ORDER BY tag ASC',
+    [Number(assetId)]
+  );
+
+  return rows.map(row => row.tag);
+}
+
+// Replace an asset's whole tag set. The UI edits tags as a list, so a single
+// "here is the new set" call keeps add/remove/reorder from needing three routes.
+export async function setAssetTags(assetId, tags = []) {
+  const asset = await getAssetRecordById(assetId);
+
+  if (!asset) {
+    return { status: 'not-found' };
+  }
+
+  const db = await getDb();
+  const normalized = normalizeTagList(tags);
+  const addedAt = Date.now();
+
+  await run(db, 'DELETE FROM Assets_Tags WHERE assetId = ?', [asset.id]);
+
+  for (const tag of normalized) {
+    await run(
+      db,
+      'INSERT OR IGNORE INTO Assets_Tags (assetId, tag, addedAt) VALUES (?, ?, ?)',
+      [asset.id, tag, addedAt]
+    );
+  }
+
+  return { status: 'ok', assetId: asset.id, tags: normalized };
+}
+
+// Add without disturbing what is already there (used by importers/automation
+// that only know the tags they want to contribute).
+export async function addAssetTags(assetId, tags = []) {
+  const asset = await getAssetRecordById(assetId);
+
+  if (!asset) {
+    return { status: 'not-found' };
+  }
+
+  const db = await getDb();
+  const addedAt = Date.now();
+
+  for (const tag of normalizeTagList(tags)) {
+    await run(
+      db,
+      'INSERT OR IGNORE INTO Assets_Tags (assetId, tag, addedAt) VALUES (?, ?, ?)',
+      [asset.id, tag, addedAt]
+    );
+  }
+
+  return { status: 'ok', assetId: asset.id, tags: await listAssetTags(asset.id) };
+}
+
+export async function removeAssetTag(assetId, tag) {
+  const db = await getDb();
+  await run(
+    db,
+    'DELETE FROM Assets_Tags WHERE assetId = ? AND tag = ?',
+    [Number(assetId), normalizeTagValue(tag)]
+  );
+
+  return { status: 'ok', tags: await listAssetTags(assetId) };
+}
+
+// The whole known vocabulary with usage counts, for the filter dropdown and the
+// tag-input suggestions. Optionally scoped to one asset type so the Images
+// section never suggests a tag that only meshes use.
+export async function listAllAssetTags({ type = null } = {}) {
+  const db = await getDb();
+  const params = [];
+  let typeClause = '';
+
+  if (type) {
+    typeClause = `JOIN Assets a ON a.id = t.assetId
+       JOIN AssetTypes at ON at.id = a.assetTypeId
+       `;
+    params.push(normalizeAssetTypeName(type));
+  }
+
+  const rows = await all(
+    db,
+    `SELECT t.tag AS tag, COUNT(*) AS count
+     FROM Assets_Tags t
+     ${typeClause}${type ? 'WHERE at.name = ?' : ''}
+     GROUP BY t.tag
+     ORDER BY count DESC, t.tag ASC`,
+    params
+  );
+
+  return rows.map(row => ({ tag: row.tag, count: row.count }));
+}
+
 function groupChildAssetsByParentFilePath(rows = [], baseUrl = null) {
   return rows.reduce((accumulator, row) => {
     if (!accumulator[row.parentFilePath]) {
@@ -852,8 +1019,13 @@ async function listChildAssetsByParentFilePaths(db, parentFilePaths = [], assetT
   // filter an edit/version by the project it was attached to — not only by the
   // project its root happens to sit in.
   const projectIdsByAssetId = await listProjectIdsByAssetIds(db, rows.map(row => row.id));
+  const tagsByAssetId = await listTagsByAssetIds(db, rows.map(row => row.id));
 
-  return rows.map(row => ({ ...row, projectIds: projectIdsByAssetId.get(row.id) || [] }));
+  return rows.map(row => ({
+    ...row,
+    projectIds: projectIdsByAssetId.get(row.id) || [],
+    tags: tagsByAssetId.get(row.id) || []
+  }));
 }
 
 async function getRootAssetById(assetId) {
@@ -1354,12 +1526,27 @@ export async function initializeStorage() {
       FOREIGN KEY(assetId) REFERENCES Assets(id) ON DELETE CASCADE,
       FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
     );
+
+    -- Free-form labels an asset can be filtered by in the library. Many tags per
+    -- asset, many assets per tag, and no separate tag registry: the vocabulary is
+    -- whatever rows exist here, so a tag disappears once nothing carries it.
+    -- Tags are stored already normalized (lower-cased, whitespace-collapsed) by
+    -- normalizeTagValue, which is what makes (assetId, tag) a meaningful primary
+    -- key -- "Sci Fi" and "sci fi" are the same tag, not two rows.
+    CREATE TABLE IF NOT EXISTS Assets_Tags (
+      assetId INTEGER NOT NULL,
+      tag TEXT NOT NULL,
+      addedAt INTEGER NOT NULL,
+      PRIMARY KEY(assetId, tag),
+      FOREIGN KEY(assetId) REFERENCES Assets(id) ON DELETE CASCADE
+    );
     `
   );
 
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_wikipages_parentId ON WikiPages(parentId)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_boards_projectId ON Boards(projectId)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_projects_projectId ON Assets_Projects(projectId)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_tags_tag ON Assets_Tags(tag)');
 
   const assetColumns = await all(db, 'PRAGMA table_info(Assets)');
   if (!assetColumns.some(column => column.name === 'thumbnail')) {
@@ -4220,6 +4407,35 @@ export async function listLibraryAssetsByType(type, baseUrl) {
     )
     : [];
 
+  // Tags of the root assets, keyed by file path so they merge the same way the
+  // rows do (the listing dedupes roots by path, not by id).
+  const tagRows = candidateStoredPaths.length > 0
+    ? await all(
+      db,
+      `SELECT DISTINCT a.filePath, t.tag
+       FROM Assets a
+       JOIN AssetTypes at ON at.id = a.assetTypeId
+       JOIN Assets_Tags t ON t.assetId = a.id
+       WHERE at.name = ?
+         AND a.parentId IS NULL
+         AND a.filePath IN (${candidateStoredPaths.map(() => '?').join(', ')})
+       ORDER BY t.tag ASC`,
+      [normalizeAssetTypeName(type), ...candidateStoredPaths]
+    )
+    : [];
+
+  const tagsByFilePath = tagRows.reduce((accumulator, row) => {
+    if (!accumulator[row.filePath]) {
+      accumulator[row.filePath] = [];
+    }
+
+    if (!accumulator[row.filePath].includes(row.tag)) {
+      accumulator[row.filePath].push(row.tag);
+    }
+
+    return accumulator;
+  }, {});
+
   const projectIdsByFilePath = projectLinkRows.reduce((accumulator, row) => {
     if (!accumulator[row.filePath]) {
       accumulator[row.filePath] = [];
@@ -4263,11 +4479,15 @@ export async function listLibraryAssetsByType(type, baseUrl) {
 
     accumulator.push({
       id: `library:${row.id}`,
+      // The real Assets.id behind the `library:` display id, so callers that
+      // write per-asset data (tags) don't have to parse the prefixed one.
+      assetId: canonicalAsset?.id ?? row.id,
       name: canonicalAsset?.name || row.name,
       filename,
       filePath: row.filePath,
       projectId: canonicalAsset?.projectId ?? null,
       projectIds: projectIdsByFilePath[row.filePath] || [],
+      tags: tagsByFilePath[row.filePath] || [],
       type,
       extension: path.extname(filename).replace('.', '').toUpperCase() || type.toUpperCase(),
       url: `${baseUrl}/assets/${encodeURI(filename)}`,
@@ -4660,9 +4880,14 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
       };
     }
 
+    // Tags travel with the asset. Additive field: a bundle written before tags
+    // existed simply has none, and an older app ignores it -- no version bump.
+    const tags = await listAssetTags(row.id);
+
     assets.push({
       refId: row.id,
       name: row.name,
+      tags,
       typeName: row.typeName,
       subdir,
       relPath,
@@ -4975,6 +5200,15 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
         editPathMap.set(String(asset.originalFilePath).replace(/\\/g, '/'), newStoredPath);
       }
       insertedAssets.push({ newId, metadata: asset.metadata || {} });
+
+      // Tags (absent from pre-tag bundles, hence the guard).
+      for (const tag of normalizeTagList(asset.tags || [])) {
+        await run(
+          db,
+          'INSERT OR IGNORE INTO Assets_Tags (assetId, tag, addedAt) VALUES (?, ?, ?)',
+          [newId, tag, createdAt]
+        );
+      }
 
       // Paint document.
       if (asset.paintDoc) {

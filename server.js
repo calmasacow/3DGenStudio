@@ -70,6 +70,9 @@ import {
   getWorkflowRecordById,
   initializeStorage,
   listLibraryAssetsByType,
+  listAllAssetTags,
+  listAssetTags,
+  setAssetTags,
   linkExistingAssetToProject,
   unlinkAssetFromProjectById,
   listProjectAssets,
@@ -5907,6 +5910,62 @@ app.put('/api/assets/library', async (req, res) => {
   } catch (err) {
     console.error('Failed to rename library asset:', err);
     res.status(500).json({ error: err.message || 'Failed to rename library asset' });
+  }
+});
+
+// The tag vocabulary in use, with counts. `type` scopes it to one asset type so
+// the Images section is not offered tags only meshes carry.
+app.get('/api/assets/tags', async (req, res) => {
+  try {
+    const { type } = req.query;
+    res.json({ tags: await listAllAssetTags({ type: type ? String(type) : null }) });
+  } catch (err) {
+    console.error('Failed to list asset tags:', err);
+    res.status(500).json({ error: 'Failed to list asset tags' });
+  }
+});
+
+app.get('/api/assets/:assetId/tags', async (req, res) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    if (!Number.isFinite(assetId)) {
+      return res.status(400).json({ error: 'A numeric assetId is required' });
+    }
+
+    res.json({ tags: await listAssetTags(assetId) });
+  } catch (err) {
+    console.error('Failed to load asset tags:', err);
+    res.status(500).json({ error: 'Failed to load asset tags' });
+  }
+});
+
+// Replace the asset's whole tag set. The editor sends the list it wants, so a
+// single PUT covers add, remove and rename without three round trips.
+app.put('/api/assets/:assetId/tags', async (req, res) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    if (!Number.isFinite(assetId)) {
+      return res.status(400).json({ error: 'A numeric assetId is required' });
+    }
+
+    const { tags } = req.body || {};
+
+    if (tags !== undefined && !Array.isArray(tags)) {
+      return res.status(400).json({ error: 'tags must be an array of strings' });
+    }
+
+    const result = await setAssetTags(assetId, tags || []);
+
+    if (result.status === 'not-found') {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+
+    res.json({ assetId: result.assetId, tags: result.tags });
+  } catch (err) {
+    console.error('Failed to save asset tags:', err);
+    res.status(500).json({ error: 'Failed to save asset tags' });
   }
 });
 

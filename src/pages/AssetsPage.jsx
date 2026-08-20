@@ -4,6 +4,7 @@ import Header from '../components/Header'
 import Footer from '../components/Footer'
 import MeshPreviewDialog from '../components/MeshPreviewDialog'
 import SettingsModal from '../components/SettingsModal'
+import TagFilter from '../components/TagFilter'
 import { useProjects } from '../context/ProjectContext'
 import { createMeshThumbnailFile, isMeshFile } from '../utils/meshThumbnail'
 import { parseAbrFile } from '../utils/brushAbr'
@@ -296,6 +297,8 @@ export default function AssetsPage() {
     deleteAssetEdit,
     deleteAssetVersion,
     deleteAsset,
+    saveAssetTags,
+    getAllAssetTags,
     getComfyWorkflows,
     inspectComfyWorkflow,
     importComfyWorkflow,
@@ -341,6 +344,16 @@ export default function AssetsPage() {
   const [projectFilter, setProjectFilter] = useState('all')
   const [groupByProject, setGroupByProject] = useState(false)
   const [collapsedGroups, setCollapsedGroups] = useState({})
+  const [tagFilter, setTagFilter] = useState([])
+  // Full tag vocabulary (every tag in use, library-wide) for the editor's
+  // suggestions — the filter dropdown instead lists only what the current
+  // section actually carries.
+  const [knownTags, setKnownTags] = useState([])
+  const [tagEditorAsset, setTagEditorAsset] = useState(null)
+  const [tagEditorTags, setTagEditorTags] = useState([])
+  const [tagEditorInput, setTagEditorInput] = useState('')
+  const [tagEditorSaving, setTagEditorSaving] = useState(false)
+  const [tagEditorError, setTagEditorError] = useState('')
   const assetFileInputRef = useRef(null)
   const workflowFileInputRef = useRef(null)
 
@@ -354,6 +367,16 @@ export default function AssetsPage() {
       setLoading(false)
     }
   }, [getLibraryAssets])
+
+  const loadKnownTags = useCallback(async () => {
+    try {
+      const tags = await getAllAssetTags()
+      setKnownTags(tags.map(entry => entry.tag))
+    } catch (err) {
+      // Suggestions are a convenience — a failure here must not block the page.
+      console.error('Failed to load tags:', err)
+    }
+  }, [getAllAssetTags])
 
   const loadWorkflows = useCallback(async () => {
     try {
@@ -371,16 +394,18 @@ export default function AssetsPage() {
   useEffect(() => {
     loadLibrary()
     loadWorkflows()
-  }, [loadLibrary, loadWorkflows])
+    loadKnownTags()
+  }, [loadLibrary, loadWorkflows, loadKnownTags])
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [activeSection, searchQuery, projectFilter])
+  }, [activeSection, searchQuery, projectFilter, tagFilter])
 
-  // Reset the project filter when switching type sections so a project
-  // selected for Images doesn't silently hide everything under Meshes.
+  // Reset the project and tag filters when switching type sections so a filter
+  // chosen for Images doesn't silently hide everything under Meshes.
   useEffect(() => {
     setProjectFilter('all')
+    setTagFilter([])
   }, [activeSection])
 
   const projectNameById = useMemo(
@@ -502,9 +527,38 @@ export default function AssetsPage() {
   }
   const projectFilterOptions = buildProjectFilterOptions()
 
+  const getAssetTagList = useCallback(
+    (asset) => (Array.isArray(asset?.tags) ? asset.tags : []),
+    []
+  )
+
+  // Selecting several tags narrows: an asset must carry every selected tag.
+  const matchesTagFilter = useCallback((asset) => {
+    if (tagFilter.length === 0) return true
+    const tags = getAssetTagList(asset)
+    return tagFilter.every(tag => tags.includes(tag))
+  }, [tagFilter, getAssetTagList])
+
+  // Tag options come from the assets of the current section (with counts), so
+  // the dropdown never offers a tag that would filter everything away here.
+  const buildTagFilterOptions = () => {
+    if (isWorkflowSection) return []
+    const counts = new Map()
+    sectionAssets.forEach(asset => {
+      getAssetTagList(asset).forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1))
+    })
+    // A tag already selected stays listed even at count 0, otherwise it could
+    // not be unselected once it filtered the section down to nothing.
+    tagFilter.forEach(tag => { if (!counts.has(tag)) counts.set(tag, 0) })
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag))
+  }
+  const tagFilterOptions = buildTagFilterOptions()
+
   const activeAssets = isWorkflowSection
     ? []
-    : sectionAssets.filter(asset => matchesSearch(asset.name) && matchesProjectFilter(asset))
+    : sectionAssets.filter(asset => matchesSearch(asset.name) && matchesProjectFilter(asset) && matchesTagFilter(asset))
 
   // When grouping is on we split the (already filtered) assets into one block
   // per project, named projects first (alphabetical) and "Unassigned" last.
@@ -850,6 +904,107 @@ export default function AssetsPage() {
       }
     } finally {
       setDeletingVersionKey(null)
+    }
+  }
+
+  // --- Tag editing -----------------------------------------------------------
+
+  // Mirrors the server's normalization so the chips shown while editing are
+  // exactly the ones that will be stored (and dedupe the same way).
+  const normalizeTagInput = (value) => String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .slice(0, 48)
+    .trim()
+
+  // Existing tags the asset does not carry yet, narrowed by whatever is typed —
+  // the fastest way to reuse a tag instead of coining a near-duplicate.
+  const tagSuggestions = useMemo(() => {
+    const typed = normalizeTagInput(tagEditorInput)
+    return knownTags
+      .filter(tag => !tagEditorTags.includes(tag))
+      .filter(tag => !typed || tag.includes(typed))
+      .slice(0, 24)
+  }, [knownTags, tagEditorTags, tagEditorInput])
+
+  const handleOpenTagEditor = (asset) => {
+    setTagEditorAsset(asset)
+    setTagEditorTags(getAssetTagList(asset))
+    setTagEditorInput('')
+    setTagEditorError('')
+  }
+
+  const handleCloseTagEditor = () => {
+    setTagEditorAsset(null)
+    setTagEditorTags([])
+    setTagEditorInput('')
+    setTagEditorError('')
+  }
+
+  const handleAddTagEditorTag = (value) => {
+    const tag = normalizeTagInput(value)
+    if (!tag) return
+    setTagEditorTags(prev => (prev.includes(tag) ? prev : [...prev, tag]))
+    setTagEditorInput('')
+  }
+
+  const handleRemoveTagEditorTag = (tag) => {
+    setTagEditorTags(prev => prev.filter(entry => entry !== tag))
+  }
+
+  const handleTagEditorKeyDown = (event) => {
+    // Enter and comma both commit the typed tag; backspace on an empty input
+    // pops the last chip, the usual tag-input shorthand.
+    if (event.key === 'Enter' || event.key === ',') {
+      event.preventDefault()
+      handleAddTagEditorTag(tagEditorInput)
+      return
+    }
+
+    if (event.key === 'Backspace' && !tagEditorInput && tagEditorTags.length > 0) {
+      event.preventDefault()
+      handleRemoveTagEditorTag(tagEditorTags[tagEditorTags.length - 1])
+    }
+  }
+
+  const handleSaveTags = async () => {
+    if (!tagEditorAsset) return
+
+    // Whatever is still half-typed in the input counts as a tag the user meant
+    // to add — saving must not silently drop it.
+    const pending = normalizeTagInput(tagEditorInput)
+    const tags = pending && !tagEditorTags.includes(pending) ? [...tagEditorTags, pending] : tagEditorTags
+    const assetId = tagEditorAsset.assetId
+
+    if (assetId === null || assetId === undefined) {
+      setTagEditorError('This asset cannot be tagged.')
+      return
+    }
+
+    setTagEditorSaving(true)
+    setTagEditorError('')
+
+    try {
+      const savedTags = await saveAssetTags(assetId, tags)
+      // Patch the loaded library in place instead of refetching everything —
+      // the grid keeps its scroll position and page.
+      setLibraryAssets(prev => {
+        const next = { ...prev }
+        Object.keys(next).forEach(key => {
+          next[key] = (next[key] || []).map(asset => (
+            asset.id === tagEditorAsset.id ? { ...asset, tags: savedTags } : asset
+          ))
+        })
+        return next
+      })
+      await loadKnownTags()
+      handleCloseTagEditor()
+    } catch (err) {
+      console.error('Failed to save tags:', err)
+      setTagEditorError(err.message || 'Failed to save tags')
+    } finally {
+      setTagEditorSaving(false)
     }
   }
 
@@ -1236,6 +1391,23 @@ export default function AssetsPage() {
             </button>
           )}
         </div>
+        {getAssetTagList(asset).length > 0 && (
+          <div className="asset-card__tags">
+            {getAssetTagList(asset).map(tag => (
+              <button
+                key={tag}
+                type="button"
+                className={`asset-tag-chip ${tagFilter.includes(tag) ? 'asset-tag-chip--active' : ''}`}
+                onClick={() => setTagFilter(prev => (
+                  prev.includes(tag) ? prev.filter(entry => entry !== tag) : [...prev, tag]
+                ))}
+                title={tagFilter.includes(tag) ? `Stop filtering on "${tag}"` : `Filter on "${tag}"`}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="asset-card__meta">
           <span className={`asset-card__badge ${activeSection === 'meshes' ? 'asset-card__badge--secondary' : ''}`}>{asset.extension}</span>
           <div className="asset-card__actions">
@@ -1302,6 +1474,14 @@ export default function AssetsPage() {
             <button
               type="button"
               className="asset-card__icon-btn"
+              onClick={() => handleOpenTagEditor(asset)}
+              title="Edit tags"
+            >
+              <span className="material-symbols-outlined">sell</span>
+            </button>
+            <button
+              type="button"
+              className="asset-card__icon-btn"
               onClick={() => handleDeleteAsset(asset)}
               disabled={deletingAssetKey === `${asset.type}:${asset.filename}`}
               title="Delete asset"
@@ -1358,6 +1538,78 @@ export default function AssetsPage() {
               </button>
               <button type="button" className="assets-dialog__btn assets-dialog__btn--primary" onClick={handleGoToProject} disabled={!linkedAssetDialog.projectId}>
                 Go to project
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tagEditorAsset && (
+        <div className="assets-dialog-overlay assets-dialog-overlay--elevated" role="presentation" onClick={handleCloseTagEditor}>
+          <div className="assets-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-tags-dialog-title" onClick={event => event.stopPropagation()}>
+            <div className="assets-dialog__header">
+              <h2 id="asset-tags-dialog-title" className="assets-dialog__title font-headline">Tags — {tagEditorAsset.name}</h2>
+              <button type="button" className="assets-dialog__close" onClick={handleCloseTagEditor}>
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="assets-dialog__body">
+              <div className="asset-tag-editor">
+                <div className="asset-tag-editor__field">
+                  {tagEditorTags.map(tag => (
+                    <span key={tag} className="asset-tag-chip asset-tag-chip--editing">
+                      {tag}
+                      <button
+                        type="button"
+                        className="asset-tag-chip__remove"
+                        onClick={() => handleRemoveTagEditorTag(tag)}
+                        title={`Remove "${tag}"`}
+                      >
+                        <span className="material-symbols-outlined">close</span>
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    type="text"
+                    className="asset-tag-editor__input"
+                    value={tagEditorInput}
+                    onChange={event => setTagEditorInput(event.target.value)}
+                    onKeyDown={handleTagEditorKeyDown}
+                    placeholder={tagEditorTags.length === 0 ? 'Add a tag and press Enter' : 'Add another tag'}
+                    disabled={tagEditorSaving}
+                    autoFocus
+                  />
+                </div>
+                <p className="asset-tag-editor__hint">
+                  Press Enter or comma to add. Tags are lower-cased so the same label never splits in two.
+                </p>
+                {tagSuggestions.length > 0 && (
+                  <div className="asset-tag-editor__suggestions">
+                    <span className="asset-tag-editor__suggestions-label font-label">EXISTING TAGS</span>
+                    <div className="asset-tag-editor__suggestion-list">
+                      {tagSuggestions.map(tag => (
+                        <button
+                          key={tag}
+                          type="button"
+                          className="asset-tag-chip asset-tag-chip--suggestion"
+                          onClick={() => handleAddTagEditorTag(tag)}
+                          disabled={tagEditorSaving}
+                        >
+                          {tag}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {tagEditorError && <div className="asset-tag-editor__error">{tagEditorError}</div>}
+              </div>
+            </div>
+            <div className="assets-dialog__actions">
+              <button type="button" className="assets-dialog__btn assets-dialog__btn--secondary" onClick={handleCloseTagEditor} disabled={tagEditorSaving}>
+                Cancel
+              </button>
+              <button type="button" className="assets-dialog__btn assets-dialog__btn--primary" onClick={handleSaveTags} disabled={tagEditorSaving}>
+                {tagEditorSaving ? 'Saving...' : 'Save tags'}
               </button>
             </div>
           </div>
@@ -1893,31 +2145,42 @@ export default function AssetsPage() {
                   <div className="assets-section__summary">
                     <span>{isWorkflowSection ? `${filteredWorkflows.length} ${normalizedSearch || workflowTypeFilter !== 'all' ? 'matching' : 'total'} workflows` : `${activeAssets.length} ${normalizedSearch ? 'matching' : 'total'} assets`}</span>
                     {!isWorkflowSection && !groupByProject && <span>{pageRangeStart}-{pageRangeEnd || 0} shown</span>}
-                    {!isWorkflowSection && projectFilterOptions.length > 0 && (
+                    {!isWorkflowSection && (projectFilterOptions.length > 0 || tagFilterOptions.length > 0) && (
                       <div className="assets-section__controls">
-                        <label className="assets-project-select">
-                          <span className="material-symbols-outlined">filter_list</span>
-                          <select
-                            className="assets-project-select__input"
-                            value={projectFilter}
-                            onChange={event => setProjectFilter(event.target.value)}
-                          >
-                            <option value="all">All projects</option>
-                            {projectFilterOptions.map(option => (
-                              <option key={option.key} value={option.key}>{option.label}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <button
-                          type="button"
-                          className={`assets-group-toggle ${groupByProject ? 'assets-group-toggle--active' : ''}`}
-                          onClick={() => setGroupByProject(prev => !prev)}
-                          title="Group assets by project"
-                          aria-pressed={groupByProject}
-                        >
-                          <span className="material-symbols-outlined">dashboard</span>
-                          <span>Group by project</span>
-                        </button>
+                        {tagFilterOptions.length > 0 && (
+                          <TagFilter
+                            options={tagFilterOptions}
+                            selected={tagFilter}
+                            onChange={setTagFilter}
+                          />
+                        )}
+                        {projectFilterOptions.length > 0 && (
+                          <>
+                            <label className="assets-project-select">
+                              <span className="material-symbols-outlined">filter_list</span>
+                              <select
+                                className="assets-project-select__input"
+                                value={projectFilter}
+                                onChange={event => setProjectFilter(event.target.value)}
+                              >
+                                <option value="all">All projects</option>
+                                {projectFilterOptions.map(option => (
+                                  <option key={option.key} value={option.key}>{option.label}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <button
+                              type="button"
+                              className={`assets-group-toggle ${groupByProject ? 'assets-group-toggle--active' : ''}`}
+                              onClick={() => setGroupByProject(prev => !prev)}
+                              title="Group assets by project"
+                              aria-pressed={groupByProject}
+                            >
+                              <span className="material-symbols-outlined">dashboard</span>
+                              <span>Group by project</span>
+                            </button>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
