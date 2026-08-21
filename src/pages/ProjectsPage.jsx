@@ -27,10 +27,22 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.5.0',
+    date: '2026-08-21',
+    items: [
+			'Assets: Can tag assets',
+			'Uninstaller: Can delete your data',
+			'Hitem3D: Added v3.0 model',
+			'TripoAI: Added 8K "extreme" texture quality',
+			'Graph: Added missing labels for external APIs',
+			'Optimize and LOD export: Added more options'
+    ],
+  },
+  {
     version: 'v2.4.1',
     date: '2026-08-19',
     items: [
-			'Bake mode: Fixed colour too dark',
+			'Bake mode: Fixed color too dark',
 			'Installer: Fixed process still open',
 			'MCP: Added missing features'
     ],

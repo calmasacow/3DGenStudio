@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-08-21** | Assets: Can tag assets<br>Uninstaller: Can delete your data<br>Hitem3D: Added v3.0 model<br>TripoAI: Added 8K "extreme" texture quality<br>Graph: Added missing labels for external APIs<br>Optimize and LOD export: Added more options |
 | **2026-08-19** | Bake mode: Fixed colour too dark<br>Installer: Fixed process still open<br>Updated MCP |
 | **2026-08-18** | MeshEditor new modes: Bake and Game-Ready<br>Export: Can export LOD and Collision Mesh<br>Animations: Improved human retargeting<br>Desktop App: Can see logs<br>Fixed Z-Image Turbo VAE download<br>Auto-Rig: Can edit/add/delete bones. |
 | **2026-08-15** | MeshPreviewer: Can see skeleton for rigged mesh.<br>Graph project: Added new node type "Rig Mesh"<br>Graph project: Display the mesh previewer instead of the mesh in the node<br>Kanban project: Rigging column can run "Auto Rig"<br>Kanban project: ComfyUI workflow default inputs image/mesh are the current displayed image/mesh |
