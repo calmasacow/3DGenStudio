@@ -107,12 +107,13 @@ Connect with transport "Streamable HTTP" to `http://localhost:3001/mcp`.
 | Mesh tools | `auto_uv_mesh`, `auto_retopo_mesh`, `repair_mesh`, `auto_rig_mesh`, `optimize_mesh`, `convert_mesh_fbx` (all fully-typed), `run_mesh_tool` (the same operations, untyped), `export_mesh` |
 | Mesh finishing | `inspect_mesh` (Game-Ready check), `bake_mesh_maps`, `generate_lods`, `generate_collision`, `move_mesh_pivot` |
 | Assets | `list_assets`, `list_library_assets`, `view_asset`, `download_asset`, `upload_asset`, `link_asset`, `unlink_asset`, `delete_asset` |
+| Asset tags | `list_asset_tags`, `tag_asset`, `find_assets_by_tags` |
 | Asset library | `import_library_assets`, `rename_library_asset`, `delete_library_asset` |
 | System | `get_settings` (secrets redacted), `update_settings`, `get_system_stats` |
 
 ### Context cost and loading only the groups you need
 
-An MCP client injects the **whole tool catalog into the model's system prompt on every request**, before the model reads your message. All 64 tools cost ~85 KB of JSON plus ~5 KB of server instructions — roughly **25,000 tokens per session**, whether or not a single tool is called. That is why even asking a model "are you connected to 3d-gen-studio?" appears to consume ~25k tokens: the question is ~10 tokens, the connection is the rest.
+An MCP client injects the **whole tool catalog into the model's system prompt on every request**, before the model reads your message. All 67 tools cost ~91 KB of JSON plus ~5 KB of server instructions — roughly **26,500 tokens per session**, whether or not a single tool is called. That is why even asking a model "are you connected to 3d-gen-studio?" appears to consume ~26k tokens: the question is ~10 tokens, the connection is the rest.
 
 Clients that load tool schemas lazily (Claude Code fetches them on demand) pay almost nothing. For clients that load everything eagerly — most local LLM stacks — load only the groups you need, either with the `--tools` flag or the `MCP_TOOLS` environment variable:
 
@@ -144,13 +145,13 @@ Unset, empty, or `all` loads every group, so nothing changes for an existing con
 
 | Selector | Tools | Catalog | Saved |
 |---|---|---|---|
-| *(unset)* / `all` | 64 | ~25,100 tokens | — |
-| `-mesh` | 51 | ~15,900 | 37% |
-| `-mesh,-actions` | 41 | ~10,300 | 59% |
-| `projects,graph,workflows,assets` | 31 | ~8,600 | 66% |
-| `projects,mesh,assets` | 31 | ~13,200 | 47% |
-| `projects,cards,assets` | 25 | ~5,200 | 79% |
-| `projects,settings` | 10 | ~1,800 | 93% |
+| *(unset)* / `all` | 67 | ~25,200 tokens | — |
+| `-mesh` | 54 | ~15,700 | 38% |
+| `-mesh,-actions` | 44 | ~10,300 | 59% |
+| `projects,graph,workflows,assets` | 34 | ~8,600 | 66% |
+| `projects,mesh,assets` | 34 | ~14,200 | 44% |
+| `projects,cards,assets` | 28 | ~5,800 | 77% |
+| `projects,settings` | 10 | ~1,600 | 94% |
 
 The server instructions are assembled to match, so dropping a group also drops its guidance, and the model is told which groups were left out — it reports them as "not exposed in this session" rather than claiming the app can't do it.
 
@@ -234,6 +235,16 @@ Image generation (`generate_image`) is prompt-only by design: OpenAI/Google imag
 - `view_asset` returns the **actual image** as MCP image content, so the AI can visually inspect generated images (for meshes it returns the thumbnail preview when one exists). Inline viewing is capped at ~3.5 MB per image.
 - `download_asset` writes any asset file (image/mesh/workflow) to an absolute folder on the machine running the app.
 - Asset listings and results otherwise carry direct download URLs (`http://localhost:3001/assets/...`); local files are passed into tools by absolute path (`upload_asset`, `import_workflow filePath`, `run_workflow fileInputs`), and exports write to absolute folders.
+
+### Tags
+
+Tags are the free-form labels the Assets page filters by, and they work the same over MCP. They belong to a single asset record, so a root asset, an image **edit** and a mesh **version** each carry their own set — pass the child id from `list_assets` to tag an edit or a version.
+
+- **`list_asset_tags`** — with `assetId`, the tags of that one asset; without it, the whole vocabulary in use with a count per tag (optionally scoped to one `type`). Read the vocabulary before inventing a tag, so `sci-fi` doesn't gain a `scifi` twin.
+- **`tag_asset`** — `add` and/or `remove` edit the tags in place, leaving the rest alone; `tags` replaces the whole set (`tags: []` clears it). Renaming a tag on an asset is one call: `remove` the old, `add` the new. `remove` is applied after `add`, so passing the same tag to both leaves it off. Returns the resulting list.
+- **`find_assets_by_tags`** — searches every project and the library at once, newest first. By default an asset must carry **every** tag given (the narrowing the Assets page filter does); `matchAll: false` makes it "any of these". Narrow further with `type` and/or `projectId`. Each hit carries its full tag list, `matchedTags`, the projects it is linked to, and a download URL.
+
+Tags are normalized server-side — trimmed, whitespace-collapsed, lower-cased, 48 chars max, 50 per asset — so `"Sci-Fi"`, `"sci-fi "` and `"SCI-FI"` are one tag. Punctuation is left alone, though: `sci-fi` and `sci fi` remain two different tags. A tag always comes back in its canonical form, which is what a later search has to match.
 
 ## Requirements per capability
 

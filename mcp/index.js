@@ -6,8 +6,8 @@
 // app. Tools call the running backend over loopback HTTP (see client.js).
 //
 // Context cost: a client injects the WHOLE tool catalog into the model's system
-// prompt on every request, before it reads the user's message. The full 64-tool
-// catalog is ~84 KB of JSON (~23k tokens) plus ~5 KB of instructions. Clients
+// prompt on every request, before it reads the user's message. The full 67-tool
+// catalog is ~91 KB of JSON (~25k tokens) plus ~5 KB of instructions. Clients
 // that load tool schemas lazily pay almost nothing; the rest pay it per session.
 // For those, TOOL_GROUPS below lets a client load only the groups it needs —
 // see resolveGroups(). Instructions are assembled to match (buildInstructions),
@@ -48,7 +48,7 @@ const TOOL_GROUPS = {
   workflows: { register: registerWorkflowTools, cost: 8957 },
   actions: { register: registerActionTools, cost: 19385 },
   mesh: { register: registerMeshToolTools, cost: 31972 },
-  assets: { register: registerAssetTools, cost: 9307 },
+  assets: { register: registerAssetTools, cost: 12542 },
   settings: { register: registerSettingsTools, cost: 1684 }
 };
 
@@ -153,6 +153,10 @@ const INSTRUCTION_BLOCKS = [
   {
     groups: ['mesh'],
     text: '- Simplification caveat: gltfpack (optimize_mesh, generate_lods) will not collapse vertices on a UV seam, so a textured mesh can barely reduce until allow_seam_breaking is on. Always read stats.achieved_ratio and stats.seam_limited instead of assuming the requested ratio was met.'
+  },
+  {
+    groups: ['assets'],
+    text: '- Asset tags: free-form labels for finding assets later. list_asset_tags (no assetId) shows the vocabulary in use with counts — read it before inventing a tag; tag_asset adds/removes/replaces the tags of one asset (root asset, image edit or mesh version); find_assets_by_tags searches the whole library across projects (every tag must match unless matchAll=false). Tags are normalized server-side (trimmed, whitespace-collapsed, lower-cased), so "Sci-Fi" and "sci-fi " are the same tag — but "sci-fi" and "sci fi" are not.'
   },
   {
     groups: ['assets'],

@@ -238,6 +238,85 @@ export function registerAssetTools(server, { api, notifyMutation }) {
     return { deleted: true, assetId };
   }));
 
+  // --- Tags -----------------------------------------------------------------
+  // Tags are free-form labels stored per asset (root assets, image edits and
+  // mesh versions each carry their own). They are normalized server-side —
+  // lower-cased and whitespace-collapsed — so "Sci-Fi" and "sci-fi " are the
+  // same tag. Punctuation is NOT normalized: "sci-fi" and "sci fi" stay two
+  // distinct tags, which is why the vocabulary is worth reading first.
+
+  server.registerTool('list_asset_tags', {
+    title: 'List asset tags',
+    description: 'List tags. With assetId: the tags that one asset carries. Without it: the whole tag vocabulary in use with a usage count per tag — call this first to see which tags exist before tagging or searching, so you reuse an existing tag instead of coining a near-duplicate.',
+    inputSchema: {
+      assetId: z.number().int().optional().describe('Return only this asset\'s tags (root asset, image edit or mesh version).'),
+      type: z.enum(['image', 'mesh', 'brush']).optional().describe('Vocabulary only: count tags on this asset type alone.')
+    },
+    annotations: { readOnlyHint: true }
+  }, toolHandler(async ({ assetId, type }) => {
+    if (assetId !== undefined) {
+      const result = await api.apiJson('GET', `/assets/${assetId}/tags`);
+      return { assetId, tags: result?.tags || [] };
+    }
+    const result = await api.apiJson('GET', '/assets/tags', { query: type ? { type } : {} });
+    return { tags: result?.tags || [] };
+  }));
+
+  server.registerTool('tag_asset', {
+    title: 'Add, remove or replace an asset\'s tags',
+    description: 'Edit the tags of one asset (a root asset, an image edit or a mesh version — use the child id from list_assets to tag an edit/version). Pass add and/or remove to change tags while leaving the rest alone, or tags to REPLACE the whole set (tags: [] clears every tag). Renaming a tag on an asset = remove the old one and add the new one in the same call. Returns the asset\'s resulting tag list.',
+    inputSchema: {
+      assetId: z.number().int(),
+      add: z.array(z.string().min(1)).optional().describe('Tags to add, keeping existing ones.'),
+      remove: z.array(z.string().min(1)).optional().describe('Tags to remove. Applied after add, so adding and removing the same tag leaves it off.'),
+      tags: z.array(z.string()).optional().describe('Replace the asset\'s entire tag set with this list. Cannot be combined with add/remove.')
+    }
+  }, toolHandler(async ({ assetId, add, remove, tags }) => {
+    const isReplacing = tags !== undefined;
+    const isPatching = add !== undefined || remove !== undefined;
+
+    if (isReplacing && isPatching) {
+      throw new Error('Pass either tags (replace the whole set) or add/remove (edit in place), not both.');
+    }
+    if (!isReplacing && !isPatching) {
+      throw new Error('Pass add, remove, or tags.');
+    }
+
+    const result = isReplacing
+      ? await api.apiJson('PUT', `/assets/${assetId}/tags`, { body: { tags } })
+      : await api.apiJson('PATCH', `/assets/${assetId}/tags`, {
+        body: { ...(add ? { add } : {}), ...(remove ? { remove } : {}) }
+      });
+
+    notifyMutation(null);
+    return { assetId: result?.assetId ?? assetId, tags: result?.tags || [] };
+  }));
+
+  server.registerTool('find_assets_by_tags', {
+    title: 'Find assets by tag',
+    description: 'Search the whole asset library by tag, across every project. By default an asset must carry EVERY tag given (matchAll); set matchAll=false for "any of these tags". Narrow with type and/or projectId. Results are newest-first and include each asset\'s full tag list, the projects it is linked to, and a download URL. Use list_asset_tags with no assetId first if you do not know which tags exist.',
+    inputSchema: {
+      tags: z.array(z.string().min(1)).min(1).describe('Tags to search for'),
+      matchAll: z.boolean().default(true).describe('true = an asset must carry every tag; false = any one of them is enough.'),
+      type: z.enum(['image', 'mesh', 'brush']).optional().describe('Only assets of this type'),
+      projectId: z.number().int().optional().describe('Only assets linked to this project'),
+      limit: z.number().int().min(1).max(500).default(200).describe('Maximum assets to return')
+    },
+    annotations: { readOnlyHint: true }
+  }, toolHandler(async ({ tags, matchAll = true, type, projectId, limit = 200 }) => {
+    const result = await api.apiJson('GET', '/assets/by-tags', {
+      query: {
+        tags: tags.join(','),
+        matchAll: matchAll === false ? 'false' : 'true',
+        ...(type ? { type } : {}),
+        ...(projectId !== undefined ? { projectId } : {}),
+        limit
+      }
+    });
+    const assets = Array.isArray(result?.assets) ? result.assets : [];
+    return { count: assets.length, assets: assets.map(asset => withAssetUrls(api, asset)) };
+  }));
+
   // --- Global asset library -------------------------------------------------
   // The library is project-independent storage, so its records are addressed by
   // stored filename/filePath rather than by project + asset id. link_asset is

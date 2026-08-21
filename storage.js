@@ -963,6 +963,82 @@ export async function listAllAssetTags({ type = null } = {}) {
   return rows.map(row => ({ tag: row.tag, count: row.count }));
 }
 
+// Tag search: every asset carrying the wanted tags, newest first. `matchAll`
+// mirrors the Assets page filter (an asset must carry EVERY selected tag);
+// pass false for a union search ("anything sci-fi or fantasy"). `type` and
+// `projectId` narrow the same way the page's sections and project filter do.
+export async function findAssetsByTags(tags = [], { matchAll = true, type = null, projectId = null, limit = 200 } = {}) {
+  const wantedTags = normalizeTagList(tags);
+
+  if (wantedTags.length === 0) {
+    return [];
+  }
+
+  const db = await getDb();
+  const params = [...wantedTags];
+  let whereClause = `WHERE t.tag IN (${wantedTags.map(() => '?').join(', ')})`;
+
+  if (type) {
+    whereClause += ' AND at.name = ?';
+    params.push(normalizeAssetTypeName(type));
+  }
+
+  if (projectId !== null && projectId !== undefined) {
+    whereClause += ` AND EXISTS (
+         SELECT 1 FROM Assets_Projects ap
+         WHERE ap.assetId = a.id AND ap.projectId = ?
+       )`;
+    params.push(Number(projectId));
+  }
+
+  // Count the DISTINCT matched tags per asset so "match all" is a HAVING check
+  // rather than N queries intersected in JS.
+  const havingClause = matchAll ? 'HAVING COUNT(DISTINCT t.tag) = ?' : '';
+  if (matchAll) {
+    params.push(wantedTags.length);
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+  params.push(safeLimit);
+
+  const rows = await all(
+    db,
+    `SELECT a.id, a.parentId, a.name, a.filePath, a.creationDate, a.metadata, a.thumbnail,
+            a.width, a.height,
+            at.name AS assetTypeName
+     FROM Assets_Tags t
+     JOIN Assets a ON a.id = t.assetId
+     JOIN AssetTypes at ON at.id = a.assetTypeId
+     ${whereClause}
+     GROUP BY a.id
+     ${havingClause}
+     ORDER BY a.creationDate DESC, a.id DESC
+     LIMIT ?`,
+    params
+  );
+
+  const projectIdsByAssetId = await listProjectIdsByAssetIds(db, rows.map(row => row.id));
+  const tagsByAssetId = await listTagsByAssetIds(db, rows.map(row => row.id));
+
+  return rows.map(row => {
+    const assetTags = tagsByAssetId.get(row.id) || [];
+
+    return {
+      ...mapAssetRow({
+        ...row,
+        projectIds: projectIdsByAssetId.get(row.id) || []
+      }),
+      tags: assetTags,
+      // Which of the searched tags this asset actually carries — useful when
+      // matchAll is off and the caller wants to rank the union result.
+      matchedTags: wantedTags.filter(tag => assetTags.includes(tag)),
+      // A child asset (image edit / mesh version) is tagged independently of its
+      // root, so say which one this is instead of making the caller infer it.
+      isChild: row.parentId != null
+    };
+  });
+}
+
 function groupChildAssetsByParentFilePath(rows = [], baseUrl = null) {
   return rows.reduce((accumulator, row) => {
     if (!accumulator[row.parentFilePath]) {

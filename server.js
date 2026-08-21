@@ -73,6 +73,9 @@ import {
   listAllAssetTags,
   listAssetTags,
   setAssetTags,
+  addAssetTags,
+  removeAssetTag,
+  findAssetsByTags,
   linkExistingAssetToProject,
   unlinkAssetFromProjectById,
   listProjectAssets,
@@ -5967,6 +5970,82 @@ app.put('/api/assets/:assetId/tags', async (req, res) => {
   } catch (err) {
     console.error('Failed to save asset tags:', err);
     res.status(500).json({ error: 'Failed to save asset tags' });
+  }
+});
+
+// Additive tag edits: add and/or remove without knowing (or clobbering) the
+// tags an asset already carries. The UI PUTs whole sets; automation usually
+// only knows the tags it wants to contribute or drop.
+app.patch('/api/assets/:assetId/tags', async (req, res) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    if (!Number.isFinite(assetId)) {
+      return res.status(400).json({ error: 'A numeric assetId is required' });
+    }
+
+    const { add, remove } = req.body || {};
+
+    if (add !== undefined && !Array.isArray(add)) {
+      return res.status(400).json({ error: 'add must be an array of strings' });
+    }
+
+    if (remove !== undefined && !Array.isArray(remove)) {
+      return res.status(400).json({ error: 'remove must be an array of strings' });
+    }
+
+    if (!Array.isArray(add) && !Array.isArray(remove)) {
+      return res.status(400).json({ error: 'Pass add and/or remove' });
+    }
+
+    // Add first, so a call that both adds and removes the same tag ends up
+    // without it — "remove" is the more explicit intent.
+    if (Array.isArray(add) && add.length > 0) {
+      const added = await addAssetTags(assetId, add);
+
+      if (added.status === 'not-found') {
+        return res.status(404).json({ error: 'Asset not found' });
+      }
+    } else if (!(await getAssetRecordById(assetId))) {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+
+    for (const tag of Array.isArray(remove) ? remove : []) {
+      await removeAssetTag(assetId, tag);
+    }
+
+    res.json({ assetId, tags: await listAssetTags(assetId) });
+  } catch (err) {
+    console.error('Failed to update asset tags:', err);
+    res.status(500).json({ error: 'Failed to update asset tags' });
+  }
+});
+
+// Tag search across the whole library (root assets, edits and versions alike).
+// `tags` is comma-separated; matchAll=false turns the AND into an OR.
+app.get('/api/assets/by-tags', async (req, res) => {
+  try {
+    const { tags, matchAll, type, projectId, limit } = req.query;
+
+    const wantedTags = Array.isArray(tags)
+      ? tags
+      : String(tags || '').split(',');
+
+    if (wantedTags.filter(tag => String(tag).trim()).length === 0) {
+      return res.status(400).json({ error: 'At least one tag is required' });
+    }
+
+    const assets = await findAssetsByTags(wantedTags, {
+      matchAll: String(matchAll ?? 'true') !== 'false',
+      type: type ? String(type) : null,
+      projectId: projectId !== undefined && projectId !== '' ? Number(projectId) : null,
+      limit: limit !== undefined ? Number(limit) : 200
+    });
+
+    res.json({ assets });
+  } catch (err) {
+    console.error('Failed to search assets by tag:', err);
+    res.status(500).json({ error: 'Failed to search assets by tag' });
   }
 });
 
