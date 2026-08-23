@@ -58,6 +58,8 @@ easydict==1.13
 einops==0.8.2
 embreex==4.4.0
 filelock==3.32.2
+fla-core==0.5.2
+flash-linear-attention==0.5.2
 flatbuffers==25.12.19
 flex_gemm @ ${NODE_DIR}/ComfyUI-Trellis2/wheels/Linux/Torch2110/flex_gemm-1.0.0-cp313-cp313-linux_x86_64.whl
 fonttools==4.63.0

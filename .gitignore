@@ -51,3 +51,17 @@ thirdparty/skintokens/models/
 thirdparty/skintokens/tmp_ckpt/
 thirdparty/skintokens/tmp_gradio/
 thirdparty/skintokens/results/
+
+# Kimodo motion-generation service — generated / downloaded artifacts (never commit)
+thirdparty/kimodo/.venv/
+thirdparty/kimodo/kimodo-server.log
+thirdparty/kimodo/checkpoints/
+# Everything downloaded or derived at runtime: the embedding cache and the
+# rebased LLM2Vec adapter (a ~170 MB copy of a public HF repo with one JSON field
+# rewritten — regenerated on demand, never worth committing or hosting).
+thirdparty/kimodo/cache/
+# Where the rebased adapter used to live, before it moved under cache/.
+thirdparty/kimodo/text-encoder/
+thirdparty/kimodo/*.egg-info/
+thirdparty/kimodo/MotionCorrection/build/
+thirdparty/kimodo/MotionCorrection/*.egg-info/

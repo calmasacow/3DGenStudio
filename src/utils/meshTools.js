@@ -33,7 +33,9 @@ function base64ToBlob(base64, type) {
 
 // Parse the Server-Sent Events stream. Calls onProgress for each progress event
 // and resolves with the terminal "done" event payload. Throws on "error".
-async function readSseStream(response, onProgress) {
+// Exported for the motion service (src/utils/motionGen.js), which speaks the same
+// SSE contract over a JSON request instead of a mesh upload.
+export async function readSseStream(response, onProgress) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''

@@ -231,20 +231,76 @@ const MESH2MOTION_TO_MIXAMO = {
   pinky_03_r: 'mixamorigRightHandPinky3', pinky_04_leaf_r: 'mixamorigRightHandPinky4',
 }
 
+// Direct SOMA-77(Kimodo) → Mixamo table.
+//
+// Not a nicety — a correctness fix. SOMA calls the THIGH "LeftLeg" and the shin
+// "LeftShin"; Mixamo calls the thigh "LeftUpLeg" and the SHIN "LeftLeg". Name
+// matching alone therefore pairs SOMA's thigh with Mixamo's shin: an exact token
+// hit, and completely wrong, folding every walk cycle at the knee. The
+// Chest→Spine2 and Spine1/Spine2 off-by-one are the same trap, quieter.
+//
+// Only the 23 body joints Kimodo actually drives are listed. Its checkpoint
+// denoises the 30-joint SOMA skeleton and expands to 77 for output, filling the
+// finger chains from a fixed relaxed-hand pose — mapping those would drag the
+// target's fingers into that pose and hold them there for the whole clip.
+const KIMODO_TO_MIXAMO = {
+  Hips: 'mixamorigHips',
+  Spine1: 'mixamorigSpine', Spine2: 'mixamorigSpine1', Chest: 'mixamorigSpine2',
+  // Kimodo has a two-bone neck, Mixamo has one: Neck1 carries it and Neck2 is
+  // left unmapped so the head does not receive that rotation twice.
+  Neck1: 'mixamorigNeck', Head: 'mixamorigHead',
+  LeftShoulder: 'mixamorigLeftShoulder', LeftArm: 'mixamorigLeftArm',
+  LeftForeArm: 'mixamorigLeftForeArm', LeftHand: 'mixamorigLeftHand',
+  RightShoulder: 'mixamorigRightShoulder', RightArm: 'mixamorigRightArm',
+  RightForeArm: 'mixamorigRightForeArm', RightHand: 'mixamorigRightHand',
+  LeftLeg: 'mixamorigLeftUpLeg', LeftShin: 'mixamorigLeftLeg',
+  LeftFoot: 'mixamorigLeftFoot', LeftToeBase: 'mixamorigLeftToeBase',
+  RightLeg: 'mixamorigRightUpLeg', RightShin: 'mixamorigRightLeg',
+  RightFoot: 'mixamorigRightFoot', RightToeBase: 'mixamorigRightToeBase',
+}
+
+// The same thigh/shin collision bites the FUZZY matcher on any non-Mixamo target,
+// not just Mixamo ones: normalizeBoneName folds both "shin" and "leg" to the token
+// "leg", so SOMA's LeftLeg and LeftShin become indistinguishable and whichever is
+// tried first wins the target's thigh. These aliases are what the matcher sees
+// INSTEAD of the raw SOMA names; the mapping it returns still refers to the real
+// bones.
+const KIMODO_FUZZY_ALIASES = {
+  LeftLeg: 'LeftUpLeg', RightLeg: 'RightUpLeg',
+  LeftShin: 'LeftLowerLeg', RightShin: 'RightLowerLeg',
+  Chest: 'Spine3', Neck1: 'Neck', Neck2: 'Neck2',
+}
+
+// Exact source→Mixamo tables, keyed by reference id. Applied before the fuzzy
+// heuristic when the target is a mixamo-named skeleton (what our rigging service
+// emits with rename_bones:mixamo), because an exact mapping beats guessing.
+const EXACT_TO_MIXAMO = {
+  human: MESH2MOTION_TO_MIXAMO,
+  kimodo: KIMODO_TO_MIXAMO,
+}
+
+// Per-reference name aliases used only while fuzzy-matching.
+const FUZZY_ALIASES = {
+  kimodo: KIMODO_FUZZY_ALIASES,
+}
+
 // Auto-map source bones onto target bones. Returns { [targetBoneName]: sourceBoneName }.
-// When `referenceId` is 'human' and the target is a mixamo-named skeleton, the
-// exact Mesh2Motion→Mixamo table is applied first, then the fuzzy heuristic fills
-// any remaining unmapped target bones.
+// When an exact source→Mixamo table exists for `referenceId` and the target is a
+// mixamo-named skeleton, that table is applied first, then the fuzzy heuristic
+// fills any remaining unmapped target bones.
 export function autoMapBones(sourceNames, targetNames, referenceId = null) {
-  const sources = sourceNames.map(name => ({ name, ...normalizeBoneName(name) }))
+  const aliases = FUZZY_ALIASES[referenceId] || null
+  // Match on the alias, but always return the REAL bone name.
+  const sources = sourceNames.map(name => ({ name, ...normalizeBoneName(aliases?.[name] || name) }))
   const mapping = {}
   const usedSource = new Set()
 
   const targetIsMixamo = targetNames.some(n => n.toLowerCase().includes('mixamorig'))
-  if (referenceId === 'human' && targetIsMixamo) {
+  const exactTable = EXACT_TO_MIXAMO[referenceId]
+  if (exactTable && targetIsMixamo) {
     const sourceSet = new Set(sourceNames)
     const targetSet = new Set(targetNames)
-    for (const [srcName, tgtName] of Object.entries(MESH2MOTION_TO_MIXAMO)) {
+    for (const [srcName, tgtName] of Object.entries(exactTable)) {
       if (sourceSet.has(srcName) && targetSet.has(tgtName)) {
         mapping[tgtName] = srcName
         usedSource.add(srcName)

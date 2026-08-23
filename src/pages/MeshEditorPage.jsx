@@ -157,6 +157,7 @@ import SkeletonPanel from '../components/meshEditor/SkeletonPanel'
 import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
+import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
 import BakeToolsPanel from '../components/meshEditor/BakeToolsPanel'
@@ -506,6 +507,23 @@ export default function MeshEditorPage() {
   const [animArmTargets, setAnimArmTargets] = useState(null)     // { left:[], right:[] } upper-arm target bones
   const [checkedAnimations, setCheckedAnimations] = useState(() => new Set())  // clip names ticked for Save
   const [animSaving, setAnimSaving] = useState(false)            // exporting/saving the animated mesh
+  // --- Auto Rig → Kimodo (text-to-motion) ---
+  // Kimodo shares the Animations pipeline above rather than duplicating it: a
+  // generated clip becomes a clip on animSourceRef, is retargeted by the same
+  // code and saved by the same button. What is Kimodo-specific is only the
+  // prompt form and the fact that its source rig is the SOMA-77 skeleton, which
+  // occupies the same single source slot a mesh2motion reference would.
+  const [kimodoPrompt, setKimodoPrompt] = useState('')
+  const [kimodoDuration, setKimodoDuration] = useState(5)
+  const [kimodoInPlace, setKimodoInPlace] = useState(false)
+  const [kimodoRunning, setKimodoRunning] = useState(false)
+  const [kimodoProgress, setKimodoProgress] = useState(null)
+  const [kimodoError, setKimodoError] = useState(null)
+  // The bone map was produced automatically rather than confirmed by the user, so
+  // the panel can suggest checking it if the motion comes out wrong.
+  const [kimodoAutoMapped, setKimodoAutoMapped] = useState(false)
+  const kimodoCounterRef = useRef(0)   // makes generated clip names unique per session
+
   const animSourceRef = useRef(null)   // loaded reference: { scene, skinnedMesh, boneNames, clips, hipName }
   const animTargetRef = useRef(null)   // loaded target skinned mesh: { scene, skinnedMesh, boneNames }
   const retargetedClipsRef = useRef(new Map())  // clipName -> retargeted THREE.AnimationClip (cache)
@@ -4750,7 +4768,11 @@ export default function MeshEditorPage() {
     if (!animSourceRef.current || !animTargetRef.current) {
       setAnimLoading(true)
       try {
-        if (!animSourceRef.current) animSourceRef.current = await loadReferenceScene(animReferenceId)
+        if (!animSourceRef.current) {
+          animSourceRef.current = animReferenceId === KIMODO_SOURCE_ID
+            ? await loadKimodoSkeletonSource()
+            : await loadReferenceScene(animReferenceId)
+        }
         await ensureAnimTargetScene()
       } catch (err) {
         console.error('Failed to prepare bone mapping:', err)
@@ -4766,11 +4788,15 @@ export default function MeshEditorPage() {
     // names as the animation GLB, no skinned mesh); falls back to the loaded
     // reference scene. Target comes from the user's loaded rigged scene.
     let source = null
-    try {
-      const rig = await loadReferenceRigScene(animReferenceId)
-      source = extractSkeletonFromObject(rig.scene)
-    } catch (err) {
-      console.warn('Rig GLB unavailable, using the animation scene skeleton:', err)
+    // Kimodo has no rig GLB — its source scene IS a bare armature parsed from the
+    // service's rest-pose BVH, so go straight to the fallback below.
+    if (animReferenceId !== KIMODO_SOURCE_ID) {
+      try {
+        const rig = await loadReferenceRigScene(animReferenceId)
+        source = extractSkeletonFromObject(rig.scene)
+      } catch (err) {
+        console.warn('Rig GLB unavailable, using the animation scene skeleton:', err)
+      }
     }
     if (!source && animSourceRef.current?.scene) source = extractSkeletonFromObject(animSourceRef.current.scene)
     const target = animTargetRef.current?.scene ? extractSkeletonFromObject(animTargetRef.current.scene) : null
@@ -4789,6 +4815,8 @@ export default function MeshEditorPage() {
   const handleSaveBoneMapping = useCallback((mapping) => {
     setAnimMapping(mapping)
     setAnimArmTargets(findUpperArmTargets(mapping))
+    // The user has now seen and accepted the mapping, so stop calling it automatic.
+    setKimodoAutoMapped(false)
     setShowBoneMapping(false)
     const clips = animSourceRef.current?.clips || []
     setAnimClips(clips.map(c => ({ name: c.name })))
@@ -4919,9 +4947,134 @@ export default function MeshEditorPage() {
     }
   }, [animClips, checkedAnimations, animSaving, getRetargetedClip, meshName, numericAssetId, filePath, saveMeshEdit])
 
+  // --- Kimodo: take over the source-rig slot, then generate clips into it ---
+
+  // Put the SOMA-77 skeleton in the source slot, replacing whatever reference was
+  // there. Cheap: the service builds the rest pose from the skeleton asset alone,
+  // so this does not load the checkpoint or the text encoder.
+  const ensureKimodoSource = useCallback(async () => {
+    if (animReferenceId === KIMODO_SOURCE_ID && animSourceRef.current) return animSourceRef.current
+    // Switching source rigs invalidates the mapping and every bake made against it.
+    setAnimMapping(null)
+    setBoneMapSkeletons(null)
+    setAnimClips([])
+    setSelectedAnimation(null)
+    setAnimPreview(null)
+    setCheckedAnimations(new Set())
+    setKimodoAutoMapped(false)
+    retargetedClipsRef.current.clear()
+    const source = await loadKimodoSkeletonSource()
+    animSourceRef.current = source
+    setAnimReferenceId(KIMODO_SOURCE_ID)
+    return source
+  }, [animReferenceId])
+
+  const handleKimodoOpenMapping = useCallback(async () => {
+    setKimodoError(null)
+    setAnimLoading(true)
+    try {
+      await ensureKimodoSource()
+      await ensureAnimTargetScene()
+    } catch (err) {
+      console.error('Failed to prepare the Kimodo skeleton:', err)
+      setKimodoError(err?.message || 'Failed to load the Kimodo skeleton.')
+      setAnimLoading(false)
+      return
+    }
+    setAnimLoading(false)
+    await handleOpenBoneMapping()
+  }, [ensureKimodoSource, ensureAnimTargetScene, handleOpenBoneMapping])
+
+  const handleKimodoGenerate = useCallback(async () => {
+    if (kimodoRunning) return
+    setKimodoRunning(true)
+    setKimodoError(null)
+    setKimodoProgress(null)
+    try {
+      const source = await ensureKimodoSource()
+      const target = await ensureAnimTargetScene()
+
+      // Map the bones automatically if this is the first generation. Without a
+      // mapping the clip cannot be retargeted OR previewed, so generating first
+      // used to produce a completed request and a visibly empty panel. The exact
+      // SOMA->Mixamo table makes auto-mapping reliable for rigs Auto Rig
+      // produced; the user can still refine it in the modal.
+      let mapping = animMapping
+      if (!mapping) {
+        mapping = autoMapBones(source.boneNames, target.boneNames, KIMODO_SOURCE_ID)
+        if (Object.keys(mapping).length) {
+          setAnimMapping(mapping)
+          setAnimArmTargets(findUpperArmTargets(mapping))
+          setKimodoAutoMapped(true)
+        } else {
+          mapping = null
+        }
+      }
+
+      // Name clips by prompt, numbered — the same prompt twice is a different
+      // take, and the clip name is the retarget cache key.
+      kimodoCounterRef.current += 1
+      const label = kimodoPrompt.trim().replace(/\s+/g, ' ').slice(0, 48)
+      const name = `${kimodoCounterRef.current}. ${label}${kimodoInPlace ? ' (in-place)' : ''}`
+
+      const { clip } = await generateMotionClip({
+        prompt: kimodoPrompt,
+        duration: kimodoDuration,
+        inPlace: kimodoInPlace,
+        name,
+        onProgress: setKimodoProgress,
+      })
+
+      source.clips = [...(source.clips || []), clip]
+      setAnimClips(source.clips.map(c => ({ name: c.name })))
+
+      // Auto-play only when the mapping was ALREADY in state before this call.
+      // A mapping created a moment ago is not visible to showRetargetedClip yet
+      // (it reads animMapping through its own closure), so the bake would silently
+      // no-op. In that case the clip still lands in the gallery and plays on click.
+      if (animMapping) {
+        setSelectedAnimation(name)
+        await showRetargetedClip(name, animMatchRestPose)
+      }
+    } catch (err) {
+      console.error('Motion generation failed:', err)
+      setKimodoError(err?.message || 'Motion generation failed.')
+    } finally {
+      setKimodoRunning(false)
+      setKimodoProgress(null)
+    }
+  }, [kimodoRunning, kimodoPrompt, kimodoDuration, kimodoInPlace, ensureKimodoSource,
+    ensureAnimTargetScene, animMapping, animMatchRestPose, showRetargetedClip])
+
+  // Bundle for the SkeletonPanel Kimodo tab.
+  const kimodoPanelProps = useMemo(() => ({
+    prompt: kimodoPrompt,
+    onPromptChange: setKimodoPrompt,
+    duration: kimodoDuration,
+    onDurationChange: setKimodoDuration,
+    segments: Math.max(1, countPromptSegments(kimodoPrompt)),
+    inPlace: kimodoInPlace,
+    onToggleInPlace: () => setKimodoInPlace(v => !v),
+    running: kimodoRunning,
+    progress: kimodoProgress,
+    error: kimodoError,
+    loading: animLoading,
+    onGenerate: handleKimodoGenerate,
+    onOpenMapping: handleKimodoOpenMapping,
+    // Whether the shared source-rig slot currently belongs to Kimodo — drives
+    // whether the tab shows its clips or warns that mapping will take the slot.
+    ownsMapping: animReferenceId === KIMODO_SOURCE_ID,
+    autoMapped: kimodoAutoMapped,
+  }), [kimodoPrompt, kimodoDuration, kimodoInPlace, kimodoRunning, kimodoProgress, kimodoError,
+    animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped])
+
   // Bundle for the SkeletonPanel Animations tab.
   const animationPanelProps = useMemo(() => ({
     referenceId: animReferenceId,
+    // Kimodo and the reference library share one source-rig slot, so the
+    // Animations tab has to be able to say when Kimodo is holding it — otherwise
+    // it would silently list generated clips under a blank reference dropdown.
+    ownedByKimodo: animReferenceId === KIMODO_SOURCE_ID,
     onSelectReference: handleSelectAnimReference,
     onOpenMapping: handleOpenBoneMapping,
     hasMapping: !!animMapping,
@@ -8140,6 +8293,7 @@ export default function MeshEditorPage() {
                 selectedBone={selectedBone}
                 onSelectBone={setSelectedBone}
                 animation={animationPanelProps}
+                kimodo={kimodoPanelProps}
                 edit={{
                   available: rigEditable,
                   active: rigEditing && rigEditable,
@@ -8634,7 +8788,9 @@ export default function MeshEditorPage() {
       </main>
       {showBoneMapping && animSourceRef.current && animTargetRef.current && (
         <BoneMappingModal
-          referenceLabel={getReference(animReferenceId)?.label || 'Reference'}
+          referenceLabel={animReferenceId === KIMODO_SOURCE_ID
+            ? 'Kimodo'
+            : (getReference(animReferenceId)?.label || 'Reference')}
           sourceBones={animSourceRef.current.boneNames}
           targetBones={animTargetRef.current.boneNames}
           sourceSkeleton={boneMapSkeletons?.source}

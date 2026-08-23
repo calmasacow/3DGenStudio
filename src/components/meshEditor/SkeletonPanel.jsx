@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ANIMATION_REFERENCES, animationPreviewUrl } from '../../utils/animationLibrary'
 import AnimationClipItem from './AnimationClipItem'
+import MeshToolProgress from './MeshToolProgress'
 
 const EMPTY_SET = new Set()
 
@@ -247,21 +248,288 @@ function BoneEditCard({ index, name, position, influence, canTakeWeights, edit }
   )
 }
 
-export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, animation, edit }) {
-  const [tab, setTab] = useState('skeleton')
-  const [collapsed, setCollapsed] = useState(() => new Set())
-  const [animSearch, setAnimSearch] = useState('')
-  const rowRefs = useRef(new Map())
-
-  // Animations tab: filter clips by name and track which are ticked for saving.
+// The searchable clip grid + "save with N animations" button. Shared by the
+// Animations tab (mesh2motion library clips) and the Kimodo tab (clips generated
+// from a prompt): both feed the same retarget/preview/save pipeline, so the only
+// difference is where the clips came from.
+function ClipGallery({ animation, emptyLabel, previewsAvailable = true }) {
+  const [search, setSearch] = useState('')
   const allClips = useMemo(() => animation?.clips || [], [animation?.clips])
   const checkedSet = animation?.checkedAnimations || EMPTY_SET
   const checkedCount = checkedSet.size
-  const filteredClips = useMemo(() => {
-    const q = animSearch.trim().toLowerCase()
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
     if (!q) return allClips
     return allClips.filter(c => c.name.toLowerCase().includes(q))
-  }, [allClips, animSearch])
+  }, [allClips, search])
+
+  if (!allClips.length) {
+    return <div className="mesh-editor-layers-panel__empty">{emptyLabel}</div>
+  }
+
+  return (
+    <>
+      <div className="mesh-editor-layers-panel__header">
+        <span className="mesh-editor-layers-panel__title">Animations</span>
+        <span className="mesh-editor-panel__hint">
+          {filtered.length}{search.trim() ? ` / ${allClips.length}` : ''}
+        </span>
+      </div>
+
+      {allClips.length > 6 && (
+        <div className="mesh-editor-anim__search">
+          <span className="material-symbols-outlined">search</span>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search animations…"
+            aria-label="Search animations by name"
+          />
+          {search && (
+            <button
+              type="button"
+              className="mesh-editor-anim__search-clear"
+              onClick={() => setSearch('')}
+              title="Clear search"
+              aria-label="Clear search"
+            >
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="mesh-editor-anim__list">
+        {filtered.length === 0 ? (
+          <div className="mesh-editor-layers-panel__empty">No animations match “{search.trim()}”.</div>
+        ) : filtered.map(clip => (
+          <AnimationClipItem
+            key={clip.name}
+            name={clip.name}
+            previewUrl={previewsAvailable ? animationPreviewUrl(animation.referenceId, clip.name) : null}
+            selected={animation.selectedAnimation === clip.name}
+            busy={animation.retargeting === clip.name}
+            checked={checkedSet.has(clip.name)}
+            onSelect={() => animation.onSelectAnimation(clip.name)}
+            onToggleChecked={() => animation.onToggleChecked(clip.name)}
+          />
+        ))}
+      </div>
+
+      <button
+        type="button"
+        className="mesh-editor-btn mesh-editor-btn--primary mesh-editor-anim__save"
+        onClick={animation?.onSave}
+        disabled={checkedCount === 0 || animation?.saving}
+        title="Save the mesh with the selected animations embedded as a new version"
+      >
+        <span className="material-symbols-outlined">
+          {animation?.saving ? 'progress_activity' : 'save'}
+        </span>
+        <span>
+          {animation?.saving
+            ? 'Saving…'
+            : `Save mesh with ${checkedCount} animation${checkedCount === 1 ? '' : 's'}`}
+        </span>
+      </button>
+      <span className="mesh-editor-panel__hint">
+        Click an animation to preview it. Tick the ones to embed, then save the mesh as a new version.
+      </span>
+    </>
+  )
+}
+
+// "Kimodo" tab: describe a motion, get an animation.
+//
+// The generated clip is retargeted through the same machinery as a library clip,
+// which means it occupies the same single source-rig slot: mapping the Kimodo
+// skeleton onto the mesh replaces whatever the Animations tab had mapped. Rather
+// than hide that, the tab says so.
+function KimodoTab({ animation, kimodo }) {
+  const k = kimodo || {}
+  const busy = !!k.running
+  const segments = k.segments || 1
+  const total = (Number(k.duration) || 0) * segments
+
+  return (
+    // --scroll: the form above the results is tall enough to leave the clip grid
+    // no room, so this tab scrolls as a single column instead of nesting a
+    // scrollable grid inside a full panel.
+    <div className="mesh-editor-skeleton-panel__body mesh-editor-skeleton-panel__body--scroll">
+      {k.serviceError && (
+        <div className="mesh-editor-feedback mesh-editor-feedback--error mesh-editor-anim__error">
+          <span className="material-symbols-outlined">error</span>
+          <span>{k.serviceError}</span>
+        </div>
+      )}
+
+      <div className="mesh-editor-panel__section">
+        <span className="mesh-editor-panel__section-title">Describe the motion</span>
+
+        <label className="mesh-editor-anim__field">
+          <textarea
+            className="mesh-editor-panel__input"
+            rows={3}
+            value={k.prompt || ''}
+            onChange={e => k.onPromptChange?.(e.target.value)}
+            disabled={busy}
+            placeholder="A person walks forward and waves."
+            aria-label="Motion prompt"
+          />
+        </label>
+        {/* Kimodo's own guidance: prompts that start this way and describe one
+            or two behaviours match how its training data was labelled. */}
+        <span className="mesh-editor-panel__hint">
+          Start with “A person…” and keep it to one or two actions. Kimodo knows locomotion,
+          gestures, everyday activities, combat, dance, and styles like tired, drunk or sneaky.
+        </span>
+
+        <label className="mesh-editor-anim__field">
+          <span className="mesh-editor-panel__hint">Duration per sentence (seconds)</span>
+          <input
+            type="number"
+            className="mesh-editor-panel__input"
+            min={0.5}
+            max={10}
+            step={0.5}
+            value={k.duration ?? 5}
+            onChange={e => k.onDurationChange?.(Number(e.target.value))}
+            disabled={busy}
+          />
+        </label>
+        {/* The 10 s ceiling is the model's, not ours. Chaining sentences is the
+            only way past it, so show what the prompt actually adds up to. */}
+        <span className="mesh-editor-panel__hint">
+          {segments > 1
+            ? `${segments} sentences × ${k.duration}s = ${total.toFixed(1)}s total. Each is generated in turn and blended.`
+            : 'Max 10s per sentence — add another sentence for a longer sequence.'}
+        </span>
+
+        <button
+          type="button"
+          className={`mesh-editor-anim__floor-btn ${k.inPlace ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+          onClick={k.onToggleInPlace}
+          disabled={busy}
+          aria-pressed={!!k.inPlace}
+          title="Strip forward/sideways travel so the character animates on the spot. Jumps, crouches and turns are kept."
+        >
+          <span className="material-symbols-outlined">
+            {k.inPlace ? 'check_box' : 'check_box_outline_blank'}
+          </span>
+          <span>Convert to in-place</span>
+        </button>
+
+        <button
+          type="button"
+          className="mesh-editor-btn mesh-editor-btn--primary"
+          onClick={k.onGenerate}
+          disabled={busy || !String(k.prompt || '').trim()}
+          title="Generate an animation from this prompt"
+        >
+          <span className="material-symbols-outlined">{busy ? 'progress_activity' : 'auto_awesome'}</span>
+          <span>{busy ? 'Generating…' : 'Generate motion'}</span>
+        </button>
+
+        {busy && <MeshToolProgress progress={k.progress} />}
+
+        {k.error && (
+          <div className="mesh-editor-feedback mesh-editor-feedback--error mesh-editor-anim__error">
+            <span className="material-symbols-outlined">error</span>
+            <span>{k.error}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Same mapping step as the Animations tab, against the SOMA skeleton. It
+          is offered up front (the service can hand over a rest-pose skeleton
+          without loading the model), so the first generation is not followed by
+          a second wait. */}
+      <div className="mesh-editor-panel__section">
+        <span className="mesh-editor-panel__section-title">Bone mapping</span>
+        {k.ownsMapping && animation?.hasMapping ? (
+          <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'center', gap: '0.4em' }}>
+            <span className="material-symbols-outlined" style={{ fontSize: '1.1em', color: k.autoMapped ? '#e0a030' : '#4caf50' }}>
+              {k.autoMapped ? 'info' : 'check_circle'}
+            </span>
+            <span>
+              {k.autoMapped
+                ? 'Bones were mapped automatically. If the motion looks wrong, check the mapping.'
+                : 'Kimodo’s skeleton is mapped to your mesh.'}
+            </span>
+          </div>
+        ) : (
+          <span className="mesh-editor-panel__hint">
+            Map Kimodo&apos;s skeleton to your mesh once; every generated motion reuses it.
+            {animation?.hasMapping && !k.ownsMapping
+              ? ' This replaces the mapping the Animations tab is using.'
+              : ''}
+          </span>
+        )}
+        <button
+          type="button"
+          className="mesh-editor-btn"
+          onClick={k.onOpenMapping}
+          disabled={busy || k.loading}
+          title="Map the Kimodo skeleton's bones to your mesh"
+        >
+          <span className="material-symbols-outlined">
+            {k.loading ? 'progress_activity' : (k.ownsMapping && animation?.hasMapping ? 'edit' : 'link')}
+          </span>
+          <span>
+            {k.loading ? 'Loading…' : (k.ownsMapping && animation?.hasMapping ? 'Edit mapping' : 'Map bones')}
+          </span>
+        </button>
+      </div>
+
+      {/* Shown whenever clips exist, NOT only once a mapping does. Gating the
+          whole gallery on hasMapping meant a successful generation could finish
+          and render absolutely nothing — no tile, no error — if the user had not
+          mapped bones first. A generated clip must always be visible; what a
+          missing mapping removes is the ability to preview it, and that is what
+          the callout below says. */}
+      {k.ownsMapping && (animation?.clips?.length > 0 || animation?.hasMapping) && (
+        <>
+          {animation?.hasMapping ? (
+            <button
+              type="button"
+              className={`mesh-editor-anim__floor-btn ${animation?.matchRestPose ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+              onClick={animation?.onToggleMatchRestPose}
+              disabled={!!animation?.retargeting}
+              title="Pose your mesh like the Kimodo skeleton before applying the animation. Turn off to keep your mesh's own stance."
+              aria-pressed={!!animation?.matchRestPose}
+            >
+              <span className="material-symbols-outlined">
+                {animation?.matchRestPose ? 'check_box' : 'check_box_outline_blank'}
+              </span>
+              <span>Match reference rest pose</span>
+            </button>
+          ) : (
+            <div className="mesh-editor-feedback mesh-editor-anim__error" style={{ color: '#e0a030' }}>
+              <span className="material-symbols-outlined">warning</span>
+              <span>
+                These motions are generated but cannot play yet — map Kimodo&apos;s bones to your
+                mesh above, then click a clip.
+              </span>
+            </div>
+          )}
+
+          {/* Kimodo generates no mp4 previews, so the tiles fall back to an icon. */}
+          <ClipGallery
+            animation={animation}
+            previewsAvailable={false}
+            emptyLabel="No motions yet — write a prompt above and generate one."
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, animation, kimodo, edit }) {
+  const [tab, setTab] = useState('skeleton')
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const rowRefs = useRef(new Map())
 
   const names = skeleton?.names || []
   const { children, roots } = useMemo(() => buildHierarchy(skeleton?.parents), [skeleton])
@@ -318,6 +586,17 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
         >
           <span className="material-symbols-outlined">animation</span>
           <span>Animations</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'kimodo'}
+          className={`mesh-editor-skeleton-panel__tab ${tab === 'kimodo' ? 'mesh-editor-skeleton-panel__tab--active' : ''}`}
+          onClick={() => setTab('kimodo')}
+          title="Generate an animation from a text prompt (NVIDIA Kimodo)"
+        >
+          <span className="material-symbols-outlined">auto_awesome</span>
+          <span>Kimodo</span>
         </button>
       </div>
 
@@ -459,14 +738,23 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
               : 'Click a bone to highlight it on the mesh. Click a bone on the mesh to select it here.'}
           </span>
         </div>
-      ) : (
+      ) : tab === 'animations' ? (
         <div className="mesh-editor-skeleton-panel__body">
+          {animation?.ownedByKimodo && (
+            <div className="mesh-editor-panel__hint" style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4em' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: '1.1em' }}>info</span>
+              <span>
+                Your mesh is currently mapped to Kimodo&apos;s skeleton — its motions are on the
+                Kimodo tab. Picking a reference below replaces that mapping.
+              </span>
+            </div>
+          )}
           <div className="mesh-editor-anim__controls">
             <label className="mesh-editor-anim__field">
               <span className="mesh-editor-panel__hint">Reference mesh</span>
               <select
                 className="mesh-editor-panel__input mesh-editor-panel__select"
-                value={animation?.referenceId || ''}
+                value={animation?.ownedByKimodo ? '' : (animation?.referenceId || '')}
                 onChange={e => animation?.onSelectReference(e.target.value)}
                 disabled={animation?.loading}
               >
@@ -497,7 +785,7 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
             </div>
           )}
 
-          {!animation?.referenceId ? (
+          {!animation?.referenceId || animation?.ownedByKimodo ? (
             <div className="mesh-editor-layers-panel__empty">
               Select a reference mesh, then map its bones to animate your mesh.
             </div>
@@ -561,72 +849,12 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
                 </div>
               )}
 
-              <div className="mesh-editor-layers-panel__header">
-                <span className="mesh-editor-layers-panel__title">Animations</span>
-                <span className="mesh-editor-panel__hint">{filteredClips.length}{animSearch.trim() ? ` / ${allClips.length}` : ''}</span>
-              </div>
-
-              <div className="mesh-editor-anim__search">
-                <span className="material-symbols-outlined">search</span>
-                <input
-                  type="text"
-                  value={animSearch}
-                  onChange={e => setAnimSearch(e.target.value)}
-                  placeholder="Search animations…"
-                  aria-label="Search animations by name"
-                />
-                {animSearch && (
-                  <button
-                    type="button"
-                    className="mesh-editor-anim__search-clear"
-                    onClick={() => setAnimSearch('')}
-                    title="Clear search"
-                    aria-label="Clear search"
-                  >
-                    <span className="material-symbols-outlined">close</span>
-                  </button>
-                )}
-              </div>
-
-              <div className="mesh-editor-anim__list">
-                {filteredClips.length === 0 ? (
-                  <div className="mesh-editor-layers-panel__empty">No animations match “{animSearch.trim()}”.</div>
-                ) : filteredClips.map(clip => (
-                  <AnimationClipItem
-                    key={clip.name}
-                    name={clip.name}
-                    previewUrl={animationPreviewUrl(animation.referenceId, clip.name)}
-                    selected={animation.selectedAnimation === clip.name}
-                    busy={animation.retargeting === clip.name}
-                    checked={checkedSet.has(clip.name)}
-                    onSelect={() => animation.onSelectAnimation(clip.name)}
-                    onToggleChecked={() => animation.onToggleChecked(clip.name)}
-                  />
-                ))}
-              </div>
-
-              <button
-                type="button"
-                className="mesh-editor-btn mesh-editor-btn--primary mesh-editor-anim__save"
-                onClick={animation?.onSave}
-                disabled={checkedCount === 0 || animation?.saving}
-                title="Save the mesh with the selected animations embedded as a new version"
-              >
-                <span className="material-symbols-outlined">
-                  {animation?.saving ? 'progress_activity' : 'save'}
-                </span>
-                <span>
-                  {animation?.saving
-                    ? 'Saving…'
-                    : `Save mesh with ${checkedCount} animation${checkedCount === 1 ? '' : 's'}`}
-                </span>
-              </button>
-              <span className="mesh-editor-panel__hint">
-                Click an animation to preview it. Tick the ones to embed, then save the mesh as a new version.
-              </span>
+              <ClipGallery animation={animation} emptyLabel="This reference has no animations." />
             </>
           )}
         </div>
+      ) : (
+        <KimodoTab animation={animation} kimodo={kimodo} />
       )}
     </aside>
   )

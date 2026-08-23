@@ -1192,6 +1192,64 @@ export default function SettingsModal({ onClose }) {
                   }))}
                 />
               </div>
+
+              <h3 className="settings-section-title font-label">Motion Generation (Python) Connection</h3>
+              <div className="settings-api-card">
+                <div className="settings-api-header">
+                  <div className="settings-api-icon">
+                    <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>auto_awesome</span>
+                  </div>
+                  <span className="settings-api-name">Kimodo (text to motion)</span>
+                </div>
+
+                <div className="settings-grid settings-grid--triple">
+                  <div className="settings-input-group">
+                    <label className="settings-label">Url</label>
+                    <input
+                      className="settings-input"
+                      placeholder="http://127.0.0.1"
+                      value={localSettings?.apis?.motiontools?.url || ''}
+                      onChange={e => setLocalSettings(prev => ({
+                        ...prev,
+                        apis: {
+                          ...prev?.apis,
+                          motiontools: {
+                            ...prev?.apis?.motiontools,
+                            url: e.target.value
+                          }
+                        }
+                      }))}
+                    />
+                  </div>
+
+                  <div className="settings-input-group">
+                    <label className="settings-label">Port</label>
+                    <input
+                      className="settings-input"
+                      placeholder="8400"
+                      value={localSettings?.apis?.motiontools?.port || ''}
+                      onChange={e => setLocalSettings(prev => ({
+                        ...prev,
+                        apis: {
+                          ...prev?.apis,
+                          motiontools: {
+                            ...prev?.apis?.motiontools,
+                            port: e.target.value
+                          }
+                        }
+                      }))}
+                    />
+                  </div>
+                </div>
+
+                <p className="settings-helper-text">
+                  NVIDIA Kimodo, used by Mesh Editor &rarr; Auto Rig &rarr; Kimodo to generate an
+                  animation from a text prompt. Needs an NVIDIA GPU. Its text encoder runs on the
+                  CPU in a separate process (~16 GB of RAM while loaded) and is released after ten
+                  minutes idle, so the GPU stays free for rigging and ComfyUI.
+                  Start it from thirdparty/kimodo/run_server.
+                </p>
+              </div>
             </section>
           )}
         </div>

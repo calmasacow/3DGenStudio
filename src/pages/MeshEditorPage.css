@@ -530,6 +530,22 @@
   flex: 1;
 }
 
+/* Kimodo tab: a tall form (prompt, duration, mapping) sits ABOVE the results, so
+   there is nothing left for a `flex: 1` clip grid to claim -- it collapses to a
+   few pixels and the generated motions become unreachable. Scroll the panel as
+   one column instead, and let the grid size to its content. One scrollbar, in
+   the place the eye expects it. */
+.mesh-editor-skeleton-panel__body--scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.mesh-editor-skeleton-panel__body--scroll .mesh-editor-anim__list {
+  flex: none;
+  overflow: visible;
+}
+
 .mesh-editor-bone-tree,
 .mesh-editor-bone-tree__children {
   list-style: none;

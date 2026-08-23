@@ -1144,6 +1144,25 @@ function buildRigToolsBaseUrl(settings = {}) {
   return parsedUrl.toString().replace(/\/$/, '');
 }
 
+// Base URL of the text-to-motion micro-service (thirdparty/kimodo/motion_server.py).
+// A third GPU service on its own host/port: Kimodo pins transformers==5.1.0 for
+// its bidirectional text encoder, which the rigging venv (5.13) cannot satisfy.
+// Mirrors buildRigToolsBaseUrl.
+function buildMotionToolsBaseUrl(settings = {}) {
+  const motionSettings = settings?.apis?.motiontools || {};
+  const rawUrl = String(motionSettings.url || 'http://127.0.0.1').trim();
+  const normalizedUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `http://${rawUrl}`;
+  const parsedUrl = new URL(normalizedUrl);
+  const port = String(motionSettings.port || parsedUrl.port || '8400').trim();
+
+  parsedUrl.port = port;
+  parsedUrl.pathname = '';
+  parsedUrl.search = '';
+  parsedUrl.hash = '';
+
+  return parsedUrl.toString().replace(/\/$/, '');
+}
+
 function buildComfyUiWebSocketUrl(baseUrl, clientId) {
   const parsedUrl = new URL(baseUrl);
   const currentPath = parsedUrl.pathname && parsedUrl.pathname !== '/' ? parsedUrl.pathname.replace(/\/$/, '') : '';
@@ -6665,7 +6684,13 @@ async function proxyMeshTool(operationPath, req, res, { baseUrlBuilder = buildMe
     });
   }
 
-  // Stream the Server-Sent Events straight through to the browser.
+  return pipeToolSse(operationPath, upstream, res);
+}
+
+// Stream a Python service's Server-Sent Events straight through to the browser.
+// Shared by proxyMeshTool and proxyMotionTool — the upstream error handling below
+// is load-bearing, so it lives in one place rather than being copied per service.
+function pipeToolSse(operationPath, upstream, res) {
   res.status(200);
   res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -6698,6 +6723,40 @@ async function proxyMeshTool(operationPath, req, res, { baseUrlBuilder = buildMe
   // If the browser hangs up, stop reading the upstream.
   res.on('close', () => { if (!source.destroyed) source.destroy(); });
   return source.pipe(res);
+}
+
+// Forwards a JSON body (not a mesh upload) to the motion service and streams its
+// SSE back. Text-to-motion has no input file — the prompt IS the input — so it
+// cannot go through proxyMeshTool, which requires req.file.
+async function proxyMotionTool(operationPath, req, res, { serviceLabel = 'Motion Generation' } = {}) {
+  const settings = await getSettings();
+  const baseUrl = buildMotionToolsBaseUrl(settings);
+
+  let upstream;
+  try {
+    upstream = await fetch(`${baseUrl}${operationPath}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body ?? {}),
+    });
+  } catch (err) {
+    console.error(`Motion proxy (${operationPath}) could not reach the Python service:`, err);
+    return res.status(502).json({
+      error: `Could not reach the ${serviceLabel} (Python) service at ${baseUrl}. `
+        + 'Is it running? (First launch is slow — it loads the model and may download the text encoder.)',
+    });
+  }
+
+  if (!upstream.ok) {
+    // Validation failures (empty prompt, too many segments) arrive as JSON.
+    const detail = await upstream.text().catch(() => '');
+    return res.status(upstream.status).json({
+      error: `Motion generation failed (${upstream.status})`,
+      detail: detail.slice(0, 2000),
+    });
+  }
+
+  return pipeToolSse(operationPath, upstream, res);
 }
 
 // Same forwarding as proxyMeshTool, for the mesh-tools endpoints that answer with
@@ -6878,6 +6937,53 @@ app.post('/api/meshes/rig', meshToolsUpload.single('meshFile'), async (req, res)
   } catch (err) {
     console.error('Auto Rig proxy failed:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message || 'Auto Rig failed' });
+  }
+});
+
+// Text-to-motion (NVIDIA Kimodo) proxies to the motion micro-service on its own
+// host/port (settings.apis.motiontools). Same SSE contract as the routes above,
+// but the request body is JSON — there is no mesh to upload, only a prompt.
+app.post('/api/motions/generate', async (req, res) => {
+  try {
+    await proxyMotionTool('/motions/generate', req, res);
+  } catch (err) {
+    console.error('Motion generation proxy failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Motion generation failed' });
+  }
+});
+
+// The SOMA-77 source skeleton at rest, so bone mapping is available before the
+// first generation. Cheap upstream (no model load), so it is fetched on demand.
+app.get('/api/motions/skeleton', async (req, res) => {
+  const settings = await getSettings();
+  const baseUrl = buildMotionToolsBaseUrl(settings);
+  try {
+    const upstream = await fetch(`${baseUrl}/motions/skeleton`, { signal: AbortSignal.timeout(30000) });
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ error: `Motion service returned ${upstream.status}` });
+    }
+    return res.json(await upstream.json());
+  } catch {
+    return res.status(502).json({ error: `Could not reach the motion service at ${baseUrl}.` });
+  }
+});
+
+// Lets the Kimodo panel say "the service isn't running" (and whether the ~16 GB
+// text encoder is currently resident) before the user waits on a generation.
+app.get('/api/motions/health', async (req, res) => {
+  const settings = await getSettings();
+  const baseUrl = buildMotionToolsBaseUrl(settings);
+  try {
+    const upstream = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(5000) });
+    if (!upstream.ok) {
+      return res.status(502).json({ error: `Motion service returned ${upstream.status}`, baseUrl });
+    }
+    return res.json(await upstream.json());
+  } catch {
+    return res.status(502).json({
+      error: `Could not reach the motion service at ${baseUrl}.`,
+      baseUrl,
+    });
   }
 });
 

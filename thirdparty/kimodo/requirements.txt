@@ -1,0 +1,38 @@
+# Kimodo motion-generation service dependencies.
+#
+# NOT installed from the vendored pyproject.toml: that pulls the interactive
+# demo's stack (gradio, viser, trimesh, scenepic, av, boto3, mujoco) which this
+# headless service never imports. `run_server` installs the vendored package
+# with `--no-deps` and uses this list instead.
+#
+# torch is installed SEPARATELY by run_server, CUDA-matched via select_torch.py.
+
+# PINNED, AND NOT SAFE TO BUMP.
+# Kimodo's vendored LLM2Vec makes the Llama encoder bidirectional by overriding
+# LlamaModel._update_causal_mask. From transformers ~5.2 onward LlamaModel.forward
+# calls the module-level create_causal_mask() and never calls that override, so
+# the override becomes dead code and the encoder silently runs CAUSALLY --
+# producing plausible-but-wrong embeddings with no error. Symptom: motion that is
+# merely mediocre. Verify bidirectionality before changing this pin.
+transformers==5.1.0
+
+peft>=0.18
+hydra-core>=1.3
+omegaconf>=2.3
+einops>=0.7
+numpy>=1.23
+scipy>=1.10
+safetensors
+huggingface_hub
+tqdm
+packaging
+pydantic>=2.0
+filelock>=3.20.3
+
+# BVH export (pulls PyGLM + SpatialTransform).
+bvhio
+
+# The service itself.
+fastapi
+uvicorn
+requests

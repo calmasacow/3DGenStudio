@@ -16,6 +16,13 @@ start "3DGenStudio Python" /min cmd /c "cd /d "%~dp0python-server" && run.bat > 
 :: thirdparty\skintokens\rig-server.log. Needs an NVIDIA GPU (>=14 GB).
 start "3DGenStudio Rigging" /min cmd /c "cd /d "%~dp0thirdparty\skintokens" && run_server.bat > rig-server.log 2>&1"
 
+:: Start the Kimodo text-to-motion service (Auto Rig > Kimodo, port 8400) the same
+:: way. Its run_server.bat builds a venv + installs torch, the checkpoint (1.1 GB)
+:: and the LLM2Vec text encoder (~16 GB) on first launch, so the FIRST run takes a
+:: long while; output goes to thirdparty\kimodo\kimodo-server.log. Needs an NVIDIA
+:: GPU; the text encoder runs on the CPU in its own process and is freed when idle.
+start "3DGenStudio Kimodo" /min cmd /c "cd /d "%~dp0thirdparty\kimodo" && run_server.bat > kimodo-server.log 2>&1"
+
 :: Wait a few seconds to let Vite + the backend spin up
 timeout /t 3 /nobreak >nul
 
