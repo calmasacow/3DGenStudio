@@ -157,6 +157,7 @@ import SkeletonOverlay from '../components/meshEditor/SkeletonOverlay'
 import SkeletonPanel from '../components/meshEditor/SkeletonPanel'
 import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
+import MotionLibraryModal from '../components/meshEditor/MotionLibraryModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
@@ -532,6 +533,11 @@ export default function MeshEditorPage() {
   const [motionLibError, setMotionLibError] = useState(null)
   // Whichever row is mid-apply or mid-delete, so only that one shows a spinner.
   const [motionLibBusyId, setMotionLibBusyId] = useState(null)
+  // A batch (apply or delete several) is in flight; `progress` drives the count
+  // in the picker's footer, which is the only feedback a 20-motion apply gives.
+  const [motionLibBusy, setMotionLibBusy] = useState(false)
+  const [motionLibProgress, setMotionLibProgress] = useState(null)
+  const [motionLibOpen, setMotionLibOpen] = useState(false)
   // Finger curl (%) per hand, baked into generated clips as a constant pose —
   // Kimodo never animates fingers, so without this a punch lands with an open
   // hand. Per-hand because a punch usually wants one fist and one open guard.
@@ -5143,56 +5149,91 @@ export default function MeshEditorPage() {
     if (animReferenceId === KIMODO_SOURCE_ID) refreshMotionLibrary()
   }, [animReferenceId, refreshMotionLibrary])
 
-  // Put a saved motion into the current session's clip list, exactly where a
-  // fresh generation would land, and play it.
-  const handleApplySavedMotion = useCallback(async motion => {
-    if (motionLibBusyId) return
-    setMotionLibBusyId(motion.id)
+  // Put saved motions into the current session's clip list, exactly where a
+  // fresh generation would land. Takes a LIST: the picker applies a whole
+  // selection, and one motion is just a list of one.
+  const handleApplySavedMotions = useCallback(async motions => {
+    const list = (Array.isArray(motions) ? motions : [motions]).filter(Boolean)
+    if (!list.length || motionLibBusy) return
+    setMotionLibBusy(true)
+    setMotionLibProgress({ done: 0, total: list.length })
     setKimodoError(null)
     try {
       const source = await ensureKimodoSource()
       await ensureAnimTargetScene()
 
       // Names are the retarget cache key, so a motion applied twice in one
-      // session must not collide with its earlier copy.
-      let name = motion.name
+      // session must not collide with its earlier copy — nor with another in the
+      // same batch, which is why `taken` is updated inside the loop.
       const taken = new Set((source.clips || []).map(c => c.name))
-      for (let n = 2; taken.has(name); n += 1) name = `${motion.name} (${n})`
+      const added = []
+      for (const [index, motion] of list.entries()) {
+        setMotionLibBusyId(motion.id)
+        setMotionLibProgress({ done: index, total: list.length })
+        let name = motion.name
+        for (let n = 2; taken.has(name); n += 1) name = `${motion.name} (${n})`
+        taken.add(name)
+        added.push(await loadSavedMotionClip({ ...motion, name }))
+      }
 
-      const clip = await loadSavedMotionClip({ ...motion, name })
-      source.clips = [...(source.clips || []), clip]
+      source.clips = [...(source.clips || []), ...added]
       setAnimClips(source.clips.map(c => ({ name: c.name })))
 
-      if (animMapping) {
-        setSelectedAnimation(name)
-        await showRetargetedClip(name, animMatchRestPose)
+      // Only the LAST one is retargeted and played. Baking all of them up front
+      // would make applying a selection of twenty cost twenty retargets for
+      // nineteen results nobody asked to see; the rest bake on click, as usual.
+      const last = added[added.length - 1]
+      if (animMapping && last) {
+        setSelectedAnimation(last.name)
+        await showRetargetedClip(last.name, animMatchRestPose)
       }
+      setMotionLibOpen(false)
     } catch (err) {
       console.error('Could not apply the saved motion:', err)
       setKimodoError(err?.message || 'Could not apply that motion.')
     } finally {
+      setMotionLibBusy(false)
       setMotionLibBusyId(null)
+      setMotionLibProgress(null)
     }
-  }, [motionLibBusyId, ensureKimodoSource, ensureAnimTargetScene, animMapping,
+  }, [motionLibBusy, ensureKimodoSource, ensureAnimTargetScene, animMapping,
     animMatchRestPose, showRetargetedClip])
 
-  // Deletes the STORED motion, not this session's clip: a clip already applied
+  // Deletes STORED motions, not this session's clips: a clip already applied
   // keeps working until the page is left, which is the behaviour that does not
   // yank something out from under a preview that is mid-play.
-  const handleDeleteSavedMotion = useCallback(async motion => {
-    if (motionLibBusyId) return
-    setMotionLibBusyId(motion.id)
+  //
+  // Each delete is independent, so one failure does not strand the rest — the
+  // ones that went are removed from the list and the failure is reported.
+  const handleDeleteSavedMotions = useCallback(async motions => {
+    const list = (Array.isArray(motions) ? motions : [motions]).filter(Boolean)
+    if (!list.length || motionLibBusy) return
+    setMotionLibBusy(true)
+    const removed = []
+    const failures = []
     try {
-      await deleteSavedMotion(motion.id)
-      setMotionLibrary(prev => prev.filter(m => m.id !== motion.id))
-      setMotionLibError(null)
-    } catch (err) {
-      console.error('Could not delete the saved motion:', err)
-      setMotionLibError(err?.message || 'Could not delete that motion.')
+      for (const motion of list) {
+        setMotionLibBusyId(motion.id)
+        try {
+          await deleteSavedMotion(motion.id)
+          removed.push(motion.id)
+        } catch (err) {
+          console.error('Could not delete the saved motion:', err)
+          failures.push(motion.name)
+        }
+      }
+      if (removed.length) {
+        const gone = new Set(removed)
+        setMotionLibrary(prev => prev.filter(m => !gone.has(m.id)))
+      }
+      setMotionLibError(failures.length
+        ? `Could not delete: ${failures.join(', ')}.`
+        : null)
     } finally {
+      setMotionLibBusy(false)
       setMotionLibBusyId(null)
     }
-  }, [motionLibBusyId])
+  }, [motionLibBusy])
 
   // Bundle for the SkeletonPanel Kimodo tab.
   const kimodoPanelProps = useMemo(() => ({
@@ -5224,15 +5265,14 @@ export default function MeshEditorPage() {
       items: motionLibrary,
       loading: motionLibLoading,
       error: motionLibError,
-      busyId: motionLibBusyId,
-      onApply: handleApplySavedMotion,
-      onDelete: handleDeleteSavedMotion,
+      // Refreshed on open as well as on tab entry: another session (or another
+      // window on the same project) may have generated something since.
+      onOpen: () => { setMotionLibOpen(true); refreshMotionLibrary() },
     },
   }), [kimodoPrompt, kimodoDuration, kimodoInPlace, kimodoRunning, kimodoProgress, kimodoError,
     animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped,
     handCurl, handleHandCurlChange, handleHandCurlCommit,
-    motionLibrary, motionLibLoading, motionLibError, motionLibBusyId,
-    handleApplySavedMotion, handleDeleteSavedMotion])
+    motionLibrary, motionLibLoading, motionLibError, refreshMotionLibrary])
 
   // Bundle for the SkeletonPanel Animations tab.
   const animationPanelProps = useMemo(() => ({
@@ -8965,6 +9005,23 @@ export default function MeshEditorPage() {
           onAutoMap={handleAutoMapBones}
           onSave={handleSaveBoneMapping}
           onClose={() => setShowBoneMapping(false)}
+        />
+      )}
+      {motionLibOpen && (
+        <MotionLibraryModal
+          motions={motionLibrary}
+          loading={motionLibLoading}
+          error={motionLibError}
+          busy={motionLibBusy}
+          busyId={motionLibBusyId}
+          progress={motionLibProgress}
+          // Without a bone mapping a clip cannot be retargeted, so applying one
+          // would silently do nothing. Say why instead of failing quietly.
+          applyDisabled={!animMapping}
+          applyDisabledReason="Map Kimodo’s bones to your mesh first, then apply a motion."
+          onApply={handleApplySavedMotions}
+          onDelete={handleDeleteSavedMotions}
+          onClose={() => setMotionLibOpen(false)}
         />
       )}
       {showBrushSelector && (

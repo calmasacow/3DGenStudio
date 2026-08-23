@@ -2313,101 +2313,152 @@
   }
 }
 
-/* --- Saved motion library (Kimodo tab) ---------------------------------- */
-/* A list rather than the clip gallery's tiles: what identifies a saved motion
-   is its prompt and length, which are words, and Kimodo produces no preview
-   image to put on a tile anyway. */
-.mesh-editor-motionlib {
+/* --- Saved motion picker (popup) ---------------------------------------- */
+/* Reuses .mesh-editor-bonemap__overlay / __header / __footer — same shell, a
+   different body. Narrower and shorter than the bone mapper: this is a list,
+   not two lists plus two 3D views. */
+.mesh-editor-motionpick {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: 260px;
-  overflow-y: auto;
+  width: min(820px, 94vw);
+  height: min(680px, 88vh);
+  background: var(--surface-container, #1e1e22);
+  border: 1px solid var(--outline-variant, #2a2a30);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
 }
 
-.mesh-editor-motionlib__row {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-}
-
-.mesh-editor-motionlib__apply {
-  flex: 1;
-  min-width: 0;
+.mesh-editor-motionpick__toolbar {
   display: flex;
   align-items: center;
-  gap: 0.6em;
-  padding: 7px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  color: #e8eaf0;
-  font-family: inherit;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
+  gap: 0.6rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--outline-variant, #2a2a30);
 }
 
-.mesh-editor-motionlib__apply:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.16);
+.mesh-editor-motionpick__search {
+  flex: 1;
+  min-width: 0;
 }
 
-.mesh-editor-motionlib__apply:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.mesh-editor-motionlib__apply > .material-symbols-outlined {
-  font-size: 1.15em;
+.mesh-editor-motionpick__count {
   flex: none;
+  white-space: nowrap;
+}
+
+.mesh-editor-motionpick__error {
+  margin: 0.75rem 1.25rem 0;
+}
+
+.mesh-editor-motionpick__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mesh-editor-motionpick__row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  user-select: none;
+}
+
+.mesh-editor-motionpick__row:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.mesh-editor-motionpick__row:focus-visible {
+  outline: 2px solid var(--primary, #ac89ff);
+  outline-offset: 1px;
+}
+
+.mesh-editor-motionpick__row--on {
+  background: rgba(172, 137, 255, 0.14);
+  border-color: rgba(172, 137, 255, 0.45);
+}
+
+.mesh-editor-motionpick__check {
+  flex: none;
+  font-size: 1.2em;
   opacity: 0.85;
 }
 
-.mesh-editor-motionlib__text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+.mesh-editor-motionpick__row--on .mesh-editor-motionpick__check {
+  color: var(--primary, #ac89ff);
+  opacity: 1;
 }
 
-/* The name is the prompt for anything generated here, so it is routinely longer
-   than the panel. Truncate rather than wrap: two lines per row would halve how
-   many motions are visible, and the full text is on the tooltip. */
-.mesh-editor-motionlib__name {
+.mesh-editor-motionpick__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Both lines truncate. A prompt can be a paragraph, and a row that grows to fit
+   one would push the rest of the list out of view — which is the problem this
+   popup exists to solve. */
+.mesh-editor-motionpick__name,
+.mesh-editor-motionpick__prompt {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.mesh-editor-motionlib__meta {
-  font-size: 10.5px;
+.mesh-editor-motionpick__name {
+  font-size: 0.85rem;
+  color: var(--on-surface, #e8eaf0);
+}
+
+.mesh-editor-motionpick__prompt {
+  font-size: 0.74rem;
   opacity: 0.6;
 }
 
-.mesh-editor-motionlib__del {
+.mesh-editor-motionpick__meta {
   flex: none;
-  width: 32px;
+  font-size: 0.72rem;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+.mesh-editor-motionpick__play {
+  flex: none;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  color: #e8eaf0;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--on-surface, #e8eaf0);
   cursor: pointer;
 }
 
-.mesh-editor-motionlib__del:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.15);
-  border-color: rgba(248, 113, 113, 0.4);
+.mesh-editor-motionpick__play:hover:not(:disabled) {
+  background: rgba(172, 137, 255, 0.2);
+  border-color: rgba(172, 137, 255, 0.5);
 }
 
-/* Armed: the next click deletes. Loud on purpose — there is no undo. */
-.mesh-editor-motionlib__del--armed {
+.mesh-editor-motionpick__play:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Armed delete. Loud on purpose — the BVH file goes with the row, and a batch
+   delete has no undo at all. */
+.mesh-editor-motionpick__danger {
   background: rgba(248, 113, 113, 0.25);
   border-color: #f87171;
   color: #fecaca;
-}
-
-.mesh-editor-motionlib__del .material-symbols-outlined {
-  font-size: 1.05em;
 }
