@@ -359,7 +359,7 @@ export async function loadEditableGeometryFromGlbBuffer(arrayBuffer) {
 // Skeleton extraction now lives in ./skeleton.js so plain viewers can read a rig
 // without pulling in this module's CSG/BVH deps. Re-exported here so existing
 // callers keep importing it from utils/meshEditor.
-export { extractSkeletonFromObject, extractSkeletonFromGlbBuffer, translateSkeleton } from './skeleton'
+export { extractSkeletonFromObject, extractSkeletonFromGlbBuffer, filterSkeleton, translateSkeleton } from './skeleton'
 
 async function loadGeometryFromUrl(url) {
   const extension = getExtensionFromUrl(url)

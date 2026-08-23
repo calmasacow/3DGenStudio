@@ -514,6 +514,84 @@ function KimodoTab({ animation, kimodo }) {
             </div>
           )}
 
+          {/* Kimodo animates no fingers at all — it solves a 30-joint skeleton and
+              fills every knuckle from one fixed relaxed pose — so a punch lands
+              with whatever hand the mesh was modelled with. This holds them in a
+              chosen pose instead. It is one constant pose, not animation. */}
+          {animation?.hasMapping && (
+            <div className="mesh-editor-anim__arms">
+              <div className="mesh-editor-anim__arms-head">
+                <span className="mesh-editor-panel__hint">Hand curl (open → fist)</span>
+                <button
+                  type="button"
+                  className="mesh-editor-anim__arms-reset"
+                  onClick={() => { k.onHandCurlReset?.(); k.onHandCurlCommit?.() }}
+                  title="Both hands back to the mesh's own pose"
+                >
+                  <span className="material-symbols-outlined">restart_alt</span>
+                </button>
+              </div>
+              {/* Separate per hand: a punch is a fist on one side and an open
+                  guard on the other, and one slider cannot express that. */}
+              {[
+                { side: 'left', label: 'Left' },
+                { side: 'leftThumb', label: '— thumb' },
+                { side: 'right', label: 'Right' },
+                { side: 'rightThumb', label: '— thumb' },
+              ].map(({ side, label }) => (
+                <div className="mesh-editor-anim__arms-row" key={side}>
+                  <span className="mesh-editor-panel__hint" style={{ minWidth: '4.2em' }}>{label}</span>
+                  <input
+                    type="range" min="0" max="100" step="1"
+                    value={k.handCurl?.[side] ?? 0}
+                    onChange={e => k.onHandCurlChange?.(side, Number(e.target.value))}
+                    // Rebaking on every pixel of drag would be unusable, so the
+                    // clip is only rebuilt once the slider is let go.
+                    onPointerUp={() => k.onHandCurlCommit?.()}
+                    onKeyUp={() => k.onHandCurlCommit?.()}
+                    disabled={!!animation?.retargeting}
+                    aria-label={`${side.includes('Thumb') ? `${side.replace('Thumb', '')} thumb` : `${label} hand`} curl`}
+                  />
+                  <span className="mesh-editor-anim__arms-val">{k.handCurl?.[side] ?? 0}%</span>
+                </div>
+              ))}
+              {/* Which local axis a thumb folds about is a rig convention, and
+                  deducing it from geometry failed on real rigs several times over.
+                  Auto still tries; these are here so a wrong guess costs a click
+                  rather than another round of heuristics. */}
+              <div className="mesh-editor-anim__arms-row">
+                <span className="mesh-editor-panel__hint" style={{ minWidth: '4.2em' }}>Axis</span>
+                <select
+                  className="mesh-editor-panel__input mesh-editor-panel__select"
+                  value={k.handCurl?.thumbAxis || 'auto'}
+                  onChange={e => { k.onHandCurlChange?.('thumbAxis', e.target.value); k.onHandCurlCommit?.() }}
+                  disabled={!!animation?.retargeting}
+                  title="If the thumb folds the wrong way, try the other axes"
+                >
+                  <option value="auto">Auto</option>
+                  <option value="x">Local X</option>
+                  <option value="y">Local Y</option>
+                  <option value="z">Local Z</option>
+                </select>
+                <button
+                  type="button"
+                  className={`mesh-editor-anim__floor-btn ${k.handCurl?.thumbFlip ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+                  style={{ flex: '0 0 auto' }}
+                  onClick={() => { k.onHandCurlChange?.('thumbFlip', !k.handCurl?.thumbFlip); k.onHandCurlCommit?.() }}
+                  aria-pressed={!!k.handCurl?.thumbFlip}
+                  title="Fold the thumb the other way"
+                >
+                  <span className="material-symbols-outlined">swap_horiz</span>
+                </button>
+              </div>
+              <span className="mesh-editor-panel__hint">
+                Kimodo never moves fingers, so this is a fixed pose held for the whole clip.
+                If the thumb folds the wrong way, change its axis above — which one a rig uses
+                is a convention, not something that can be read off the shape.
+              </span>
+            </div>
+          )}
+
           {/* Kimodo generates no mp4 previews, so the tiles fall back to an icon. */}
           <ClipGallery
             animation={animation}

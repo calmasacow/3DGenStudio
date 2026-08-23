@@ -26,6 +26,7 @@ import {
   loadEditableGeometryFromGlbBuffer,
   parseGlbScene,
   extractSkeletonFromObject,
+  filterSkeleton,
   translateSkeleton,
   mergeSelectedVertices,
   smoothSelectedVertices,
@@ -157,6 +158,7 @@ import SkeletonPanel from '../components/meshEditor/SkeletonPanel'
 import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
+import { withHandPose } from '../utils/handPose'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
@@ -522,6 +524,15 @@ export default function MeshEditorPage() {
   // The bone map was produced automatically rather than confirmed by the user, so
   // the panel can suggest checking it if the motion comes out wrong.
   const [kimodoAutoMapped, setKimodoAutoMapped] = useState(false)
+  // Finger curl (%) per hand, baked into generated clips as a constant pose —
+  // Kimodo never animates fingers, so without this a punch lands with an open
+  // hand. Per-hand because a punch usually wants one fist and one open guard.
+  const [handCurl, setHandCurl] = useState({
+    left: 0, right: 0, leftThumb: 0, rightThumb: 0,
+    // Which local axis the thumb folds about. 'auto' infers it from the rig;
+    // inference proved unreliable across rigs, so the axis is selectable.
+    thumbAxis: 'auto', thumbFlip: false,
+  })
   const kimodoCounterRef = useRef(0)   // makes generated clip names unique per session
 
   const animSourceRef = useRef(null)   // loaded reference: { scene, skinnedMesh, boneNames, clips, hipName }
@@ -4760,8 +4771,14 @@ export default function MeshEditorPage() {
     }
   }, [ensureAnimTargetScene])
 
-  const handleOpenBoneMapping = useCallback(async () => {
-    if (!animReferenceId) return
+  // `referenceIdOverride` exists because of a stale-closure trap: the Kimodo tab
+  // calls ensureKimodoSource() (which setAnimReferenceId's to 'kimodo') and then
+  // this, in the same tick. The `animReferenceId` captured in THIS render is
+  // still the old value, so the guard below used to bail on the first click and
+  // only work on the second. Callers that just changed the reference pass it in.
+  const handleOpenBoneMapping = useCallback(async (referenceIdOverride = null) => {
+    const referenceId = referenceIdOverride || animReferenceId
+    if (!referenceId) return
     setAnimError(null)
     // Reference + target were loaded on selection, but re-ensure in case of a
     // fresh rig since then.
@@ -4769,9 +4786,9 @@ export default function MeshEditorPage() {
       setAnimLoading(true)
       try {
         if (!animSourceRef.current) {
-          animSourceRef.current = animReferenceId === KIMODO_SOURCE_ID
+          animSourceRef.current = referenceId === KIMODO_SOURCE_ID
             ? await loadKimodoSkeletonSource()
-            : await loadReferenceScene(animReferenceId)
+            : await loadReferenceScene(referenceId)
         }
         await ensureAnimTargetScene()
       } catch (err) {
@@ -4790,15 +4807,22 @@ export default function MeshEditorPage() {
     let source = null
     // Kimodo has no rig GLB — its source scene IS a bare armature parsed from the
     // service's rest-pose BVH, so go straight to the fallback below.
-    if (animReferenceId !== KIMODO_SOURCE_ID) {
+    if (referenceId !== KIMODO_SOURCE_ID) {
       try {
-        const rig = await loadReferenceRigScene(animReferenceId)
+        const rig = await loadReferenceRigScene(referenceId)
         source = extractSkeletonFromObject(rig.scene)
       } catch (err) {
         console.warn('Rig GLB unavailable, using the animation scene skeleton:', err)
       }
     }
     if (!source && animSourceRef.current?.scene) source = extractSkeletonFromObject(animSourceRef.current.scene)
+    // Show only what can actually be mapped. Kimodo's scene carries all 77 SOMA
+    // joints because the FK chain needs them, but boneNames is the 23 the model
+    // animates — leaving the other 54 in the 3D view made the picture disagree
+    // with the list next to it, which reads as a bug rather than a restriction.
+    if (source && animSourceRef.current?.boneNames?.length) {
+      source = filterSkeleton(source, animSourceRef.current.boneNames) || source
+    }
     const target = animTargetRef.current?.scene ? extractSkeletonFromObject(animTargetRef.current.scene) : null
     setBoneMapSkeletons({ source, target })
 
@@ -4851,9 +4875,25 @@ export default function MeshEditorPage() {
       mapping: animMapping,
       matchRestPose,
     })
-    retargetedClipsRef.current.set(clipName, retargeted)
-    return retargeted
-  }, [animMapping, animMatchRestPose])
+    // Hold the fingers in a fixed pose. Only useful for Kimodo, whose clips carry
+    // no finger motion at all — withHandPose leaves alone any finger a clip does
+    // animate, so applying it to a library clip is harmless.
+    const posed = withHandPose(retargeted, {
+      targetScene: target.scene,
+      targetSkinnedMesh: target.skinnedMesh,
+      mapping: animMapping,
+      curl: {
+        left: handCurl.left / 100,
+        right: handCurl.right / 100,
+        leftThumb: handCurl.leftThumb / 100,
+        rightThumb: handCurl.rightThumb / 100,
+        thumbAxis: handCurl.thumbAxis,
+        thumbFlip: handCurl.thumbFlip,
+      },
+    })
+    retargetedClipsRef.current.set(clipName, posed)
+    return posed
+  }, [animMapping, animMatchRestPose, handCurl])
 
   // Bake a clip and put it on screen. Shared by clicking a clip and by the
   // rest-pose toggle, which has to rebuild whatever is already playing.
@@ -4894,6 +4934,18 @@ export default function MeshEditorPage() {
     setSelectedAnimation(clipName)
     await showRetargetedClip(clipName, animMatchRestPose)
   }, [selectedAnimation, animMapping, animMatchRestPose, showRetargetedClip])
+
+  // The hand pose is baked into each clip, so every cached bake is stale.
+  const handleHandCurlChange = useCallback((side, value) => {
+    setHandCurl(prev => ({ ...prev, [side]: value }))
+    retargetedClipsRef.current.clear()
+  }, [])
+
+  // Rebake whatever is playing once the slider settles, so the curl is visible
+  // without having to re-click the clip. Deferred to pointer-up by the panel.
+  const handleHandCurlCommit = useCallback(() => {
+    if (selectedAnimation) void showRetargetedClip(selectedAnimation, animMatchRestPose)
+  }, [selectedAnimation, animMatchRestPose, showRetargetedClip])
 
   // Every cached bake was measured against the old rest pose, so they all go.
   const handleToggleMatchRestPose = useCallback(() => {
@@ -4982,7 +5034,7 @@ export default function MeshEditorPage() {
       return
     }
     setAnimLoading(false)
-    await handleOpenBoneMapping()
+    await handleOpenBoneMapping(KIMODO_SOURCE_ID)
   }, [ensureKimodoSource, ensureAnimTargetScene, handleOpenBoneMapping])
 
   const handleKimodoGenerate = useCallback(async () => {
@@ -5065,8 +5117,16 @@ export default function MeshEditorPage() {
     // whether the tab shows its clips or warns that mapping will take the slot.
     ownsMapping: animReferenceId === KIMODO_SOURCE_ID,
     autoMapped: kimodoAutoMapped,
+    handCurl,
+    onHandCurlChange: handleHandCurlChange,
+    onHandCurlCommit: handleHandCurlCommit,
+    onHandCurlReset: () => {
+      setHandCurl(prev => ({ ...prev, left: 0, right: 0, leftThumb: 0, rightThumb: 0 }))
+      retargetedClipsRef.current.clear()
+    },
   }), [kimodoPrompt, kimodoDuration, kimodoInPlace, kimodoRunning, kimodoProgress, kimodoError,
-    animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped])
+    animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped,
+    handCurl, handleHandCurlChange, handleHandCurlCommit])
 
   // Bundle for the SkeletonPanel Animations tab.
   const animationPanelProps = useMemo(() => ({

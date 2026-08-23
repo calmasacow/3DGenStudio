@@ -113,6 +113,66 @@ export function extractSkeletonFromObject(object) {
   }
 }
 
+// Keep only the named bones, re-linking each survivor to its nearest surviving
+// ancestor so the hierarchy stays connected.
+//
+// Used by the bone-mapping modal's source view. The Kimodo skeleton carries all
+// 77 SOMA joints because the FK chain needs them, but only the 23 the model
+// actually animates are offered for mapping — drawing the other 54 (44 of them
+// finger joints that never move) made the picture disagree with the list beside
+// it, which reads as a bug rather than as a deliberate restriction.
+//
+// Returns the skeleton unchanged when `allowed` covers everything, and null when
+// it covers nothing.
+export function filterSkeleton(skeleton, allowed) {
+  if (!skeleton?.names?.length || !allowed) return skeleton
+  const keep = allowed instanceof Set ? allowed : new Set(allowed)
+
+  const kept = []
+  skeleton.names.forEach((name, i) => { if (keep.has(name)) kept.push(i) })
+  if (kept.length === skeleton.names.length) return skeleton
+  if (!kept.length) return null
+
+  const remap = new Map(kept.map((oldIndex, newIndex) => [oldIndex, newIndex]))
+
+  const joints = new Float32Array(kept.length * 3)
+  const names = new Array(kept.length)
+  const parents = new Int32Array(kept.length)
+  const segments = []
+
+  kept.forEach((oldIndex, newIndex) => {
+    joints[newIndex * 3] = skeleton.joints[oldIndex * 3]
+    joints[newIndex * 3 + 1] = skeleton.joints[oldIndex * 3 + 1]
+    joints[newIndex * 3 + 2] = skeleton.joints[oldIndex * 3 + 2]
+    names[newIndex] = skeleton.names[oldIndex]
+
+    // Walk up until a kept ancestor is found, so dropping an intermediate bone
+    // splices its children onto the chain instead of orphaning them.
+    let p = skeleton.parents[oldIndex]
+    while (p >= 0 && !remap.has(p)) p = skeleton.parents[p]
+    parents[newIndex] = p >= 0 ? remap.get(p) : -1
+  })
+
+  // Second pass: bone order is not guaranteed parent-first, so segments are only
+  // safe to build once every joint position has been written.
+  parents.forEach((p, i) => {
+    if (p < 0) return
+    segments.push(
+      joints[p * 3], joints[p * 3 + 1], joints[p * 3 + 2],
+      joints[i * 3], joints[i * 3 + 1], joints[i * 3 + 2],
+    )
+  })
+
+  return {
+    jointCount: kept.length,
+    joints,
+    segments: new Float32Array(segments),
+    names,
+    parents,
+    size: skeleton.size,
+  }
+}
+
 // Shift extracted skeleton data by a world-space offset.
 //
 // The overlay is baked world-space positions, not live bones, so anything that
