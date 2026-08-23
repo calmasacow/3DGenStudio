@@ -5,6 +5,9 @@
 # each step does and which env vars are honoured. Notably:
 #   KIMODO_LLAMA_BASE=NousResearch/Meta-Llama-3-8B-Instruct
 #       ungated mirror of the gated Llama-3 base weights the text encoder needs
+#   KIMODO_CHECKPOINT_DIR=/path/to/models
+#       where the weights are kept (default ./checkpoints); holds BOTH the Kimodo
+#       checkpoint and the 16 GB Llama-3 base the text encoder loads
 set -euo pipefail
 cd "$(dirname "$0")"
 PYVER=3.13

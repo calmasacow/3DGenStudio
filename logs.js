@@ -8,6 +8,11 @@
 // — rotates them all at startup, so one file == one session. This module
 // only reads them, which is why it is safe to expose over the normal API.
 //
+// Running from source there is no shell to do that piping, but run.bat/run.sh
+// redirect each service into a log of its own next to that service. Those are
+// the `devFile` paths below, used as a fallback so the Logs panel is not simply
+// blank for everyone who develops against the repo.
+//
 // Reads are incremental and bounded: the client passes back the `nextOffset` it
 // last received and gets only the bytes appended since. That keeps a 200 MB
 // ComfyUI log from ever being loaded into a browser tab, and makes "follow"
@@ -22,8 +27,14 @@ import { Buffer } from 'node:buffer';
 // away long enough for the file to have grown past it.
 const MAX_CHUNK_BYTES = 512 * 1024;
 
-// id -> file name + how to describe it in the UI. The ids are a closed set, so
-// no request can ever reach a path outside the log directory.
+// id -> file name + how to describe it in the UI. The ids are a closed set, and
+// both `file` and `devFile` are fixed strings, so no request can reach a path
+// that is not listed here.
+//
+// `file`    is what the desktop shell writes, under the log directory.
+// `devFile` is where run.bat/run.sh put the same service's output when running
+//           from source, relative to the repo root. Read only when `file` is
+//           absent, so the desktop app never picks up a stale dev log.
 export const LOG_SOURCES = [
   {
     id: 'desktop',
@@ -35,6 +46,9 @@ export const LOG_SOURCES = [
   {
     id: 'backend',
     file: 'backend.log',
+    // From source, `npm run dev` runs the API server and Vite through
+    // concurrently into one file, so this log carries both.
+    devFile: 'dev.log',
     label: 'Backend',
     description: 'Node API server (server.js): projects, assets, workflow runs.',
     desktopOnly: true,
@@ -42,6 +56,7 @@ export const LOG_SOURCES = [
   {
     id: 'meshtools',
     file: 'python.log',
+    devFile: 'python-server/python-server.log',
     label: 'Mesh Service',
     description: 'Python mesh tools: Auto UV, retopology, repair, LOD, bake.',
     desktopOnly: true,
@@ -49,8 +64,17 @@ export const LOG_SOURCES = [
   {
     id: 'rigging',
     file: 'rig.log',
+    devFile: 'thirdparty/skintokens/rig-server.log',
     label: 'SkinTokens Service',
     description: 'Python rigging service: Auto Rig and animation retargeting.',
+    desktopOnly: true,
+  },
+  {
+    id: 'motion',
+    file: 'kimodo.log',
+    devFile: 'thirdparty/kimodo/kimodo-server.log',
+    label: 'Motion Service',
+    description: 'NVIDIA Kimodo text-to-motion, plus its out-of-process text encoder.',
     desktopOnly: true,
   },
   {
@@ -89,6 +113,22 @@ function normalizeLogText(raw) {
     .split('\n')
     .map((line) => (line.includes('\r') ? line.slice(line.lastIndexOf('\r') + 1) : line))
     .join('\n');
+}
+
+// Which file a source actually reads from, plus its stat. The desktop log wins
+// whenever it exists — including when it exists and is empty, because that means
+// the shell has the service and a dev log lying around from an earlier `run.bat`
+// would be a lie about the current session.
+async function resolveSource(source, logDir) {
+  const primary = path.join(logDir, source.file);
+  const stat = await statLog(primary);
+  if (stat.exists || !source.devFile) return { file: primary, ...stat };
+
+  const dev = path.resolve(process.cwd(), source.devFile);
+  const devStat = await statLog(dev);
+  // Fall back to reporting the primary path when neither exists, so the "nothing
+  // logged yet" message names the location the app would normally write to.
+  return devStat.exists ? { file: dev, ...devStat } : { file: primary, ...stat };
 }
 
 async function statLog(file) {
@@ -176,7 +216,7 @@ export function mountLogs(app, { logDir = resolveLogDir() } = {}) {
   app.get('/api/logs', async (_req, res) => {
     try {
       const sources = await Promise.all(LOG_SOURCES.map(async (source) => {
-        const { exists, size, modifiedAt } = await statLog(path.join(logDir, source.file));
+        const { exists, size, modifiedAt } = await resolveSource(source, logDir);
         return { ...source, exists, size, modifiedAt };
       }));
       res.json({ dir: logDir, sources });
@@ -198,7 +238,8 @@ export function mountLogs(app, { logDir = resolveLogDir() } = {}) {
     }
 
     try {
-      const slice = await readLogSlice(path.join(logDir, source.file), parsedSince);
+      const { file } = await resolveSource(source, logDir);
+      const slice = await readLogSlice(file, parsedSince);
       res.json({ id: source.id, label: source.label, file: source.file, ...slice });
     } catch (error) {
       res.status(500).json({ error: error.message });

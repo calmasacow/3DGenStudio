@@ -31,18 +31,20 @@ import json
 import os
 import threading
 import traceback
-from pathlib import Path
 
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Same writable-data-dir rule as motion_server.py: the packaged app ships this
-# folder read-only, so the rebased adapter copy has to live alongside the rest of
-# the per-user state.
-_HERE = Path(__file__).resolve().parent
-_DATA_DIR = Path(os.environ.get("KIMODO_DATA_DIR") or _HERE).resolve()
+from kimodo_paths import (
+    DATA_DIR as _DATA_DIR,
+    GATED_BASE,
+    LLAMA_REPO,
+    ensure_llama_base,
+    llama_dir,
+    resolve_llama_base,
+)
 
 HOST = os.environ.get("KIMODO_TEXT_ENCODER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("KIMODO_TEXT_ENCODER_PORT", "9550") or "9550")
@@ -51,15 +53,20 @@ PORT = int(os.environ.get("KIMODO_TEXT_ENCODER_PORT", "9550") or "9550")
 DEVICE = os.environ.get("TEXT_ENCODER_DEVICE", "cpu")
 
 # LLM2Vec is a pair of LoRA adapters over Llama-3-8B-Instruct. The adapter repos
-# are small and ungated; the BASE WEIGHTS are the gated 16 GB part.
+# are small and ungated; the BASE WEIGHTS are the gated 16 GB part. GATED_BASE and
+# LLAMA_REPO come from kimodo_paths, which owns where the weights live.
 MNTP_REPO = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
 SUPERVISED_REPO = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
-GATED_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-# Where to get the base weights. Empty = the official gated repo, which needs a
-# granted access request plus `hf auth login`. Set this to an ungated mirror of
-# the same weights (e.g. NousResearch/Meta-Llama-3-8B-Instruct) to skip that.
-BASE_OVERRIDE = os.environ.get("KIMODO_LLAMA_BASE", "").strip()
+# Where the base weights come from is decided by kimodo_paths.ensure_llama_base()
+# -- local model folder, else an already-populated Hugging Face cache, else a
+# fresh download into the model folder. See that function for why the order
+# matters.
+#
+# Resolved on the LOADING THREAD, not at import: case 3 downloads ~16 GB, and
+# doing that at import would hold the port closed for an hour with nothing able
+# to report why. _load() sets this; /health reports it.
+_resolved_base: str | None = None
 
 # There is deliberately NO quantization option. It was tried and removed.
 #
@@ -100,15 +107,19 @@ def _explain(exc: Exception) -> str:
             "quickly), then run `hf auth login` inside thirdparty/kimodo/.venv.\n"
             "  2. Point at an ungated mirror of the same weights, e.g. set "
             "KIMODO_LLAMA_BASE=NousResearch/Meta-Llama-3-8B-Instruct before starting the "
-            "service.\n"
+            "service, then run `python download.py --text-encoder` to fetch them into\n"
+            f"     {llama_dir()}\n"
             "A GGUF build cannot be substituted: LLM2Vec needs bidirectional attention and "
             "two PEFT adapters, and GGUF supports neither.\n\n" + detail
         )
     return detail
 
 
-def _rebased_adapter_dir() -> str:
-    """Local copy of the MNTP adapter, repointed at an ungated base mirror.
+def _rebased_adapter_dir(base: str) -> str:
+    """Local copy of the MNTP adapter, repointed at `base`.
+
+    `base` is whatever ensure_llama_base() settled on -- a local directory or a
+    repo id. Both work: transformers resolves either through the same code path.
 
     The MNTP repo is just a LoRA plus a tokenizer; the 16 GB of base weights it
     names in ``adapter_config.json`` are the gated part. Rather than reimplement
@@ -136,8 +147,8 @@ def _rebased_adapter_dir() -> str:
 
     config_path = target / "adapter_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    if config.get("base_model_name_or_path") != BASE_OVERRIDE:
-        config["base_model_name_or_path"] = BASE_OVERRIDE
+    if config.get("base_model_name_or_path") != base:
+        config["base_model_name_or_path"] = base
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     # Guard the trap described above rather than trusting the upstream file.
@@ -169,13 +180,16 @@ def _load() -> None:
     Runs on a background thread, so an exception here would otherwise vanish; the
     parent needs to see it via /health to turn it into a useful SSE error.
     """
-    global _encoder, _load_error
+    global _encoder, _load_error, _resolved_base
     try:
         # Imported lazily: pulling in torch + transformers costs seconds we do
         # not want to pay before the port is bound.
         from kimodo.model import LLM2VecEncoder
 
-        base_path = _rebased_adapter_dir() if BASE_OVERRIDE else MNTP_REPO
+        # May download ~16 GB. Prints progress to stdout, which run.bat and the
+        # desktop shell both capture into the Kimodo service log.
+        _resolved_base = ensure_llama_base()
+        base_path = _rebased_adapter_dir(_resolved_base)
 
         encoder = LLM2VecEncoder(
             base_model_name_or_path=base_path,
@@ -206,7 +220,13 @@ def health() -> dict:
             "status": "error" if _load_error else ("ok" if _encoder is not None else "loading"),
             "ready": _encoder is not None,
             "device": DEVICE,
-            "base": BASE_OVERRIDE or GATED_BASE,
+            # Null until the loading thread has settled it. `base_local` is the
+            # difference between "the model folder holds these, and Settings can
+            # move them" and "they are wherever HF_HOME points" — worth reporting,
+            # because the two are otherwise indistinguishable from outside.
+            "base": _resolved_base or LLAMA_REPO,
+            "base_local": bool(resolve_llama_base()),
+            "models_dir": str(llama_dir().parent),
             "error": _load_error,
         }
 
@@ -243,5 +263,5 @@ def encode(req: EncodeRequest) -> dict:
 
 if __name__ == "__main__":
     print(f"[kimodo-text-encoder] listening on http://{HOST}:{PORT}  "
-          f"(device={DEVICE}, base={BASE_OVERRIDE or GATED_BASE})")
+          f"(device={DEVICE}, base={LLAMA_REPO}, models={llama_dir().parent})")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

@@ -20,6 +20,9 @@
 ::   TEXT_ENCODER_DEVICE=cuda   run the text encoder on the GPU (needs ~17 GB VRAM)
 ::   KIMODO_LLAMA_BASE=NousResearch/Meta-Llama-3-8B-Instruct
 ::                              ungated mirror of the gated Llama-3 base weights
+::   KIMODO_CHECKPOINT_DIR=...  where the weights are kept (default ./checkpoints);
+::                              holds BOTH the Kimodo checkpoint and the 16 GB
+::                              Llama-3 base the text encoder loads
 ::   KIMODO_SKIP_MODEL=1        don't download the checkpoint
 ::   KIMODO_SKIP_ENCODER=1      don't pre-download the ~16 GB text encoder
 :: Ungated mirror of the Llama-3 base weights the text encoder needs, so first

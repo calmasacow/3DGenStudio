@@ -8,6 +8,9 @@
 // makes the flash-attn wheel selection for rigging deterministic.
 //
 //   - Mesh Tools (python-server): always provisioned. CPU only.
+//   - Motion Generation (kimodo): opt-in. Heavy (torch + a 1.1 GB checkpoint +
+//     a 16 GB text encoder) and needs an NVIDIA GPU. No flash-attn, so the setup
+//     is the plain run_server.bat sequence; macOS has no CUDA and is refused.
 //   - Rigging (skintokens): opt-in. Heavy (torch + flash-attn + model) and needs
 //     an NVIDIA GPU; the setup reuses the service's own Python helpers
 //     (select_flash_attn.py / download_wheel.py / download.py). Windows and Linux
@@ -314,6 +317,134 @@ async function setupSkintokens({ uv, serviceDir, venvDir, dataDir, onProgress })
   onProgress({ kind: 'done' });
 }
 
+// ---- Motion Generation (Kimodo) --------------------------------------------
+// `dataDir` is a WRITABLE folder for everything the service downloads or writes
+// (checkpoints/, cache/). `modelsDir` overrides just the weights location — it is
+// the Settings "Model folder" box, so a user can put 17 GB on the drive that has
+// room for it without moving the embedding cache with it.
+//
+// This mirrors thirdparty/kimodo/run_server.bat step for step; see that file for
+// why each one is shaped the way it is. Three are load-bearing:
+//
+//   - torch is installed AFTER requirements.txt with --reinstall-package torch.
+//     requirements pulls peft/accelerate, which drag in a CPU torch, and the CUDA
+//     build carries the SAME version number with a +cuXXX local tag — so uv
+//     "audits" the requirement as satisfied and installs nothing. The service then
+//     starts silently on the CPU.
+//   - SKIP_MOTION_CORRECTION_IN_SETUP keeps setup.py from building the CMake
+//     extension during the editable install, so a machine with no C++ compiler
+//     still gets a working service.
+//   - the vendored package installs with --no-deps: its pyproject pulls the
+//     interactive demo's stack (gradio, viser, mujoco) this headless service
+//     never imports.
+async function setupKimodo({ uv, serviceDir, venvDir, dataDir, modelsDir, llamaBase, onProgress }) {
+  // Kimodo needs an NVIDIA GPU. Say so before, not several GB into, a torch
+  // install that has no macOS CUDA build to find.
+  if (IS_MAC) {
+    throw new Error('Motion generation (Kimodo) needs an NVIDIA GPU (CUDA), which macOS does not provide. The rest of the app works normally.');
+  }
+  const vp = venvPython(venvDir);
+  const dataRoot = dataDir || serviceDir;
+  try { fs.mkdirSync(dataRoot, { recursive: true }); } catch { /* ignore */ }
+
+  // Every python.exe below is the service's own, and each needs the same view of
+  // where things live as the running service will have (see startKimodo) — the
+  // download steps in particular write into exactly the folders it reads from.
+  const env = { ...process.env, KIMODO_DATA_DIR: dataRoot };
+  if (modelsDir) env.KIMODO_CHECKPOINT_DIR = modelsDir;
+  if (llamaBase) env.KIMODO_LLAMA_BASE = llamaBase;
+
+  await runSteps([
+    {
+      label: 'Provisioning Python', weight: 2,
+      run: (log) => runStream(uv, ['python', 'install', PYVER], { cwd: serviceDir, env, onLine: log }).then((r) => r.code),
+    },
+    {
+      label: 'Creating virtual environment', weight: 1,
+      run: (log) => ensureVenv({ uv, serviceDir, venvDir, onLine: log }),
+    },
+    {
+      label: 'Installing motion dependencies', weight: 4,
+      run: (log) => runStream(uv, ['pip', 'install', '--python', vp, '-r', 'requirements.txt'], { cwd: serviceDir, env, onLine: log }).then((r) => r.code),
+    },
+  ], (e) => onProgress(scaled(e, 0, 0.25)));
+
+  // torch, CUDA-matched by the service's own selector (the same table the CLI uses).
+  onProgress({ kind: 'phase', phase: 'Selecting CUDA build', pct: 0.25 });
+  const sel = await runStream(vp, ['select_torch.py'], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+  const torchArgs = sel.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || '';
+
+  onProgress({ kind: 'phase', phase: 'Installing PyTorch', pct: 0.3 });
+  {
+    // No GPU detected -> a CPU torch still installs, and the probe below turns
+    // that into a warning rather than a failure. Generation would take minutes
+    // per clip, but "installed and slow" beats "install failed" for someone
+    // setting the app up before the card is in the machine.
+    const args = torchArgs ? torchArgs.split(/\s+/) : ['torch'];
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--reinstall-package', 'torch', ...args], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) throw new Error(`PyTorch install failed (exit ${r.code}).`);
+  }
+  {
+    const probe = 'import torch,sys; print("torch", torch.__version__, "cuda", torch.cuda.is_available()); sys.exit(0 if torch.cuda.is_available() else 1)';
+    const r = await runStream(vp, ['-c', probe], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) {
+      onProgress({ kind: 'log', text: '\nWARNING: torch cannot see a CUDA GPU. Motion generation will run on the CPU and be very slow.\n' });
+    }
+  }
+
+  // Not fatal, deliberately. An editable install writes kimodo.egg-info back into
+  // the source tree, and the packaged app's code directory is READ-ONLY on Linux
+  // (/opt, /usr) and inside a macOS bundle. Nothing needs the install to succeed:
+  // motion_server.py is launched with cwd=serviceDir, so sys.path[0] is that
+  // directory and `import kimodo` resolves to the vendored tree either way, and
+  // nothing in the package reads its own installed metadata.
+  onProgress({ kind: 'phase', phase: 'Installing Kimodo', pct: 0.42 });
+  {
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', '-e', '.'], {
+      cwd: serviceDir, env: { ...env, SKIP_MOTION_CORRECTION_IN_SETUP: '1' },
+      onLine: (t) => onProgress({ kind: 'log', text: t }),
+    });
+    if (r.code !== 0) {
+      onProgress({ kind: 'log', text: '\nRegistering the Kimodo package failed (the app folder is usually read-only). The service imports it from its own directory instead, so this is not a problem.\n' });
+    }
+  }
+
+  // Optional: the C++ foot-skate cleanup. Needs CMake + a C++17 compiler, which
+  // most machines do not have, and the service runs fine without it — generation
+  // just skips post-processing. Never fatal.
+  onProgress({ kind: 'phase', phase: 'Building MotionCorrection (optional)', pct: 0.5 });
+  {
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', path.join(serviceDir, 'MotionCorrection')], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) {
+      onProgress({ kind: 'log', text: '\nMotionCorrection did not build (needs CMake + a C++17 compiler). The service still works; foot-skate post-processing is disabled.\n' });
+    }
+  }
+
+  onProgress({ kind: 'phase', phase: 'Downloading the Kimodo checkpoint', pct: 0.55 });
+  {
+    const r = await runStream(vp, ['download.py', '--model'], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) throw new Error(`Checkpoint download failed (exit ${r.code}).`);
+  }
+
+  // The 16 GB text encoder, fetched here rather than lazily on the first prompt —
+  // otherwise the first generation appears to hang for an hour. download.py skips
+  // it when the weights are already in the shared Hugging Face cache from an
+  // earlier CLI run, so this is not a second copy.
+  onProgress({ kind: 'phase', phase: 'Downloading the text encoder (~16 GB)', pct: 0.62 });
+  {
+    const r = await runStream(vp, ['download.py', '--text-encoder'], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+    if (r.code !== 0) {
+      // Not fatal: the encoder is fetched on demand at first use, and a failure
+      // here is usually a gated-repo 403 that the service itself explains better.
+      onProgress({ kind: 'log', text: '\nWARNING: the text encoder did not download. It will be fetched on the first generation instead.\n' });
+    }
+  }
+
+  fs.writeFileSync(depsMarker(venvDir), new Date().toISOString());
+  onProgress({ kind: 'phase', phase: 'Motion generation ready', pct: 1 });
+  onProgress({ kind: 'done' });
+}
+
 // Remap a child onProgress event's pct into a [lo, hi] slice of the parent bar.
 function scaled(evt, lo, hi) {
   if (evt.kind === 'phase' && typeof evt.pct === 'number') {
@@ -352,6 +483,22 @@ function startSkintokens({ serviceDir, venvDir, dataDir, port, logStream, log })
   const env = { RIGTOOLS_HOST: '127.0.0.1', RIGTOOLS_PORT: String(port) };
   if (dataDir) env.RIGTOOLS_DATA_DIR = dataDir;
   return startService({ name: 'rigging', serviceDir, venvDir, script: 'rig_server.py', logStream, log, env });
+}
+
+// The motion service writes into `dataDir` and reads weights from `modelsDir`
+// (Settings -> Motion Generation -> "Model folder"). `llamaBase` names the repo
+// the 16 GB text-encoder base comes from — an ungated mirror by default, because
+// the official one is gated behind an access request.
+//
+// It spawns the text-encoder sidecar as a child, so stopping it has to kill the
+// tree — startService already does (killTree), which is the whole reason that
+// helper exists.
+function startKimodo({ serviceDir, venvDir, dataDir, modelsDir, llamaBase, port, logStream, log }) {
+  const env = { KIMODO_HOST: '127.0.0.1', KIMODO_PORT: String(port) };
+  if (dataDir) env.KIMODO_DATA_DIR = dataDir;
+  if (modelsDir) env.KIMODO_CHECKPOINT_DIR = modelsDir;
+  if (llamaBase) env.KIMODO_LLAMA_BASE = llamaBase;
+  return startService({ name: 'motion', serviceDir, venvDir, script: 'motion_server.py', logStream, log, env });
 }
 
 function startService({ name, serviceDir, venvDir, script, env, logStream, log }) {
@@ -412,8 +559,10 @@ module.exports = {
   ensureUv,
   setupPythonServer,
   setupSkintokens,
+  setupKimodo,
   startPythonServer,
   startSkintokens,
+  startKimodo,
   killTree,
   // Shared with comfysetup.cjs, which provisions a third service the same way.
   runStream,

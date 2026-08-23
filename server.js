@@ -48,6 +48,11 @@ import {
   deleteProjectConnection,
   deleteProjectNode,
   deleteBoard,
+  listMotions,
+  readMotionBvh,
+  createMotion,
+  renameMotion,
+  deleteMotion,
   listProjectBoards,
   getProjectBatchConfig,
   setCardAssetLink,
@@ -6937,6 +6942,76 @@ app.post('/api/meshes/rig', meshToolsUpload.single('meshFile'), async (req, res)
   } catch (err) {
     console.error('Auto Rig proxy failed:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message || 'Auto Rig failed' });
+  }
+});
+
+// --- Motion library ---------------------------------------------------------
+// Saved generations, so a motion survives leaving the page and can be retargeted
+// onto a different mesh later. Registered BEFORE the proxy routes below and kept
+// under /api/motions/library/... — the proxy owns the sibling literals
+// (/generate, /skeleton, /health), and a bare /api/motions/:id here would happily
+// swallow all three.
+//
+// The BVH is the stored artifact, not the retargeted clip: retargeting bakes in
+// one rig's bone mapping, and re-running it on load costs milliseconds.
+app.get('/api/motions/library', async (_req, res) => {
+  try {
+    res.json({ motions: await listMotions() });
+  } catch (error) {
+    console.error('Listing motions failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/motions/library', async (req, res) => {
+  try {
+    const motion = await createMotion({
+      name: req.body?.name,
+      prompt: req.body?.prompt,
+      bvh: req.body?.bvh,
+      inPlace: !!req.body?.inPlace,
+      seed: req.body?.seed ?? null,
+      source: req.body?.source || 'kimodo',
+    });
+    res.status(201).json({ motion });
+  } catch (error) {
+    console.error('Saving a motion failed:', error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// The BVH text itself, fetched only when a saved motion is actually applied —
+// the list view needs none of it, and these run to a few hundred KB each.
+app.get('/api/motions/library/:id/bvh', async (req, res) => {
+  try {
+    const bvh = await readMotionBvh(req.params.id);
+    if (bvh === null) return res.status(404).json({ error: 'That motion is no longer available.' });
+    res.json({ bvh });
+  } catch (error) {
+    console.error('Reading a motion failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/motions/library/:id', async (req, res) => {
+  try {
+    const motion = await renameMotion(req.params.id, req.body?.name);
+    if (!motion) return res.status(404).json({ error: 'Motion not found' });
+    res.json({ motion });
+  } catch (error) {
+    console.error('Renaming a motion failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/motions/library/:id', async (req, res) => {
+  try {
+    const result = await deleteMotion(req.params.id);
+    if (result.status === 'not-found') return res.status(404).json({ error: 'Motion not found' });
+    res.json(result);
+  } catch (error) {
+    console.error('Deleting a motion failed:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -321,7 +321,7 @@ function ServiceControl({ name }) {
   }, [isDesktop, bridge, name])
 
   if (!isDesktop || !st) return null
-  if (!st.installed) return null // not installed yet (Rigging install is handled above)
+  if (!st.installed) return null // not installed yet (the installer card above handles that)
 
   const stopping = busy === 'stop'
   const starting = !stopping && (st.starting || busy === 'start')
@@ -392,7 +392,8 @@ function AutoStartToggle({ checked, onChange, warning }) {
 // same uv provisioning as the first-run window via the genStudioSetup bridge and
 // shows live progress. Renders nothing outside the desktop app.
 //
-// `service` is the key both setup:run and setup:status use ('rigging' | 'comfyui').
+// `service` is the key both setup:run and setup:status use ('rigging' | 'motion'
+// | 'comfyui').
 // `availableKey` (optional) names a setup:status flag that must be true for the
 // install to be possible at all on this platform — when it's false we say so
 // instead of offering a button that is guaranteed to fail.
@@ -1242,13 +1243,54 @@ export default function SettingsModal({ onClose }) {
                   </div>
                 </div>
 
+                <div className="settings-input-group" style={{ marginTop: '10px' }}>
+                  <label className="settings-label">Model folder</label>
+                  <input
+                    className="settings-input"
+                    placeholder="Default: inside the app data folder"
+                    value={localSettings?.apis?.motiontools?.modelsPath || ''}
+                    onChange={e => setLocalSettings(prev => ({
+                      ...prev,
+                      apis: {
+                        ...prev?.apis,
+                        motiontools: {
+                          ...prev?.apis?.motiontools,
+                          modelsPath: e.target.value
+                        }
+                      }
+                    }))}
+                  />
+                </div>
+
+                <p className="settings-helper-text">
+                  Where the ~17 GB of weights are kept: the Kimodo checkpoint and the Llama-3 base
+                  its text encoder loads, each in its own subfolder. Leave this empty to use the
+                  app data folder. Set it before installing — changing it later does not move
+                  what is already downloaded, and the weights are only fetched into the new
+                  folder when the install runs again.
+                </p>
+
                 <p className="settings-helper-text">
                   NVIDIA Kimodo, used by Mesh Editor &rarr; Auto Rig &rarr; Kimodo to generate an
                   animation from a text prompt. Needs an NVIDIA GPU. Its text encoder runs on the
                   CPU in a separate process (~16 GB of RAM while loaded) and is released after ten
                   minutes idle, so the GPU stays free for rigging and ComfyUI.
-                  Start it from thirdparty/kimodo/run_server.
+                  Outside the desktop app, start it from thirdparty/kimodo/run_server.
                 </p>
+                <ServiceInstaller
+                  service="motion"
+                  buttonLabel="Install motion service"
+                  readyText="Motion service is installed and ready."
+                  note="One-time install; downloads ~17 GB and needs an NVIDIA GPU."
+                />
+                <ServiceControl name="motion" />
+                <AutoStartToggle
+                  checked={localSettings?.apis?.motiontools?.autoStart}
+                  onChange={v => setLocalSettings(prev => ({
+                    ...prev,
+                    apis: { ...prev?.apis, motiontools: { ...prev?.apis?.motiontools, autoStart: v } }
+                  }))}
+                />
               </div>
             </section>
           )}

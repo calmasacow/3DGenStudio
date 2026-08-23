@@ -11,13 +11,14 @@ contextBridge.exposeInMainWorld('genStudioDesktop', {
   version: process.env.npm_package_version || null,
 });
 
-// Start/stop the on-demand Python services (Mesh Tools, Rigging). Used by the
+// Start/stop the on-demand Python services (Mesh Tools, Rigging, Motion). Used by the
 // mesh-editor tool handlers (ensure the right service is up before a request)
 // and by Settings (manual Start/Stop). No-op semantics outside the desktop app,
 // where the services are launched externally.
 contextBridge.exposeInMainWorld('genStudioServices', {
   isDesktop: true,
-  // Ensure a service is running + healthy before use. name: 'meshtools' | 'rigging'.
+  // Ensure a service is running + healthy before use.
+  // name: 'meshtools' | 'rigging' | 'motion' | 'comfyui'.
   ensure: (name) => ipcRenderer.invoke('services:ensure', { name }),
   start: (name) => ipcRenderer.invoke('services:start', { name }),
   stop: (name) => ipcRenderer.invoke('services:stop', { name }),
@@ -55,9 +56,10 @@ contextBridge.exposeInMainWorld('genStudioServices', {
 });
 
 contextBridge.exposeInMainWorld('genStudioSetup', {
-  // Kick off provisioning. opts: { rigging: boolean }. Resolves to { ok, error }.
+  // Kick off provisioning. opts: { rigging, motion, comfyui } booleans, each
+  // naming an opt-in service to install. Resolves to { ok, error }.
   run: (opts) => ipcRenderer.invoke('setup:run', opts),
-  // Which services are provisioned: { desktop, meshtools, rigging }.
+  // Which services are provisioned: { desktop, meshtools, rigging, motion, comfyui }.
   status: () => ipcRenderer.invoke('setup:status'),
   // Subscribe to progress events: { service, kind, phase, pct, text }.
   // Returns an unsubscribe function.

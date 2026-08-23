@@ -82,6 +82,20 @@ files:
   - "!thirdparty/skintokens/tmp_ckpt/**"
   - "!thirdparty/skintokens/tmp_gradio/**"
   - "!thirdparty/skintokens/*.log"
+  # Motion generation (opt-in). Same rule as rigging: ship the source, provision
+  # the venv and the ~17 GB of weights into the per-user data dir on opt-in.
+  - thirdparty/kimodo/**/*
+  - "!thirdparty/kimodo/.venv/**"
+  - "!thirdparty/kimodo/**/__pycache__/**"
+  # Downloads and derived state — the Kimodo checkpoint, the 16 GB Llama-3 base,
+  # the embedding cache and the rebased LLM2Vec adapter. All re-created per user.
+  - "!thirdparty/kimodo/checkpoints/**"
+  - "!thirdparty/kimodo/cache/**"
+  - "!thirdparty/kimodo/text-encoder/**"
+  - "!thirdparty/kimodo/*.log"
+  # CMake build tree from a local MotionCorrection build; rebuilt per install.
+  - "!thirdparty/kimodo/MotionCorrection/build/**"
+  - "!thirdparty/kimodo/**/*.egg-info/**"
   # MAX_PATH. asar:false ships node_modules as real files, and npm nests a
   # duplicate @radix-ui chain inside @excalidraw:
   #   resources/app/node_modules/@excalidraw/excalidraw/node_modules/@radix-ui/

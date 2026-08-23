@@ -15,7 +15,7 @@ import { Group } from 'three'
 import { BVHLoader } from 'three/examples/jsm/loaders/BVHLoader.js'
 import { API_BASE } from '../config'
 import { detectHipBone } from './animationLibrary'
-import { readSseStream } from './meshTools'
+import { ensureDesktopService, readSseStream } from './meshTools'
 
 // Kimodo occupies the same single "source rig" slot as a mesh2motion reference,
 // so it needs an id that cannot collide with one.
@@ -87,11 +87,28 @@ function bvhToSource(bvhText) {
   }
 }
 
+// Parse a BVH into a named AnimationClip. The skeleton it also yields is
+// discarded on purpose: every Kimodo clip uses the same hierarchy and rest
+// offsets, so the clip binds by bone name against whichever source scene is
+// already loaded — which is what lets a saved motion drop into a session that
+// generated its source rig minutes ago, and what keeps the user's bone mapping
+// alive across generations.
+function bvhToClip(bvhText, name) {
+  const { clip } = bvhLoader.parse(bvhText)
+  if (!clip) throw new Error('The motion could not be parsed.')
+  clip.name = name || 'motion'
+  return clip
+}
+
 // The SOMA-77 skeleton standing at rest, so bone mapping can be done before any
 // clip exists. Built by the service from the skeleton asset alone — no model load
 // — and, crucially, through the same rest-pose path generated clips use, so the
 // deltas the retargeter measures line up.
 export async function loadKimodoSkeletonSource() {
+  // Desktop: the motion service is started on demand, and this is usually the
+  // first thing that touches it (opening the Kimodo tab, before any prompt).
+  // No-op in the browser, where the service is launched externally.
+  await ensureDesktopService('motion')
   const response = await fetch(`${API_BASE}/motions/skeleton`)
   if (!response.ok) {
     let message = `Could not load the Kimodo skeleton (${response.status})`
@@ -140,6 +157,10 @@ export async function generateMotionClip({
   const text = String(prompt || '').trim()
   if (!text) throw new Error('Enter a prompt describing the motion.')
 
+  // Cheap when it is already running, and the only thing that makes "generate"
+  // work on a desktop session where the service was never started.
+  await ensureDesktopService('motion')
+
   const response = await fetch(`${API_BASE}/motions/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -165,11 +186,80 @@ export async function generateMotionClip({
   const data = await readSseStream(response, onProgress)
   if (!data.bvh) throw new Error('The motion service finished without returning a clip.')
 
-  const { clip } = bvhLoader.parse(data.bvh)
-  if (!clip) throw new Error('The generated motion could not be parsed.')
-  clip.name = name || text.slice(0, 40)
+  const clip = bvhToClip(data.bvh, name || text.slice(0, 40))
 
   return { clip, stats: data.stats?.tool || null, bvh: data.bvh }
+}
+
+// --- Saved motion library ---------------------------------------------------
+// Generated clips are persisted server-side as their BVH (see the Motions table)
+// so they outlive the page and can be retargeted onto a different mesh later.
+// The library is global rather than per-project: a motion describes a body, not
+// a project's content.
+//
+// None of this touches the Kimodo service — a saved motion is applied without the
+// GPU, the checkpoint or the text encoder being involved at all.
+
+const LIBRARY_BASE = `${API_BASE}/motions/library`
+
+async function libraryJson(response, fallback) {
+  if (!response.ok) {
+    let message = `${fallback} (${response.status})`
+    try {
+      const payload = await response.json()
+      message = payload.error || message
+    } catch { /* non-JSON body — keep the status message */ }
+    throw new Error(message)
+  }
+  return response.json()
+}
+
+// Catalogue only — prompt, duration, date. The BVH is fetched on apply.
+export async function listSavedMotions() {
+  const body = await libraryJson(await fetch(LIBRARY_BASE), 'Could not load the saved motions')
+  return body.motions || []
+}
+
+export async function saveMotion({ name, prompt, bvh, inPlace = false, seed = null } = {}) {
+  const body = await libraryJson(
+    await fetch(LIBRARY_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, prompt, bvh, inPlace, seed }),
+    }),
+    'Could not save the motion',
+  )
+  return body.motion
+}
+
+export async function renameSavedMotion(id, name) {
+  const body = await libraryJson(
+    await fetch(`${LIBRARY_BASE}/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+    'Could not rename the motion',
+  )
+  return body.motion
+}
+
+export async function deleteSavedMotion(id) {
+  await libraryJson(
+    await fetch(`${LIBRARY_BASE}/${id}`, { method: 'DELETE' }),
+    'Could not delete the motion',
+  )
+}
+
+// Turn a saved motion back into an AnimationClip, ready to append to the Kimodo
+// source's clip list exactly as a fresh generation would be.
+export async function loadSavedMotionClip(motion) {
+  const body = await libraryJson(
+    await fetch(`${LIBRARY_BASE}/${motion.id}/bvh`),
+    'Could not load that motion',
+  )
+  if (!body.bvh) throw new Error('That motion has no stored animation data.')
+  return bvhToClip(body.bvh, motion.name)
 }
 
 // How many prompt segments (and therefore how many x duration) a prompt is worth.

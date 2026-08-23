@@ -2,17 +2,16 @@
 
 Two very different downloads live behind one command:
 
-  --model          the Kimodo checkpoint itself. 1.1 GB. Lands in
-                   ``checkpoints/<DisplayName>/`` because load_model() resolves
-                   CHECKPOINT_DIR/<display name>/config.yaml, and a name that
-                   does not match falls through to a silent re-download from
-                   Hugging Face. The folder name is CASE SENSITIVE on Linux.
+  --model          the Kimodo checkpoint itself. 1.1 GB.
 
   --text-encoder   LLM2Vec, i.e. Meta-Llama-3-8B. ~16 GB. This is the whole of
                    the "~17 GB of VRAM" Kimodo's docs quote, and it is why the
-                   encoder runs out-of-process on the CPU here. It goes into the
-                   normal Hugging Face cache, where LLM2Vec.from_pretrained
-                   looks for it.
+                   encoder runs out-of-process on the CPU here.
+
+Both land in the model folder resolved by kimodo_paths (see that module for the
+layout and for why the base weights get a plain directory instead of the shared
+Hugging Face cache). Point KIMODO_CHECKPOINT_DIR -- or Settings -> Motion
+Generation -> "Model folder" in the desktop app -- somewhere else to move them.
 
 Usage:
     python download.py                # both (default)
@@ -22,18 +21,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-_HERE = Path(__file__).resolve().parent
-_DATA_DIR = Path(os.environ.get("KIMODO_DATA_DIR") or _HERE).resolve()
-
-MODEL_NAME = os.environ.get("KIMODO_MODEL", "Kimodo-SOMA-RP-v1.1")
-MODEL_REPO = f"nvidia/{MODEL_NAME}"
-CHECKPOINT_DIR = Path(os.environ.get("KIMODO_CHECKPOINT_DIR") or (_DATA_DIR / "checkpoints")).resolve()
+from kimodo_paths import (
+    CHECKPOINT_DIR,
+    GATED_BASE,
+    LLAMA_REPO,
+    MODEL_REPO,
+    ensure_llama_base,
+    model_dir,
+)
 
 # LLM2Vec is two small LoRA adapters over a large base model. Only the base is
 # gated, and only the base is big -- fetching the adapters alone takes seconds and
@@ -44,13 +43,9 @@ TEXT_ENCODER_ADAPTER_REPOS = [
     "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
     "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
 ]
-GATED_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"
-# Ungated mirror of the same weights; set KIMODO_LLAMA_BASE to use it.
-BASE_REPO = os.environ.get("KIMODO_LLAMA_BASE", "").strip() or GATED_BASE
-
 
 def fetch_model() -> None:
-    target = CHECKPOINT_DIR / MODEL_NAME
+    target = model_dir()
     if (target / "config.yaml").exists():
         print(f"[download] checkpoint already present: {target}")
         return
@@ -63,25 +58,24 @@ def fetch_model() -> None:
 
 
 def fetch_text_encoder() -> None:
+    """The two LoRA adapters, then the base weights.
+
+    The adapters are small and go to the normal Hugging Face cache -- LLM2Vec
+    resolves them by repo id and they are ~170 MB, not 16 GB. Only the base is
+    worth placing deliberately, which ensure_llama_base() handles (including
+    leaving an already-cached copy where it is).
+    """
     print("[download] text encoder (~16 GB on first run; resumable)")
     for repo in TEXT_ENCODER_ADAPTER_REPOS:
         print(f"[download]   adapter {repo}")
         snapshot_download(repo_id=repo)
 
-    print(f"[download]   base {BASE_REPO}  (~16 GB)")
     try:
-        # allow_patterns keeps the .pth / original/ duplicates out: several Llama-3
-        # mirrors ship both safetensors and a full consolidated checkpoint, which
-        # would double the download for nothing.
-        snapshot_download(
-            repo_id=BASE_REPO,
-            allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt"],
-            ignore_patterns=["original/*", "*.pth"],
-        )
+        base = ensure_llama_base(log=lambda msg: print(f"[download]   {msg}"))
     except Exception as exc:  # noqa: BLE001 - re-raised with something actionable
         if "gated" in str(exc).lower() or "403" in str(exc):
             raise RuntimeError(
-                f"{BASE_REPO} is a gated repo and this machine is not authorised.\n"
+                f"{LLAMA_REPO} is a gated repo and this machine is not authorised.\n"
                 "  Either request access and run `hf auth login`,\n"
                 "  or use an ungated mirror of the same weights:\n"
                 "      set KIMODO_LLAMA_BASE=NousResearch/Meta-Llama-3-8B-Instruct\n"
@@ -89,7 +83,7 @@ def fetch_text_encoder() -> None:
                 "and PEFT adapters.)"
             ) from exc
         raise
-    print("[download] text encoder ready.")
+    print(f"[download] text encoder ready: {base}")
 
 
 def main() -> int:
@@ -101,6 +95,10 @@ def main() -> int:
     # No flags means both, so a first-time setup is one command.
     want_model = args.model or not (args.model or args.text_encoder)
     want_encoder = args.text_encoder or not (args.model or args.text_encoder)
+
+    print(f"[download] model folder: {CHECKPOINT_DIR}")
+    if LLAMA_REPO == GATED_BASE:
+        print(f"[download] base weights repo: {LLAMA_REPO} (gated -- needs `hf auth login`)")
 
     try:
         if want_model:

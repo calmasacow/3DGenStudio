@@ -10,6 +10,20 @@ const POLL_MS = 1500
 const desktopBridge = typeof window !== 'undefined' ? window.genStudioServices : null
 const isDesktop = typeof window !== 'undefined' && Boolean(window.genStudioDesktop?.isDesktop)
 
+// What to say when the selected log has no file at all. Outside the desktop app
+// the answer depends on how the service was started: run.bat/run.sh redirect
+// each one into a log the backend knows how to find (`devFile`), so an absent
+// file there means "not started", not "logs are a desktop feature".
+function emptyMessage(source) {
+  if (isDesktop) return `Nothing logged yet this session.\n\n${source.description}`
+  if (source.devFile) {
+    return `No ${source.devFile} yet — this service has not been started from run.bat / run.sh `
+      + `in this folder.\n\n${source.description}`
+  }
+  return 'These logs are recorded by the 3D Gen Studio desktop app. '
+    + 'Started any other way, this service logs to the terminal that launched it.'
+}
+
 function formatBytes(bytes) {
   if (!bytes) return 'empty'
   if (bytes < 1024) return `${bytes} B`
@@ -303,13 +317,11 @@ export default function LogsModal({ onClose }) {
             <pre className="logs-output" ref={scrollRef} onScroll={handleScroll} tabIndex={0}>
               {loading && !body ? 'Loading…' : body}
               {isEmpty && (
-                !isDesktop
-                  ? 'These logs are recorded by the 3D Gen Studio desktop app. Running from a browser, each service logs to the terminal that started it.'
+                filter
+                  ? 'No lines match the filter.'
                   : activeSource && !activeSource.exists
-                    ? `Nothing logged yet this session.\n\n${activeSource.description}`
-                    : filter
-                      ? 'No lines match the filter.'
-                      : 'This log is empty.'
+                    ? emptyMessage(activeSource)
+                    : 'This log is empty.'
               )}
             </pre>
           </section>

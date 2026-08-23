@@ -2312,3 +2312,102 @@
     height: clamp(620px, calc(100vh - 240px), 1000px);
   }
 }
+
+/* --- Saved motion library (Kimodo tab) ---------------------------------- */
+/* A list rather than the clip gallery's tiles: what identifies a saved motion
+   is its prompt and length, which are words, and Kimodo produces no preview
+   image to put on a tile anyway. */
+.mesh-editor-motionlib {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.mesh-editor-motionlib__row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.mesh-editor-motionlib__apply {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #e8eaf0;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mesh-editor-motionlib__apply:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.mesh-editor-motionlib__apply:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mesh-editor-motionlib__apply > .material-symbols-outlined {
+  font-size: 1.15em;
+  flex: none;
+  opacity: 0.85;
+}
+
+.mesh-editor-motionlib__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* The name is the prompt for anything generated here, so it is routinely longer
+   than the panel. Truncate rather than wrap: two lines per row would halve how
+   many motions are visible, and the full text is on the tooltip. */
+.mesh-editor-motionlib__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mesh-editor-motionlib__meta {
+  font-size: 10.5px;
+  opacity: 0.6;
+}
+
+.mesh-editor-motionlib__del {
+  flex: none;
+  width: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #e8eaf0;
+  cursor: pointer;
+}
+
+.mesh-editor-motionlib__del:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.15);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+/* Armed: the next click deletes. Loud on purpose — there is no undo. */
+.mesh-editor-motionlib__del--armed {
+  background: rgba(248, 113, 113, 0.25);
+  border-color: #f87171;
+  color: #fecaca;
+}
+
+.mesh-editor-motionlib__del .material-symbols-outlined {
+  font-size: 1.05em;
+}

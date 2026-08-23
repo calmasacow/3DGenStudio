@@ -52,13 +52,16 @@ from pathlib import Path
 # cache) has to live under a per-user data dir instead. Resolve it before any
 # kimodo import so CHECKPOINT_DIR is set by the time load_model reads it.
 _HERE = Path(__file__).resolve().parent
-_DATA_DIR = Path(os.environ.get("KIMODO_DATA_DIR") or _HERE).resolve()
+
+# CHECKPOINT_DIR / MODEL_NAME are resolved by kimodo_paths, which the text-encoder
+# sidecar and download.py import too -- so the Settings "Model folder" box moves
+# every download at once instead of only the ones this file knows about.
+from kimodo_paths import CHECKPOINT_DIR, DATA_DIR as _DATA_DIR, MODEL_NAME  # noqa: E402
+
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 HOST = os.environ.get("KIMODO_HOST", "0.0.0.0")
 PORT = int(os.environ.get("KIMODO_PORT", "8400") or "8400")
-MODEL_NAME = os.environ.get("KIMODO_MODEL", "Kimodo-SOMA-RP-v1.1")
-CHECKPOINT_DIR = Path(os.environ.get("KIMODO_CHECKPOINT_DIR") or (_DATA_DIR / "checkpoints")).resolve()
 CACHE_DIR = Path(os.environ.get("KIMODO_CACHE_DIR") or (_DATA_DIR / "cache" / "text-embeddings")).resolve()
 
 TEXT_ENCODER_HOST = os.environ.get("KIMODO_TEXT_ENCODER_HOST", "127.0.0.1")

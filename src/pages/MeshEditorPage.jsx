@@ -159,7 +159,8 @@ import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
-import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource } from '../utils/motionGen'
+import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
+  listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
 import GameReadyPanel from '../components/meshEditor/GameReadyPanel'
 import BakeToolsPanel from '../components/meshEditor/BakeToolsPanel'
@@ -524,6 +525,13 @@ export default function MeshEditorPage() {
   // The bone map was produced automatically rather than confirmed by the user, so
   // the panel can suggest checking it if the motion comes out wrong.
   const [kimodoAutoMapped, setKimodoAutoMapped] = useState(false)
+  // The saved-motion library: catalogue rows only (no BVH), fetched when the
+  // Kimodo tab takes the source slot. Global, not per-project.
+  const [motionLibrary, setMotionLibrary] = useState([])
+  const [motionLibLoading, setMotionLibLoading] = useState(false)
+  const [motionLibError, setMotionLibError] = useState(null)
+  // Whichever row is mid-apply or mid-delete, so only that one shows a spinner.
+  const [motionLibBusyId, setMotionLibBusyId] = useState(null)
   // Finger curl (%) per hand, baked into generated clips as a constant pose —
   // Kimodo never animates fingers, so without this a punch lands with an open
   // hand. Per-hand because a punch usually wants one fist and one open guard.
@@ -5069,13 +5077,25 @@ export default function MeshEditorPage() {
       const label = kimodoPrompt.trim().replace(/\s+/g, ' ').slice(0, 48)
       const name = `${kimodoCounterRef.current}. ${label}${kimodoInPlace ? ' (in-place)' : ''}`
 
-      const { clip } = await generateMotionClip({
+      const { clip, bvh } = await generateMotionClip({
         prompt: kimodoPrompt,
         duration: kimodoDuration,
         inPlace: kimodoInPlace,
         name,
         onProgress: setKimodoProgress,
       })
+
+      // Persist before anything else can go wrong. A generation is minutes of
+      // GPU time; losing it to a retarget failure — or to the user navigating
+      // away — is not acceptable, and the BVH is the mesh-independent artifact
+      // worth keeping. A save failure must NOT fail the generation, though: the
+      // clip is already in hand and usable.
+      saveMotion({ name, prompt: kimodoPrompt, bvh, inPlace: kimodoInPlace })
+        .then(saved => setMotionLibrary(prev => [saved, ...prev]))
+        .catch(err => {
+          console.error('Could not save the generated motion:', err)
+          setMotionLibError(err?.message || 'The motion was generated but could not be saved.')
+        })
 
       source.clips = [...(source.clips || []), clip]
       setAnimClips(source.clips.map(c => ({ name: c.name })))
@@ -5097,6 +5117,82 @@ export default function MeshEditorPage() {
     }
   }, [kimodoRunning, kimodoPrompt, kimodoDuration, kimodoInPlace, ensureKimodoSource,
     ensureAnimTargetScene, animMapping, animMatchRestPose, showRetargetedClip])
+
+  // --- Saved motion library -------------------------------------------------
+  // Generations are persisted server-side as BVH, so they survive leaving the
+  // page and can be retargeted onto a different mesh later. Applying one costs a
+  // fetch and a retarget: the Kimodo service is not involved at all.
+
+  const refreshMotionLibrary = useCallback(async () => {
+    setMotionLibLoading(true)
+    try {
+      setMotionLibrary(await listSavedMotions())
+      setMotionLibError(null)
+    } catch (err) {
+      console.error('Could not load the motion library:', err)
+      setMotionLibError(err?.message || 'Could not load the saved motions.')
+    } finally {
+      setMotionLibLoading(false)
+    }
+  }, [])
+
+  // Load the catalogue once the Kimodo tab has taken the source slot. It is a
+  // few hundred bytes per motion and no BVH, so this is cheap — but there is no
+  // reason to fetch it for someone who never opens the tab.
+  useEffect(() => {
+    if (animReferenceId === KIMODO_SOURCE_ID) refreshMotionLibrary()
+  }, [animReferenceId, refreshMotionLibrary])
+
+  // Put a saved motion into the current session's clip list, exactly where a
+  // fresh generation would land, and play it.
+  const handleApplySavedMotion = useCallback(async motion => {
+    if (motionLibBusyId) return
+    setMotionLibBusyId(motion.id)
+    setKimodoError(null)
+    try {
+      const source = await ensureKimodoSource()
+      await ensureAnimTargetScene()
+
+      // Names are the retarget cache key, so a motion applied twice in one
+      // session must not collide with its earlier copy.
+      let name = motion.name
+      const taken = new Set((source.clips || []).map(c => c.name))
+      for (let n = 2; taken.has(name); n += 1) name = `${motion.name} (${n})`
+
+      const clip = await loadSavedMotionClip({ ...motion, name })
+      source.clips = [...(source.clips || []), clip]
+      setAnimClips(source.clips.map(c => ({ name: c.name })))
+
+      if (animMapping) {
+        setSelectedAnimation(name)
+        await showRetargetedClip(name, animMatchRestPose)
+      }
+    } catch (err) {
+      console.error('Could not apply the saved motion:', err)
+      setKimodoError(err?.message || 'Could not apply that motion.')
+    } finally {
+      setMotionLibBusyId(null)
+    }
+  }, [motionLibBusyId, ensureKimodoSource, ensureAnimTargetScene, animMapping,
+    animMatchRestPose, showRetargetedClip])
+
+  // Deletes the STORED motion, not this session's clip: a clip already applied
+  // keeps working until the page is left, which is the behaviour that does not
+  // yank something out from under a preview that is mid-play.
+  const handleDeleteSavedMotion = useCallback(async motion => {
+    if (motionLibBusyId) return
+    setMotionLibBusyId(motion.id)
+    try {
+      await deleteSavedMotion(motion.id)
+      setMotionLibrary(prev => prev.filter(m => m.id !== motion.id))
+      setMotionLibError(null)
+    } catch (err) {
+      console.error('Could not delete the saved motion:', err)
+      setMotionLibError(err?.message || 'Could not delete that motion.')
+    } finally {
+      setMotionLibBusyId(null)
+    }
+  }, [motionLibBusyId])
 
   // Bundle for the SkeletonPanel Kimodo tab.
   const kimodoPanelProps = useMemo(() => ({
@@ -5124,9 +5220,19 @@ export default function MeshEditorPage() {
       setHandCurl(prev => ({ ...prev, left: 0, right: 0, leftThumb: 0, rightThumb: 0 }))
       retargetedClipsRef.current.clear()
     },
+    library: {
+      items: motionLibrary,
+      loading: motionLibLoading,
+      error: motionLibError,
+      busyId: motionLibBusyId,
+      onApply: handleApplySavedMotion,
+      onDelete: handleDeleteSavedMotion,
+    },
   }), [kimodoPrompt, kimodoDuration, kimodoInPlace, kimodoRunning, kimodoProgress, kimodoError,
     animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped,
-    handCurl, handleHandCurlChange, handleHandCurlCommit])
+    handCurl, handleHandCurlChange, handleHandCurlCommit,
+    motionLibrary, motionLibLoading, motionLibError, motionLibBusyId,
+    handleApplySavedMotion, handleDeleteSavedMotion])
 
   // Bundle for the SkeletonPanel Animations tab.
   const animationPanelProps = useMemo(() => ({

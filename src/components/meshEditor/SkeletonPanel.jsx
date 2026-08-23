@@ -17,6 +17,9 @@ import AnimationClipItem from './AnimationClipItem'
 import MeshToolProgress from './MeshToolProgress'
 
 const EMPTY_SET = new Set()
+// Stable identity, so `library.items || EMPTY_LIST` cannot re-run a useMemo on
+// every render just because the prop is momentarily absent.
+const EMPTY_LIST = []
 
 // Build a children-index map + root list from the flat `parents` array.
 function buildHierarchy(parents) {
@@ -346,6 +349,119 @@ function ClipGallery({ animation, emptyLabel, previewsAvailable = true }) {
 // which means it occupies the same single source-rig slot: mapping the Kimodo
 // skeleton onto the mesh replaces whatever the Animations tab had mapped. Rather
 // than hide that, the tab says so.
+// Saved motions: every generation is persisted server-side as its BVH, so the
+// library outlives the page and is shared by every project.
+//
+// It exists because a generation is expensive and a retarget is not. The BVH is
+// mesh-independent, so applying a saved motion to a DIFFERENT mesh costs one
+// fetch and one retarget — no GPU, no checkpoint, no 16 GB text encoder. That is
+// also why the library is not filtered by the current mesh: any of these can be
+// applied to whatever is open.
+function MotionLibrary({ library }) {
+  const lib = library || {}
+  const items = lib.items || EMPTY_LIST
+  const [search, setSearch] = useState('')
+  const [confirmId, setConfirmId] = useState(null)
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return items
+    return items.filter(m =>
+      (m.name || '').toLowerCase().includes(q) || (m.prompt || '').toLowerCase().includes(q))
+  }, [items, search])
+
+  return (
+    <div className="mesh-editor-panel__section">
+      <div className="mesh-editor-layers-panel__header">
+        <span className="mesh-editor-layers-panel__title">Saved motions</span>
+        <span className="mesh-editor-panel__hint">
+          {lib.loading ? '…' : `${filtered.length}${search.trim() ? ` / ${items.length}` : ''}`}
+        </span>
+      </div>
+
+      {lib.error && (
+        <div className="mesh-editor-feedback mesh-editor-feedback--error mesh-editor-anim__error">
+          <span className="material-symbols-outlined">error</span>
+          <span>{lib.error}</span>
+        </div>
+      )}
+
+      {items.length > 6 && (
+        <div className="mesh-editor-anim__search">
+          <span className="material-symbols-outlined">search</span>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Filter by name or prompt"
+            aria-label="Filter saved motions"
+          />
+          {search && (
+            <button type="button" className="mesh-editor-anim__search-clear" onClick={() => setSearch('')}>
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {!items.length ? (
+        <div className="mesh-editor-layers-panel__empty">
+          {lib.loading ? 'Loading…' : 'Nothing saved yet. Every motion you generate is kept here.'}
+        </div>
+      ) : (
+        <div className="mesh-editor-motionlib">
+          {filtered.map(motion => {
+            const busy = lib.busyId === motion.id
+            const confirming = confirmId === motion.id
+            return (
+              <div className="mesh-editor-motionlib__row" key={motion.id}>
+                <button
+                  type="button"
+                  className="mesh-editor-motionlib__apply"
+                  onClick={() => lib.onApply?.(motion)}
+                  disabled={busy || !!lib.applyDisabled}
+                  title={lib.applyDisabled
+                    ? 'Map Kimodo\u2019s bones to your mesh first'
+                    : `Apply to this mesh\n\n${motion.prompt}`}
+                >
+                  <span className="material-symbols-outlined">
+                    {busy ? 'progress_activity' : 'play_circle'}
+                  </span>
+                  <span className="mesh-editor-motionlib__text">
+                    <span className="mesh-editor-motionlib__name">{motion.name}</span>
+                    <span className="mesh-editor-motionlib__meta">
+                      {motion.duration ? `${motion.duration.toFixed(1)}s` : '—'}
+                      {motion.inPlace ? ' · in-place' : ''}
+                      {motion.frameCount ? ` · ${motion.frameCount} frames` : ''}
+                    </span>
+                  </span>
+                </button>
+                {/* Two-step, because a motion is minutes of GPU time and there is
+                    no undo — the file goes with the row. */}
+                <button
+                  type="button"
+                  className={`mesh-editor-motionlib__del ${confirming ? 'mesh-editor-motionlib__del--armed' : ''}`}
+                  onClick={() => {
+                    if (confirming) { setConfirmId(null); lib.onDelete?.(motion) }
+                    else setConfirmId(motion.id)
+                  }}
+                  onBlur={() => setConfirmId(current => (current === motion.id ? null : current))}
+                  disabled={busy}
+                  title={confirming ? 'Click again to delete permanently' : 'Delete this saved motion'}
+                >
+                  <span className="material-symbols-outlined">
+                    {confirming ? 'delete_forever' : 'delete'}
+                  </span>
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function KimodoTab({ animation, kimodo }) {
   const k = kimodo || {}
   const busy = !!k.running
@@ -481,6 +597,8 @@ function KimodoTab({ animation, kimodo }) {
           </span>
         </button>
       </div>
+
+      <MotionLibrary library={k.library} />
 
       {/* Shown whenever clips exist, NOT only once a mapping does. Gating the
           whole gallery on hasMapping meant a successful generation could finish

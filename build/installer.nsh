@@ -339,7 +339,8 @@ FunctionEnd
   ; The folder mixes two very different things:
   ;   small and irreplaceable - data\app.db, data\assets, wiki, settings, logs
   ;   huge and re-downloadable - comfyui, comfy-venv, comfy-data (models),
-  ;                              rig-venv, rig-data (model weights), python-venv
+  ;                              rig-venv, rig-data (model weights), motion-venv,
+  ;                              motion-data (Kimodo + text encoder), python-venv
   ; Wiping the second group can mean re-downloading tens of gigabytes and
   ; rebuilding three Python environments, so someone who only wants a clean slate
   ; for their projects gets the middle option. What is kept is enough for the
@@ -423,6 +424,8 @@ FunctionEnd
     !insertmacro HEAVY_ENTRY "comfy-data"  "ComfyUI models, inputs and outputs"
     !insertmacro HEAVY_ENTRY "rig-venv"    "the rigging service's Python environment"
     !insertmacro HEAVY_ENTRY "rig-data"    "the rigging model weights"
+    !insertmacro HEAVY_ENTRY "motion-venv" "the motion service's Python environment"
+    !insertmacro HEAVY_ENTRY "motion-data"  "the Kimodo checkpoint and text-encoder weights"
     !insertmacro HEAVY_ENTRY "python-venv" "the mesh tools' Python environment"
   FunctionEnd
 

@@ -13,6 +13,9 @@ export const WORKFLOW_ASSETS_DIR = path.join(ASSETS_DIR, 'workflows');
 export const BRUSH_ASSETS_DIR = path.join(ASSETS_DIR, 'brushes');
 export const PAINT_DOCS_DIR = path.join(ASSETS_DIR, 'paintdocs');
 export const WIKI_ASSETS_DIR = path.join(ASSETS_DIR, 'wiki');
+// Generated motion clips (Kimodo), as BVH text. Not under a project — see the
+// Motions table for why.
+export const MOTION_ASSETS_DIR = path.join(ASSETS_DIR, 'motions');
 
 const sqlite = sqlite3.verbose();
 const DATA_ASSETS_PREFIX = 'data/assets/';
@@ -202,6 +205,19 @@ export const DEFAULT_SETTINGS = {
       port: '8300',
       // Desktop app: start the rigging service at launch. Default off — it pins
       // ~14GB of GPU memory for the whole session.
+      autoStart: false
+    },
+    motiontools: {
+      url: 'http://127.0.0.1',
+      port: '8400',
+      // Where the motion service keeps the weights it downloads: the 1.1 GB
+      // Kimodo checkpoint and the ~16 GB Llama-3 text-encoder base. Empty means
+      // the default folder inside the app's data dir (desktop) or
+      // thirdparty/kimodo/checkpoints (running from source). Set it to move 17 GB
+      // onto a drive that has room for it.
+      modelsPath: '',
+      // Desktop app: start the motion service at launch. Default off — the text
+      // encoder alone is ~16 GB of RAM once a prompt has been encoded.
       autoStart: false
     },
     custom: []
@@ -1400,6 +1416,7 @@ export async function initializeStorage() {
   await fs.mkdir(BRUSH_ASSETS_DIR, { recursive: true });
   await fs.mkdir(PAINT_DOCS_DIR, { recursive: true });
   await fs.mkdir(WIKI_ASSETS_DIR, { recursive: true });
+  await fs.mkdir(MOTION_ASSETS_DIR, { recursive: true });
 
   // Back up the DB before the one-time Nodes→Cards migration touches it.
   await backupLegacyDbIfNeeded();
@@ -1603,6 +1620,37 @@ export async function initializeStorage() {
       FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE
     );
 
+    -- Generated motions (Mesh Editor -> Auto Rig -> Kimodo). The BVH itself is a
+    -- few hundred KB of text and lives on disk under assets/motions; this table is
+    -- the catalogue.
+    --
+    -- NOT project-scoped, deliberately. A motion is "a person throws a punch" —
+    -- it describes a body, not a project's content, and the point of keeping it is
+    -- to retarget it onto ANY rigged mesh later. Same reasoning as the bundled
+    -- mesh2motion reference clips, which are also global.
+    --
+    -- Why the BVH and not the retargeted result: retargeting bakes in one target
+    -- rig's bone mapping and rest pose. The BVH is the mesh-independent artifact,
+    -- and re-running the retarget on load is milliseconds.
+    CREATE TABLE IF NOT EXISTS Motions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      -- Seconds of motion, read back out of the BVH rather than taken from the
+      -- request: a multi-sentence prompt generates one segment per sentence, so
+      -- what was asked for and what came back routinely differ.
+      duration REAL NOT NULL DEFAULT 0,
+      frameCount INTEGER NOT NULL DEFAULT 0,
+      fps REAL NOT NULL DEFAULT 0,
+      inPlace INTEGER NOT NULL DEFAULT 0,
+      seed INTEGER,
+      filePath TEXT NOT NULL,
+      -- Which generator produced it. Only 'kimodo' today; recorded so a second
+      -- source can share the library without the rows becoming ambiguous.
+      source TEXT NOT NULL DEFAULT 'kimodo',
+      createdAt INTEGER NOT NULL
+    );
+
     -- Free-form labels an asset can be filtered by in the library. Many tags per
     -- asset, many assets per tag, and no separate tag registry: the vocabulary is
     -- whatever rows exist here, so a tag disappears once nothing carries it.
@@ -1623,6 +1671,7 @@ export async function initializeStorage() {
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_boards_projectId ON Boards(projectId)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_projects_projectId ON Assets_Projects(projectId)');
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_tags_tag ON Assets_Tags(tag)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_motions_createdAt ON Motions(createdAt)');
 
   const assetColumns = await all(db, 'PRAGMA table_info(Assets)');
   if (!assetColumns.some(column => column.name === 'thumbnail')) {
@@ -3166,6 +3215,145 @@ export async function deleteBoard(boardId) {
   const db = await getDb();
   const result = await run(db, 'DELETE FROM Boards WHERE id = ?', [Number(boardId)]);
   return { status: result.changes > 0 ? 'deleted' : 'not-found' };
+}
+
+// ---------------------------------------------------------------------------
+// Motion library (generated animations)
+// ---------------------------------------------------------------------------
+
+function mapMotionRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    prompt: row.prompt,
+    duration: Number(row.duration) || 0,
+    frameCount: Number(row.frameCount) || 0,
+    fps: Number(row.fps) || 0,
+    inPlace: !!row.inPlace,
+    seed: row.seed === null || row.seed === undefined ? null : Number(row.seed),
+    source: row.source || 'kimodo',
+    createdAt: Number(row.createdAt) || 0,
+  };
+}
+
+// Frame count and frame time come straight out of the BVH header. Reading them
+// here rather than trusting the client keeps the catalogue honest about what is
+// actually in the file — and the duration a caller asked for is often not the
+// duration it got, because one prompt sentence generates one segment.
+function readBvhTiming(bvhText) {
+  const frames = /^\s*Frames:\s*(\d+)/mi.exec(bvhText);
+  const frameTime = /^\s*Frame\s+Time:\s*([0-9.eE+-]+)/mi.exec(bvhText);
+  const frameCount = frames ? Number(frames[1]) : 0;
+  const seconds = frameTime ? Number(frameTime[1]) : 0;
+  return {
+    frameCount: Number.isFinite(frameCount) ? frameCount : 0,
+    fps: seconds > 0 ? 1 / seconds : 0,
+    duration: Number.isFinite(frameCount) && seconds > 0 ? frameCount * seconds : 0,
+  };
+}
+
+function motionFilePath(fileName) {
+  return path.join(MOTION_ASSETS_DIR, fileName);
+}
+
+export async function listMotions() {
+  const db = await getDb();
+  const rows = await all(db, 'SELECT * FROM Motions ORDER BY createdAt DESC, id DESC');
+  return rows.map(mapMotionRow);
+}
+
+export async function getMotionById(motionId) {
+  const db = await getDb();
+  const row = await get(db, 'SELECT * FROM Motions WHERE id = ?', [Number(motionId)]);
+  return row ? mapMotionRow(row) : null;
+}
+
+// The BVH text for a saved motion, or null when the row or its file is gone.
+// A missing file is reported rather than thrown: the row surviving its file is
+// recoverable (delete it), and a 404 says that far more clearly than a 500.
+export async function readMotionBvh(motionId) {
+  const db = await getDb();
+  const row = await get(db, 'SELECT filePath FROM Motions WHERE id = ?', [Number(motionId)]);
+  if (!row) return null;
+  try {
+    return await fs.readFile(motionFilePath(row.filePath), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+export async function createMotion({
+  name,
+  prompt,
+  bvh,
+  inPlace = false,
+  seed = null,
+  source = 'kimodo',
+} = {}) {
+  const text = String(bvh || '');
+  if (!text.trim()) throw new Error('A motion needs its BVH content.');
+  const promptText = String(prompt || '').trim();
+  if (!promptText) throw new Error('A motion needs the prompt it came from.');
+
+  await fs.mkdir(MOTION_ASSETS_DIR, { recursive: true });
+  const timing = readBvhTiming(text);
+
+  // The row is written first so the file can be named after its id: no collision
+  // is possible, and an orphaned file is identifiable at a glance. filePath is
+  // filled in immediately after, and the row is removed if the write fails —
+  // a catalogue entry pointing at nothing is worse than no entry.
+  const db = await getDb();
+  const now = Date.now();
+  const result = await run(
+    db,
+    `INSERT INTO Motions (name, prompt, duration, frameCount, fps, inPlace, seed, filePath, source, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+    [
+      String(name || '').trim() || promptText.slice(0, 60),
+      promptText,
+      timing.duration,
+      timing.frameCount,
+      timing.fps,
+      inPlace ? 1 : 0,
+      Number.isFinite(Number(seed)) && seed !== null ? Number(seed) : null,
+      String(source || 'kimodo'),
+      now,
+    ]
+  );
+
+  const fileName = `motion-${result.lastID}.bvh`;
+  try {
+    await fs.writeFile(motionFilePath(fileName), text, 'utf8');
+  } catch (error) {
+    await run(db, 'DELETE FROM Motions WHERE id = ?', [result.lastID]);
+    throw error;
+  }
+  await run(db, 'UPDATE Motions SET filePath = ? WHERE id = ?', [fileName, result.lastID]);
+
+  return await getMotionById(result.lastID);
+}
+
+export async function renameMotion(motionId, name) {
+  const db = await getDb();
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return await getMotionById(motionId);
+  await run(db, 'UPDATE Motions SET name = ? WHERE id = ?', [trimmed, Number(motionId)]);
+  return await getMotionById(motionId);
+}
+
+export async function deleteMotion(motionId) {
+  const db = await getDb();
+  const row = await get(db, 'SELECT filePath FROM Motions WHERE id = ?', [Number(motionId)]);
+  if (!row) return { status: 'not-found' };
+
+  await run(db, 'DELETE FROM Motions WHERE id = ?', [Number(motionId)]);
+  // The row is the catalogue; a file left behind after it is gone is invisible
+  // dead weight, but failing the delete over it would strand the row instead.
+  if (row.filePath) {
+    try { await fs.unlink(motionFilePath(row.filePath)); } catch { /* already gone */ }
+  }
+  return { status: 'deleted' };
 }
 
 export async function setCardProcessingState(projectId, externalCardId, {

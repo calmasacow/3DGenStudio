@@ -8,16 +8,26 @@
 // this helper decodes it into { blob, stats, previewUrl }.
 import { API_BASE } from '../config'
 
-// In the desktop app the Python services (Mesh Tools, Rigging) are started on
-// demand. Call this before a request that needs one — it starts the service and
-// waits until it's healthy. Outside the desktop app it's a no-op (the services
-// are launched externally). name: 'meshtools' | 'rigging'.
+// Only for the fallback message below — the main process supplies a real error
+// for every failure it can describe, and this covers the ones it can't.
+const SERVICE_LABELS = {
+  meshtools: 'Mesh Tools',
+  rigging: 'Rigging',
+  motion: 'Motion Generation',
+  comfyui: 'ComfyUI',
+}
+
+// In the desktop app the Python services (Mesh Tools, Rigging, Motion) are
+// started on demand. Call this before a request that needs one — it starts the
+// service and waits until it's healthy. Outside the desktop app it's a no-op (the
+// services are launched externally).
+// name: 'meshtools' | 'rigging' | 'motion' | 'comfyui'.
 export async function ensureDesktopService(name) {
   const svc = typeof window !== 'undefined' ? window.genStudioServices : null
   if (!svc?.isDesktop) return
   const res = await svc.ensure(name)
   if (!res?.ok) {
-    throw new Error(res?.error || `Could not start the ${name === 'rigging' ? 'Rigging' : 'Mesh Tools'} service.`)
+    throw new Error(res?.error || `Could not start the ${SERVICE_LABELS[name] || name} service.`)
   }
 }
 

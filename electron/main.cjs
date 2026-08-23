@@ -5,9 +5,10 @@
 //   2. Spawn the Node/Express backend (server.js) using Electron's own Node
 //      runtime (ELECTRON_RUN_AS_NODE) so users don't need Node installed.
 //   3. FIRST RUN: show a setup window that provisions the Python services with
-//      uv (Mesh Tools always; Rigging and a managed ComfyUI opt-in) and streams
-//      live progress. Later runs skip straight to the splash — the venvs exist.
-//   4. Launch the Python services on demand (Mesh Tools, Rigging, ComfyUI).
+//      uv (Mesh Tools always; Rigging, Motion Generation and a managed ComfyUI
+//      opt-in) and streams live progress. Later runs skip straight to the splash
+//      — the venvs exist.
+//   4. Launch the Python services on demand (Mesh Tools, Rigging, Motion, ComfyUI).
 //   5. Wait for the backend to answer, then open the app window.
 //   6. Kill child processes on quit.
 
@@ -23,8 +24,10 @@ const {
   ensureUv,
   setupPythonServer,
   setupSkintokens,
+  setupKimodo,
   startPythonServer,
   startSkintokens,
+  startKimodo,
 } = require('./pysetup.cjs');
 const {
   COMFY_SETUP_TAG,
@@ -43,6 +46,13 @@ const BACKEND_PORT = Number(process.env.PORT) || 3001;
 const BACKEND_ORIGIN = `http://localhost:${BACKEND_PORT}`;
 const PYTHON_PORT = Number(process.env.MESHTOOLS_PORT) || 8200;
 const RIG_PORT = Number(process.env.RIGTOOLS_PORT) || 8300;
+const MOTION_PORT = Number(process.env.KIMODO_PORT) || 8400;
+// Which repo the motion service's 16 GB text-encoder base comes from. The
+// official meta-llama repo is GATED — it 403s until the user requests access and
+// runs `hf auth login` — so the default is the ungated mirror of the same
+// weights, matching what run.bat sets for the CLI. Override with KIMODO_LLAMA_BASE
+// (setting it to meta-llama/Meta-Llama-3-8B-Instruct uses the official repo).
+const LLAMA_BASE = process.env.KIMODO_LLAMA_BASE || 'NousResearch/Meta-Llama-3-8B-Instruct';
 // ComfyUI's conventional port. The managed install must NOT assume it's free —
 // plenty of users already run their own ComfyUI there — so this is only the first
 // candidate; the actual port is picked at install time and stored in settings.
@@ -52,6 +62,7 @@ const APP_ROOT = app.getAppPath();
 const SERVER_JS = path.join(APP_ROOT, 'server.js');
 const PYTHON_DIR = path.join(APP_ROOT, 'python-server');
 const SKINTOKENS_DIR = path.join(APP_ROOT, 'thirdparty', 'skintokens');
+const KIMODO_DIR = path.join(APP_ROOT, 'thirdparty', 'kimodo');
 
 // Backend keys data/ off process.cwd() (storage.js); point it at a per-user
 // writable dir. The venvs also live here — the installed app dir is read-only.
@@ -62,6 +73,11 @@ const RIG_VENV = path.join(DATA_ROOT, 'rig-venv');
 // Rigging model weights (experiments/, models/) — the installed app dir is
 // read-only, so download them here and point rig_server.py at it.
 const RIG_DATA = path.join(DATA_ROOT, 'rig-data');
+const MOTION_VENV = path.join(DATA_ROOT, 'motion-venv');
+// Everything the motion service writes: the embedding cache, the rebased LLM2Vec
+// adapter, and — unless Settings points the model folder elsewhere — the Kimodo
+// checkpoint and the 16 GB Llama-3 base beneath checkpoints/.
+const MOTION_DATA = path.join(DATA_ROOT, 'motion-data');
 // Managed ComfyUI: code, venv, and a separate data root (models/input/output/
 // user/temp, each passed as its own --*-directory flag — see startComfyUI for why
 // NOT --base-directory). Keeping data out of the code dir means reinstalling or
@@ -75,13 +91,13 @@ let mainWindow = null;
 let setupWindow = null;
 let shuttingDown = false;
 
-// The two Python services are started ON DEMAND (not at boot) and can be
-// stopped from Settings — stopping the rigging service fully releases its GPU
+// The Python services are started ON DEMAND (not at boot) and can be stopped
+// from Settings — stopping the rigging or motion service fully releases its GPU
 // memory (the CUDA context an in-process unload can't free). `handles[name]`
 // holds a running service's { stop() }; `starting[name]` dedupes concurrent
 // ensure() calls. The registry is populated after the launchers are defined.
-const handles = { meshtools: null, rigging: null, comfyui: null };
-const starting = { meshtools: null, rigging: null, comfyui: null };
+const handles = { meshtools: null, rigging: null, motion: null, comfyui: null };
+const starting = { meshtools: null, rigging: null, motion: null, comfyui: null };
 let SERVICES = null;
 // Set while a managed-ComfyUI update or reinstall is rewriting the install tree.
 // Both jobs delete files a running ComfyUI would have open, so starting the
@@ -127,7 +143,7 @@ function openLogStream(name) {
 
 // Every log this app writes. Kept in one place because both the startup reset
 // below and the Logs panel (logs.js, via the backend) key off these names.
-const LOG_FILES = ['desktop.log', 'backend.log', 'python.log', 'rig.log', 'comfyui.log'];
+const LOG_FILES = ['desktop.log', 'backend.log', 'python.log', 'rig.log', 'kimodo.log', 'comfyui.log'];
 
 // Start each launch with empty logs (unless the user opted out in the Logs
 // panel), so whatever a user reads in the Logs panel
@@ -317,6 +333,7 @@ async function autoStartServices() {
   const wanted = [
     apis.meshtools?.autoStart ? 'meshtools' : null,
     apis.rigtools?.autoStart ? 'rigging' : null,
+    apis.motiontools?.autoStart ? 'motion' : null,
     apis.comfyui?.managed && apis.comfyui?.autoStart ? 'comfyui' : null,
   ].filter(Boolean);
   for (const name of wanted) {
@@ -344,6 +361,26 @@ function serviceRegistry() {
         logStream: openLogStream('rig.log'), log,
       }),
     },
+    motion: {
+      label: 'Motion Generation', venv: MOTION_VENV, port: MOTION_PORT, logFile: 'kimodo.log',
+      // Port and model folder both live in settings, so they are read at start
+      // time — changing either in Settings takes effect on the next start rather
+      // than on the next app launch.
+      resolveLaunch: async (svc) => {
+        const settings = await fetchSettings();
+        const api = settings?.apis?.motiontools || {};
+        const p = Number(api.port);
+        svc.port = Number.isFinite(p) && p > 0 ? p : MOTION_PORT;
+        svc.modelsDir = String(api.modelsPath || '').trim() || null;
+      },
+      start(port) {
+        return startKimodo({
+          serviceDir: KIMODO_DIR, venvDir: MOTION_VENV, dataDir: MOTION_DATA,
+          modelsDir: this.modelsDir, llamaBase: LLAMA_BASE, port,
+          logStream: openLogStream('kimodo.log'), log,
+        });
+      },
+    },
     comfyui: {
       // ComfyUI has no /health endpoint; /system_stats is its readiness probe and
       // only answers once the server is actually accepting API calls.
@@ -353,10 +390,10 @@ function serviceRegistry() {
       isInstalled: () => comfyReady(),
       // The port is chosen at install time (to dodge a user's own ComfyUI) and
       // stored in settings, so it must be read at start time, not at boot.
-      resolvePort: async () => {
+      resolveLaunch: async (svc) => {
         const settings = await fetchSettings();
         const p = Number(settings?.apis?.comfyui?.port);
-        return Number.isFinite(p) && p > 0 ? p : COMFY_PORT_DEFAULT;
+        svc.port = Number.isFinite(p) && p > 0 ? p : COMFY_PORT_DEFAULT;
       },
       start: (port) => startComfyUI({
         appRoot: APP_ROOT, installDir: COMFY_DIR, dataDir: COMFY_DATA, venvDir: COMFY_VENV,
@@ -421,10 +458,12 @@ function ensureService(name) {
   if (starting[name]) return starting[name];
 
   const p = (async () => {
-    // Services with a configurable port resolve it now and cache it on the
-    // registry entry, so status/health checks elsewhere see the real port.
-    if (svc.resolvePort) {
-      try { svc.port = await svc.resolvePort(); } catch { /* keep the default */ }
+    // Services configured through Settings read that configuration now and cache
+    // it on the registry entry, so status/health checks elsewhere see the real
+    // port. Best-effort: an unreachable backend leaves the defaults in place
+    // rather than blocking the start.
+    if (svc.resolveLaunch) {
+      try { await svc.resolveLaunch(svc); } catch { /* keep the defaults */ }
     }
     if (handles[name]) {
       if (await isHealthy(svc.port, svc.healthPath)) return;
@@ -649,7 +688,7 @@ function comfyAvailable() {
 // service that is already set up (so the in-app "install rigging" path doesn't
 // needlessly reinstall Mesh Tools).
 async function doSetup(opts, send) {
-  const { rigging = false, comfyui = false } = opts || {};
+  const { rigging = false, motion = false, comfyui = false } = opts || {};
   const uv = await ensureUv({ appRoot: APP_ROOT, onLine: (t) => send({ service: 'meshtools', kind: 'log', text: t }) });
   if (!uv) throw new Error('Could not find or install uv (the Python toolchain manager).');
 
@@ -666,6 +705,22 @@ async function doSetup(opts, send) {
     await setupSkintokens({
       uv, serviceDir: SKINTOKENS_DIR, venvDir: RIG_VENV, dataDir: RIG_DATA,
       onProgress: (e) => send({ service: 'rigging', ...e }),
+    });
+  }
+
+  if (motion && !isReady(MOTION_VENV)) {
+    // The model folder is a setting, so an install started from Settings has to
+    // honour it — otherwise the weights land in the default folder and the
+    // service then looks for them somewhere else.
+    let modelsDir = null;
+    try {
+      const settings = await fetchSettings();
+      modelsDir = String(settings?.apis?.motiontools?.modelsPath || '').trim() || null;
+    } catch { /* fall back to the default folder under MOTION_DATA */ }
+    await setupKimodo({
+      uv, serviceDir: KIMODO_DIR, venvDir: MOTION_VENV, dataDir: MOTION_DATA,
+      modelsDir, llamaBase: LLAMA_BASE,
+      onProgress: (e) => send({ service: 'motion', ...e }),
     });
   }
 
@@ -725,6 +780,7 @@ function registerSetupIpc() {
     desktop: true,
     meshtools: isReady(PY_VENV, MESHTOOLS_REQS_TAG),
     rigging: isReady(RIG_VENV),
+    motion: isReady(MOTION_VENV),
     comfyui: comfyReady(),
     comfyuiAvailable: comfyAvailable(),
   }));
@@ -732,7 +788,7 @@ function registerSetupIpc() {
   ipcMain.handle('setup:run', async (event, opts = {}) => {
     const send = (evt) => { try { event.sender.send('setup:progress', evt); } catch { /* window gone */ } };
     try {
-      await doSetup({ rigging: !!opts.rigging, comfyui: !!opts.comfyui }, send);
+      await doSetup({ rigging: !!opts.rigging, motion: !!opts.motion, comfyui: !!opts.comfyui }, send);
       // Provisioned only — services are started on demand (or from Settings),
       // not here, so installing doesn't spin up a process the user isn't using.
       log('Setup run complete.');
@@ -741,6 +797,7 @@ function registerSetupIpc() {
         status: {
           meshtools: isReady(PY_VENV, MESHTOOLS_REQS_TAG),
           rigging: isReady(RIG_VENV),
+          motion: isReady(MOTION_VENV),
           comfyui: comfyReady(),
         },
       };
