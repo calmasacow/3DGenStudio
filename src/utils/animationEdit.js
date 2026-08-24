@@ -524,3 +524,141 @@ export function clearFrameValue(clip, trackName, frame) {
   if (!changed) return null
   return { before, after: Float32Array.from(track.values) }
 }
+
+// --- Smoothing the loop seam ------------------------------------------------
+// A looping clip plays … f[n-2], f[n-1], then wraps to f[0]. It shakes at the seam
+// when that wrap is a bigger step than the clip's own frame-to-frame motion.
+//
+// Setting the last frame to the midpoint of f[n-2] and f[0] is NOT enough, and it is
+// worth being explicit about why: it makes the two steps either side of the wrap
+// EQUAL, which fixes a clip that was trimmed near a matching pose, but if f[0] and
+// f[n-1] are far apart it just splits one big jump into two equal big jumps. The
+// shake survives.
+//
+// What actually removes it is easing the TAIL into the start pose:
+//
+//   1. Blend the last `span` frames towards f[0], with a cosine ramp that is 0 at
+//      `span` frames back and 1 at the last frame. The clip now approaches its own
+//      beginning instead of arriving somewhere else.
+//   2. Then pull the last frame back to the midpoint of the (blended) penultimate and
+//      f[0], so the wrap step equals the step before it — and so the last frame is not
+//      a duplicate of f[0], which would stall the loop for a frame.
+//
+// The cost is honest and unavoidable: the last `span` frames no longer follow the
+// generated motion exactly, they bend towards the start. A bigger span is smoother and
+// alters more of the clip. What a single frame cannot do, no setting can.
+//
+// The one thing NOT blended is TRAVEL. Dragging a walk's forward hip motion towards
+// f[0] would slide the character backwards over the tail — so an axis that goes
+// somewhere and stays (see axisIsTravel) is left alone and counted in `skipped`.
+// Everything that oscillates — every rotation, the body's rise and fall, side-to-side
+// sway — is pose, and blends.
+
+// Cosine ramp: 1 at the last frame, 0 `span` frames earlier. One-sided, unlike
+// editWeight — there are no frames after the last one to carry half a falloff.
+function seamWeight(distance, span) {
+  if (distance <= 0) return 1
+  if (distance >= span) return 0
+  return 0.5 * (1 + Math.cos((Math.PI * distance) / span))
+}
+
+// Does this axis carry TRAVEL — motion that goes somewhere and stays — rather than a
+// pose that oscillates and happens to end out of phase?
+//
+// The discriminator is net displacement over total path length, not the size of the
+// seam gap. A gap-versus-step test (the first attempt) misread a hip's rise and fall
+// as travel as soon as the clip ended mid-cycle, and then refused to smooth exactly
+// the axis that pops. This ratio is scale-free and says what it means: a walk that
+// covers ground scores ~1 (every step adds to the total AND to the displacement),
+// while sway or bob scores near 0 (a long path, no net displacement).
+//
+// A jump that ends a metre higher than it started also scores ~1, and is also left
+// alone — correctly: averaging that Y would drop the character mid-air.
+const AXIS_TRAVEL_RATIO = 0.5
+
+function axisIsTravel(values, stride, axis, n) {
+  let path = 0
+  for (let i = 0; i + 1 < n; i++) {
+    path += Math.abs(values[(i + 1) * stride + axis] - values[i * stride + axis])
+  }
+  if (path <= MIN_POSITION_DELTA) return false
+  const displacement = Math.abs(values[(n - 1) * stride + axis] - values[axis])
+  return displacement / path > AXIS_TRAVEL_RATIO
+}
+
+export function smoothLoopSeam(clip, { span = DEFAULT_EDIT_SPAN } = {}) {
+  const grid = clipGrid(clip)
+  if (!grid) return null
+  const n = grid.frameCount
+  if (n < 3) return null
+  const last = n - 1
+  const reach = Math.max(1, Math.min(n - 2, Math.round(span) || 1))
+
+  const entries = []
+  let skipped = 0
+
+  for (const track of clip.tracks) {
+    const parsed = parseTrackName(track.name)
+    if (!parsed || track.times.length !== n) continue      // off-grid: constant, no seam
+    const values = track.values
+    const before = Float32Array.from(values)
+
+    if (parsed.kind === 'quaternion') {
+      // Already no worse than a normal frame-to-frame step? Then this bone does not
+      // shake at the seam, and blending it would only flatten its tail. This is also
+      // what makes a second click a no-op instead of dragging the tail further into
+      // the start pose each time.
+      let total = 0
+      for (let i = 0; i + 1 < n; i++) {
+        _q.fromArray(values, i * 4)
+        _qTarget.fromArray(values, (i + 1) * 4)
+        total += _q.angleTo(_qTarget)
+      }
+      const meanStep = total / (n - 1)
+      _q.fromArray(values, last * 4)
+      _qTarget.fromArray(values, 0)
+      if (_q.angleTo(_qTarget) <= meanStep) continue
+
+      _qTarget.fromArray(values, 0)                        // f[0], the pose to arrive at
+      for (let j = 0; j <= reach; j++) {
+        const i = last - j
+        if (i < 0) break
+        const w = seamWeight(j, reach)
+        if (w <= 0) continue
+        _q.fromArray(values, i * 4).slerp(_qTarget, w).normalize()
+        _q.toArray(values, i * 4)
+      }
+      // Step 2: halfway between the blended penultimate and f[0].
+      _q.fromArray(values, (n - 2) * 4)
+      _qTarget.fromArray(values, 0)
+      _q.slerp(_qTarget, 0.5).normalize().toArray(values, last * 4)
+    } else {
+      for (let a = 0; a < 3; a++) {
+        if (axisIsTravel(values, 3, a, n)) { skipped += 1; continue }
+        const first = values[a]
+        // Same "already smooth" test as the rotations, per axis.
+        let total = 0
+        for (let i = 0; i + 1 < n; i++) total += Math.abs(values[(i + 1) * 3 + a] - values[i * 3 + a])
+        const meanStep = total / (n - 1)
+        if (Math.abs(first - values[last * 3 + a]) <= Math.max(meanStep, MIN_POSITION_DELTA)) continue
+        for (let j = 0; j <= reach; j++) {
+          const i = last - j
+          if (i < 0) break
+          const w = seamWeight(j, reach)
+          if (w <= 0) continue
+          const o = i * 3 + a
+          values[o] += (first - values[o]) * w
+        }
+        values[last * 3 + a] = (values[(n - 2) * 3 + a] + first) / 2
+      }
+    }
+
+    let changed = false
+    for (let i = 0; i < values.length; i++) {
+      if (Math.abs(values[i] - before[i]) > 1e-7) { changed = true; break }
+    }
+    if (changed) entries.push({ trackName: track.name, before, after: Float32Array.from(values) })
+  }
+
+  return entries.length ? { entries, applied: entries.length, skipped } : null
+}

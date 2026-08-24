@@ -164,7 +164,8 @@ import AnimationBoneGizmo from '../components/meshEditor/AnimationBoneGizmo'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
 import { describeClip, applyFrameEdit, applyFrameOperation, applyFrameRotation, applyFramePosition,
-  copyFramePose, pasteFramePose, ensurePositionTrack, clearFrameValue, restoreTrackValues, frameTime,
+  copyFramePose, pasteFramePose, ensurePositionTrack, clearFrameValue, smoothLoopSeam,
+  restoreTrackValues, frameTime,
   DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
   listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
@@ -5409,6 +5410,33 @@ export default function MeshEditorPage() {
     setAnimEditRevision(r => r + 1)
   }, [selectedAnimation, animPlaying, animEditFrame, historyFor, syncAnimEditCounts])
 
+  // Make the clip loop without a hitch: the last frame becomes the value halfway
+  // between the penultimate and the first, so the step the wrap produces matches the
+  // step before it. Tracks whose seam gap is real motion (a travelling hip, a turn)
+  // are left alone — see smoothLoopSeam.
+  const handleAnimSmoothLoop = useCallback(() => {
+    const clipName = selectedAnimation
+    const clip = animClipRef.current
+    if (!clipName || !clip || animPlaying) return
+    // The ±frames field doubles as the blend length: a bigger window is smoother and
+    // alters more of the tail, which is the only trade-off this operation has.
+    const result = smoothLoopSeam(clip, { span: animEditSpan })
+    if (!result) return
+    editedClipsRef.current.set(clipName, clip)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    const history = historyFor(clipName)
+    // One entry: it touches every animated bone, and undoing it a track at a time
+    // would leave the seam half-fixed.
+    history.undo.push({ kind: 'tracks', entries: result.entries })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(clipName)
+    setAnimEditRevision(r => r + 1)
+    // Park on the frame that changed, so the fix is visible rather than theoretical.
+    const description = describeClip(clip)
+    if (description) setAnimEditFrame(description.frameCount - 1)
+  }, [selectedAnimation, animPlaying, animEditSpan, historyFor, syncAnimEditCounts])
+
   const stepAnimEditHistory = useCallback((direction) => {
     const clipName = selectedAnimation
     const clip = clipName ? editedClipsRef.current.get(clipName) : null
@@ -9051,6 +9079,7 @@ export default function MeshEditorPage() {
                   onEdit={handleAnimEditValue}
                   onClearValue={handleAnimClearFrameValue}
                   onFrameOperation={handleAnimFrameOperation}
+                  onSmoothLoop={handleAnimSmoothLoop}
                   gizmoMode={animEditGizmoMode}
                   onAddPositionTrack={handleAnimAddPositionTrack}
                   canAddPositionTrack={!!animGizmoBone}

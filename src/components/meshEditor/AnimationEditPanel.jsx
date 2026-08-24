@@ -98,6 +98,7 @@ export default function AnimationEditPanel({
   onEdit,               // (trackName, [x, y, z]) — nulls mean "leave this axis"
   onClearValue,         // (trackName) — this frame takes the value between its neighbours
   onFrameOperation,     // ('insert' | 'append' | 'delete' | 'trimBefore' | 'trimAfter')
+  onSmoothLoop,         // rewrite the last frame so the loop does not hitch
   gizmoMode,            // 'translate' | 'rotate' — which gizmo the bone carries
   onGizmoModeChange,
   onAddPositionTrack,
@@ -284,6 +285,14 @@ export default function AnimationEditPanel({
             onClick={() => onFrameOperation?.('trimAfter')}
             title="Delete every frame AFTER this one (this frame becomes the last) — the usual way to make a generated cycle loop">
             <span className="material-symbols-outlined">keyboard_double_arrow_right</span>
+          </button>
+
+          {/* The finishing move after a trim: the trim decides WHERE the cycle ends,
+              this makes the crossing itself smooth. */}
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing || frameCount < 3}
+            onClick={onSmoothLoop}
+            title="Smooth transition — ease the last ±frames into the start pose so the loop crosses the seam at the clip's own rate instead of jolting. A bigger ±frames is smoother and bends more of the tail. Forward travel is left alone (blending it would slide the character backwards), as is anything already smooth.">
+            <span className="material-symbols-outlined">all_inclusive</span>
           </button>
         </div>
       </div>
