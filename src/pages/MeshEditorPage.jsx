@@ -159,6 +159,7 @@ import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import MotionLibraryModal from '../components/meshEditor/MotionLibraryModal'
 import AnimationEditPanel from '../components/meshEditor/AnimationEditPanel'
+import AnimatedSkeletonOverlay from '../components/meshEditor/AnimatedSkeletonOverlay'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
 import { describeClip, applyFrameEdit, restoreTrackValues, frameTime,
@@ -581,6 +582,10 @@ export default function MeshEditorPage() {
   // Undo history per clip, so undo can never reach into a clip you are not looking
   // at: { clipName -> { undo: [op], redo: [op] } }, op = { trackName, before, after }.
   const animEditHistoryRef = useRef(new Map())
+  // What the animated skeleton overlay drew on the last frame: { names, positions }.
+  // The bone picker hit-tests THIS while an animation is playing — the rest-pose
+  // joints it uses otherwise are somewhere else entirely once the mesh moves.
+  const liveJointsRef = useRef(null)
   // Edits are bound to the target rig and the bone mapping that produced them, so
   // when either changes they are not "stale", they are meaningless. Declared here,
   // beside the refs it clears, because the callbacks that call it are defined
@@ -3185,7 +3190,17 @@ export default function MeshEditorPage() {
       const camera = cameraRef.current
       const rect = canvasShellRef.current?.getBoundingClientRect()
       if (!rect) return
-      const joints = skeleton.joints
+      // While a clip plays, hit-test the joints the user can actually see (the ones
+      // the animated overlay drew this frame) instead of the bind pose — and map the
+      // hit back by NAME, since `selectedBone` indexes the rest-pose skeleton the
+      // Skeleton tree is built from and the two orders need not agree.
+      const live = animPreview && showSkeleton ? liveJointsRef.current : null
+      // Animating with no live joints to test means the bones are not on screen (the
+      // overlay is off, or its first frame has not run). Testing the bind pose then
+      // would select a bone from wherever the mesh ISN'T — better to leave the
+      // selection alone than to change it to something arbitrary.
+      if (animPreview && !live) return
+      const joints = live?.positions || skeleton.joints
       const projected = new THREE.Vector3()
       const PICK_RADIUS_PX = 16
       let closestBone = null
@@ -3202,7 +3217,12 @@ export default function MeshEditorPage() {
         }
       }
       event.preventDefault()
-      setSelectedBone(closestBone)
+      if (live && closestBone != null) {
+        const index = skeleton.names?.indexOf(live.names[closestBone])
+        setSelectedBone(index != null && index >= 0 ? index : null)
+      } else {
+        setSelectedBone(closestBone)
+      }
       return
     }
 
@@ -3537,7 +3557,7 @@ export default function MeshEditorPage() {
     }
 
     canvasShellRef.current?.setPointerCapture?.(event.pointerId)
-  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, captureMaskPreviewBase, computeSculptCursorPixelRadius, ensureLayerMaskCanvas, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, pushSculptUndo, resetSelection, scheduleProjectionMaskPaint, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, skeleton, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
+  }, [activeMenu, animPreview, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, captureMaskPreviewBase, computeSculptCursorPixelRadius, ensureLayerMaskCanvas, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, pushSculptUndo, resetSelection, scheduleProjectionMaskPaint, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, showSkeleton, skeleton, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
 
   const handleCanvasPointerMove = useCallback((event) => {
     if (activeMenu === 'boolean' && booleanPlaceMode) {
@@ -5107,9 +5127,20 @@ export default function MeshEditorPage() {
 
   // Opening the dock pauses the preview: the point is to hold ONE pose while you
   // correct it. Closing hands playback back.
+  const handleLiveJoints = useCallback((names, positions) => {
+    liveJointsRef.current = { names, positions }
+  }, [])
+
+  // A new clip (or none) means the last frame's joints describe a mesh that is no
+  // longer on screen — the picker must not hit-test them while waiting for a frame.
+  useEffect(() => { liveJointsRef.current = null }, [animPreview])
+
   const handleToggleAnimEdit = useCallback(() => {
     setAnimEditOpen(prev => {
       setAnimPlaying(prev)
+      // Opening the dock means picking bones off the mesh, which is impossible when
+      // they are not drawn. The checkbox still governs from here on.
+      if (!prev) setShowSkeleton(true)
       return !prev
     })
   }, [])
@@ -8605,6 +8636,22 @@ export default function MeshEditorPage() {
                         </group>
                       )}
                       <SkeletonOverlay skeleton={skeleton} visible={showSkeleton && !animPreview} selectedBone={selectedBone} />
+                      {/* The animated counterpart. A SIBLING of AnimatedMeshPreview, never
+                          a child: the preview wraps its scene in the floor-offset group,
+                          and this reads world positions that already include it. */}
+                      {animPreview?.skinnedMesh && (
+                        <AnimatedSkeletonOverlay
+                          root={animPreview.scene}
+                          skinnedMesh={animPreview.skinnedMesh}
+                          visible={showSkeleton}
+                          // `selectedBone` first: it is what the last click set, dock
+                          // included, so clicking a bone the clip does not animate (a
+                          // finger) highlights THAT bone instead of leaving the marker
+                          // on whatever the dock still lists.
+                          selectedName={selectedBone != null ? skeleton?.names?.[selectedBone] : animEditBone}
+                          onJoints={handleLiveJoints}
+                        />
+                      )}
                       {activeMenu === 'autorig' && rigEditing && rigEditable && showSkeleton && !animPreview && (
                         <BoneTransformGizmo
                           skeleton={skeleton}

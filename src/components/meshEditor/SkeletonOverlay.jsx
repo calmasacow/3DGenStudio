@@ -10,9 +10,11 @@ import { useEffect, useMemo } from 'react'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
 
-const BONE_COLOR = '#f0913c'
-const JOINT_COLOR = '#ffd9a0'
-const SELECTED_COLOR = '#8ff5ff'
+// Exported so the animated overlay (AnimatedSkeletonOverlay) reads identically —
+// the two draw the same rig, one at rest and one per frame.
+export const BONE_COLOR = '#f0913c'
+export const JOINT_COLOR = '#ffd9a0'
+export const SELECTED_COLOR = '#8ff5ff'
 
 export default function SkeletonOverlay({ skeleton, visible = true, selectedBone = null }) {
   const lineGeometry = useMemo(() => {
