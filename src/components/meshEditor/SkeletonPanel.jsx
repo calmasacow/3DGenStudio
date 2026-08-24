@@ -248,6 +248,29 @@ function BoneEditCard({ index, name, position, influence, canTakeWeights, edit }
   )
 }
 
+// "Convert to in-place": strip the clip's horizontal travel so the character moves
+// on the spot. A BAKE option, not a property of the motion — the clip keeps its
+// travel and this is applied on the way onto the mesh, so it can be turned on and
+// off for any clip (including ones generated before it existed) and it is what the
+// animated GLB is saved with. Rebakes the clip, hence disabled mid-retarget.
+function InPlaceToggle({ animation }) {
+  return (
+    <button
+      type="button"
+      className={`mesh-editor-anim__floor-btn ${animation?.inPlace ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+      onClick={animation?.onToggleInPlace}
+      disabled={!!animation?.retargeting}
+      aria-pressed={!!animation?.inPlace}
+      title="Strip forward/sideways travel so the character animates on the spot. Jumps, crouches and turns are kept. Applies to the clip you play or save, not to the stored motion — untick it to get the travel back."
+    >
+      <span className="material-symbols-outlined">
+        {animation?.inPlace ? 'check_box' : 'check_box_outline_blank'}
+      </span>
+      <span>Convert to in-place</span>
+    </button>
+  )
+}
+
 // The searchable clip grid + "save with N animations" button. Shared by the
 // Animations tab (mesh2motion library clips) and the Kimodo tab (clips generated
 // from a prompt): both feed the same retarget/preview/save pipeline, so the only
@@ -406,19 +429,10 @@ function KimodoTab({ animation, kimodo }) {
             : 'Max 10s per sentence — add another sentence for a longer sequence.'}
         </span>
 
-        <button
-          type="button"
-          className={`mesh-editor-anim__floor-btn ${k.inPlace ? 'mesh-editor-anim__floor-btn--on' : ''}`}
-          onClick={k.onToggleInPlace}
-          disabled={busy}
-          aria-pressed={!!k.inPlace}
-          title="Strip forward/sideways travel so the character animates on the spot. Jumps, crouches and turns are kept."
-        >
-          <span className="material-symbols-outlined">
-            {k.inPlace ? 'check_box' : 'check_box_outline_blank'}
-          </span>
-          <span>Convert to in-place</span>
-        </button>
+        {/* "Convert to in-place" is NOT here: it is a post-process on the clip,
+            not a generation setting, so it lives with the other bake toggles down
+            beside the clip gallery — where it applies to every motion, including
+            the ones already generated. */}
 
         <button
           type="button"
@@ -526,19 +540,23 @@ function KimodoTab({ animation, kimodo }) {
       {k.ownsMapping && (animation?.clips?.length > 0 || animation?.hasMapping) && (
         <>
           {animation?.hasMapping ? (
-            <button
-              type="button"
-              className={`mesh-editor-anim__floor-btn ${animation?.matchRestPose ? 'mesh-editor-anim__floor-btn--on' : ''}`}
-              onClick={animation?.onToggleMatchRestPose}
-              disabled={!!animation?.retargeting}
-              title="Pose your mesh like the Kimodo skeleton before applying the animation. Turn off to keep your mesh's own stance."
-              aria-pressed={!!animation?.matchRestPose}
-            >
-              <span className="material-symbols-outlined">
-                {animation?.matchRestPose ? 'check_box' : 'check_box_outline_blank'}
-              </span>
-              <span>Match reference rest pose</span>
-            </button>
+            <>
+              <button
+                type="button"
+                className={`mesh-editor-anim__floor-btn ${animation?.matchRestPose ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+                onClick={animation?.onToggleMatchRestPose}
+                disabled={!!animation?.retargeting}
+                title="Pose your mesh like the Kimodo skeleton before applying the animation. Turn off to keep your mesh's own stance."
+                aria-pressed={!!animation?.matchRestPose}
+              >
+                <span className="material-symbols-outlined">
+                  {animation?.matchRestPose ? 'check_box' : 'check_box_outline_blank'}
+                </span>
+                <span>Match reference rest pose</span>
+              </button>
+
+              <InPlaceToggle animation={animation} />
+            </>
           ) : (
             <div className="mesh-editor-feedback mesh-editor-anim__error" style={{ color: '#e0a030' }}>
               <span className="material-symbols-outlined">warning</span>
@@ -937,6 +955,8 @@ export default function SkeletonPanel({ skeleton, selectedBone, onSelectBone, an
                 </span>
                 <span>Match reference rest pose</span>
               </button>
+
+              <InPlaceToggle animation={animation} />
 
               {animation?.canAdjustArms && (
                 <div className="mesh-editor-anim__arms">

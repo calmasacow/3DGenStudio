@@ -158,7 +158,7 @@ import SkeletonPanel from '../components/meshEditor/SkeletonPanel'
 import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import MotionLibraryModal from '../components/meshEditor/MotionLibraryModal'
-import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
+import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
   listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
@@ -507,6 +507,10 @@ export default function MeshEditorPage() {
   // a mesh modelled with its legs/arms apart doesn't keep that stance through the
   // whole clip. On by default; off keeps the mesh's own rest stance.
   const [animMatchRestPose, setAnimMatchRestPose] = useState(true)
+  // Strip the clip's horizontal travel at bake time so it plays on the spot. A
+  // property of the BAKE, not of the motion: the source clip keeps its travel, so
+  // this can be turned on and off for any clip, however it was produced.
+  const [animInPlace, setAnimInPlace] = useState(false)
   const [animArmExtension, setAnimArmExtension] = useState(0)    // Expand/Contract arms (%)
   const [animArmTargets, setAnimArmTargets] = useState(null)     // { left:[], right:[] } upper-arm target bones
   const [checkedAnimations, setCheckedAnimations] = useState(() => new Set())  // clip names ticked for Save
@@ -519,7 +523,6 @@ export default function MeshEditorPage() {
   // occupies the same single source slot a mesh2motion reference would.
   const [kimodoPrompt, setKimodoPrompt] = useState('')
   const [kimodoDuration, setKimodoDuration] = useState(5)
-  const [kimodoInPlace, setKimodoInPlace] = useState(false)
   const [kimodoRunning, setKimodoRunning] = useState(false)
   const [kimodoProgress, setKimodoProgress] = useState(null)
   const [kimodoError, setKimodoError] = useState(null)
@@ -4868,9 +4871,12 @@ export default function MeshEditorPage() {
 
   // Retarget a reference clip onto the target skeleton, memoised by clip name so
   // playback and Save reuse the same bake. Returns the THREE.AnimationClip.
-  // `matchRestPose` is a parameter rather than read from state so the toggle can
-  // rebake with its new value without waiting for the state update to land.
-  const getRetargetedClip = useCallback(async (clipName, matchRestPose = animMatchRestPose) => {
+  // `matchRestPose` and `inPlace` are parameters rather than read from state so a
+  // toggle can rebake with its new value without waiting for the state update to
+  // land. Both invalidate every cached bake, so their toggles clear the cache.
+  const getRetargetedClip = useCallback(async (
+    clipName, matchRestPose = animMatchRestPose, inPlace = animInPlace,
+  ) => {
     const cached = retargetedClipsRef.current.get(clipName)
     if (cached) return cached
     const source = animSourceRef.current
@@ -4880,12 +4886,18 @@ export default function MeshEditorPage() {
     if (!clip) return null
     // Let the spinner paint before the (synchronous) frame-by-frame bake.
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    // In-place is a post-process on the SOURCE clip, upstream of the retarget: the
+    // retargeter reads the source hips' world position each frame, so stripping the
+    // travel here is all it takes for it to be gone from the hip track it writes —
+    // and from the animated GLB, which is baked from these same clips. `source.clips`
+    // keeps the travelling original, so turning the toggle back off restores it.
+    const sourceClip = inPlace ? makeClipInPlace(clip, source.hipName) : clip
     const retargeted = retargetAnimationClip({
       targetScene: target.scene,
       targetSkinnedMesh: target.skinnedMesh,
       sourceScene: source.scene,
       sourceSkinnedMesh: source.skinnedMesh,
-      clip,
+      clip: sourceClip,
       mapping: animMapping,
       matchRestPose,
     })
@@ -4907,17 +4919,17 @@ export default function MeshEditorPage() {
     })
     retargetedClipsRef.current.set(clipName, posed)
     return posed
-  }, [animMapping, animMatchRestPose, handCurl])
+  }, [animMapping, animMatchRestPose, animInPlace, handCurl])
 
   // Bake a clip and put it on screen. Shared by clicking a clip and by the
-  // rest-pose toggle, which has to rebuild whatever is already playing.
-  const showRetargetedClip = useCallback(async (clipName, matchRestPose) => {
+  // rest-pose / in-place toggles, which have to rebuild whatever is already playing.
+  const showRetargetedClip = useCallback(async (clipName, matchRestPose, inPlace) => {
     const target = animTargetRef.current
     if (!animSourceRef.current || !target || !animMapping) return
     setAnimRetargeting(clipName)
     setAnimError(null)
     try {
-      const retargeted = await getRetargetedClip(clipName, matchRestPose)
+      const retargeted = await getRetargetedClip(clipName, matchRestPose, inPlace)
       if (!retargeted) throw new Error('Animation clip not found.')
       setAnimPreview({
         scene: target.scene,
@@ -4968,6 +4980,16 @@ export default function MeshEditorPage() {
     retargetedClipsRef.current.clear()
     if (selectedAnimation) void showRetargetedClip(selectedAnimation, next)
   }, [animMatchRestPose, selectedAnimation, showRetargetedClip])
+
+  // The travel is stripped during the bake, so every cached bake is stale too —
+  // and, unlike the generation flag this replaced, flipping it back restores the
+  // travel: the source clips were never modified.
+  const handleToggleInPlace = useCallback(() => {
+    const next = !animInPlace
+    setAnimInPlace(next)
+    retargetedClipsRef.current.clear()
+    if (selectedAnimation) void showRetargetedClip(selectedAnimation, animMatchRestPose, next)
+  }, [animInPlace, animMatchRestPose, selectedAnimation, showRetargetedClip])
 
   const handleToggleAnimationChecked = useCallback((clipName) => {
     setCheckedAnimations(prev => {
@@ -5078,15 +5100,16 @@ export default function MeshEditorPage() {
       }
 
       // Name clips by prompt, numbered — the same prompt twice is a different
-      // take, and the clip name is the retarget cache key.
+      // take, and the clip name is the retarget cache key. No in-place marker in
+      // the name: the clip travels, and playing it on the spot is a bake option
+      // that can be flipped at any time.
       kimodoCounterRef.current += 1
       const label = kimodoPrompt.trim().replace(/\s+/g, ' ').slice(0, 48)
-      const name = `${kimodoCounterRef.current}. ${label}${kimodoInPlace ? ' (in-place)' : ''}`
+      const name = `${kimodoCounterRef.current}. ${label}`
 
       const { clip, bvh } = await generateMotionClip({
         prompt: kimodoPrompt,
         duration: kimodoDuration,
-        inPlace: kimodoInPlace,
         name,
         onProgress: setKimodoProgress,
       })
@@ -5096,7 +5119,9 @@ export default function MeshEditorPage() {
       // away — is not acceptable, and the BVH is the mesh-independent artifact
       // worth keeping. A save failure must NOT fail the generation, though: the
       // clip is already in hand and usable.
-      saveMotion({ name, prompt: kimodoPrompt, bvh, inPlace: kimodoInPlace })
+      // Stored as generated, i.e. travelling: in-place is applied when the clip is
+      // baked onto a mesh, so the saved motion stays usable both ways.
+      saveMotion({ name, prompt: kimodoPrompt, bvh })
         .then(saved => setMotionLibrary(prev => [saved, ...prev]))
         .catch(err => {
           console.error('Could not save the generated motion:', err)
@@ -5121,7 +5146,7 @@ export default function MeshEditorPage() {
       setKimodoRunning(false)
       setKimodoProgress(null)
     }
-  }, [kimodoRunning, kimodoPrompt, kimodoDuration, kimodoInPlace, ensureKimodoSource,
+  }, [kimodoRunning, kimodoPrompt, kimodoDuration, ensureKimodoSource,
     ensureAnimTargetScene, animMapping, animMatchRestPose, showRetargetedClip])
 
   // --- Saved motion library -------------------------------------------------
@@ -5242,8 +5267,6 @@ export default function MeshEditorPage() {
     duration: kimodoDuration,
     onDurationChange: setKimodoDuration,
     segments: Math.max(1, countPromptSegments(kimodoPrompt)),
-    inPlace: kimodoInPlace,
-    onToggleInPlace: () => setKimodoInPlace(v => !v),
     running: kimodoRunning,
     progress: kimodoProgress,
     error: kimodoError,
@@ -5269,7 +5292,7 @@ export default function MeshEditorPage() {
       // window on the same project) may have generated something since.
       onOpen: () => { setMotionLibOpen(true); refreshMotionLibrary() },
     },
-  }), [kimodoPrompt, kimodoDuration, kimodoInPlace, kimodoRunning, kimodoProgress, kimodoError,
+  }), [kimodoPrompt, kimodoDuration, kimodoRunning, kimodoProgress, kimodoError,
     animLoading, handleKimodoGenerate, handleKimodoOpenMapping, animReferenceId, kimodoAutoMapped,
     handCurl, handleHandCurlChange, handleHandCurlCommit,
     motionLibrary, motionLibLoading, motionLibError, refreshMotionLibrary])
@@ -5294,6 +5317,8 @@ export default function MeshEditorPage() {
     onToggleAlignFloor: () => setAnimAlignFloor(v => !v),
     matchRestPose: animMatchRestPose,
     onToggleMatchRestPose: handleToggleMatchRestPose,
+    inPlace: animInPlace,
+    onToggleInPlace: handleToggleInPlace,
     armExtension: animArmExtension,
     onArmExtensionChange: setAnimArmExtension,
     canAdjustArms: !!(animArmTargets && (animArmTargets.left.length || animArmTargets.right.length)),
@@ -5303,7 +5328,7 @@ export default function MeshEditorPage() {
     onSave: handleSaveAnimations,
   }), [animReferenceId, handleSelectAnimReference, handleOpenBoneMapping, animMapping, animClips,
     selectedAnimation, handleSelectAnimation, animRetargeting, animLoading, animError, animAlignFloor,
-    animMatchRestPose, handleToggleMatchRestPose,
+    animMatchRestPose, handleToggleMatchRestPose, animInPlace, handleToggleInPlace,
     animArmExtension, animArmTargets, checkedAnimations, handleToggleAnimationChecked, animSaving, handleSaveAnimations])
 
   // On-demand watertight check for the Auto Retopo panel. The position-welded

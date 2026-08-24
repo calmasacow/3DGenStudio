@@ -194,7 +194,10 @@ export default function MotionLibraryModal({
                   <span className="mesh-editor-motionpick__meta">
                     {motion.duration ? `${motion.duration.toFixed(1)}s` : '—'}
                     {motion.frameCount ? ` · ${motion.frameCount}f` : ''}
-                    {motion.inPlace ? ' · in-place' : ''}
+                    {/* Only motions saved before in-place became a bake option are
+                        stored already converted; everything newer travels, and the
+                        Kimodo tab's "Convert to in-place" decides per playback. */}
+                    {motion.inPlace ? ' · baked in-place' : ''}
                     {motion.createdAt ? ` · ${new Date(motion.createdAt).toLocaleDateString()}` : ''}
                   </span>
 

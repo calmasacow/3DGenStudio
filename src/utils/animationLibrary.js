@@ -346,6 +346,94 @@ export function detectHipBone(boneNames) {
   )
 }
 
+// --- In-place conversion ----------------------------------------------------
+// How much of the hip track counts as "locomotion" rather than gait. Two boxcar
+// passes of this length keep ~96% of a 1 Hz weight shift (a walk cycle) and all of
+// a run's, while still tracking the travel: measured against synthetic walk, run
+// and 0->3 m/s ramp tracks, a shorter 0.6s window throws away a fifth of the walk
+// sway and a longer 1.2s one leaves ~13cm of residual sliding under hard
+// acceleration. Net travel is removed exactly regardless (see the padding below).
+const IN_PLACE_WINDOW_SECONDS = 0.8
+
+// Boxcar smoothing with ODD (antisymmetric) padding at both ends: the window is
+// reflected THROUGH the end sample instead of clamped to it, so the boundary keeps
+// its slope. A clamped window flattens the smoothed curve over the last half
+// window — and travel the smoother fails to see is travel the conversion below
+// fails to remove, i.e. a clip that still slides at its start and end.
+function smoothSeries(values, halfWindow) {
+  const n = values.length
+  if (!n || halfWindow < 1) return Array.from(values)
+  const at = i => {
+    if (i < 0) return 2 * values[0] - values[Math.min(n - 1, -i)]
+    if (i >= n) return 2 * values[n - 1] - values[Math.max(0, 2 * n - 2 - i)]
+    return values[i]
+  }
+  const out = new Array(n)
+  for (let i = 0; i < n; i++) {
+    let sum = 0
+    for (let k = -halfWindow; k <= halfWindow; k++) sum += at(i + k)
+    out[i] = sum / (2 * halfWindow + 1)
+  }
+  return out
+}
+
+// The bone a position track drives, for both track-naming conventions in play:
+// "Hips.position" (BVHLoader, and what GLTFExporter wants) and
+// ".bones[Hips].position" (what the mixer binds against a SkinnedMesh).
+function positionTrackBone(name) {
+  const m = /^(?:\.bones\[(.+?)\]|(.+?))\.position$/.exec(name || '')
+  return m ? (m[1] ?? m[2]) : null
+}
+
+// Strip locomotion from a clip's hip track so the motion plays on the spot.
+// Returns a NEW clip (the original keeps its travel) or the clip unchanged when
+// there is no hip position track to work on.
+//
+// This is deliberately a post-process rather than a generation option: the stored
+// motion always travels, and the in-place version is derived at bake time — so the
+// toggle is reversible and applies to motions generated long before it was ticked.
+//
+// The naive conversion pins the hips to a constant X/Z, which also flattens the
+// side-to-side weight shift and forward lean that make a walk read as a walk — the
+// character slides its feet under a rigid pelvis. So only the LOW-FREQUENCY part
+// of the horizontal track is removed: smoothing it estimates the locomotion, and
+// subtracting that estimate's DRIFT from its first sample leaves the per-step sway
+// on top of a stationary root.
+//
+// Vertical motion and every rotation are untouched: jumps still leave the ground,
+// crouches still lower the body, and "turns left" still turns — on the spot.
+export function makeClipInPlace(clip, hipName) {
+  if (!clip?.tracks?.length) return clip
+  const wanted = String(hipName || '').toLowerCase()
+  const positionTracks = clip.tracks.filter(t => positionTrackBone(t.name))
+  const track = positionTracks.find(t => positionTrackBone(t.name).toLowerCase() === wanted)
+    // A BVH carries exactly one position track, on its root — so when the hip name
+    // does not match (a renamed rig), the only candidate is still the right one.
+    || (positionTracks.length === 1 ? positionTracks[0] : null)
+  if (!track) return clip
+
+  const n = Math.floor(track.values.length / 3)
+  if (n < 3) return clip
+  const span = track.times[n - 1] - track.times[0]
+  const fps = span > 0 ? (n - 1) / span : 30
+  const halfWindow = Math.max(1, Math.round((IN_PLACE_WINDOW_SECONDS * fps) / 2))
+
+  const tracks = clip.tracks.map(t => t.clone())
+  const target = tracks[clip.tracks.indexOf(track)]
+  for (const axis of [0, 2]) {  // X and Z; Y (height) is left alone
+    const series = new Array(n)
+    for (let i = 0; i < n; i++) series[i] = target.values[i * 3 + axis]
+    // Two boxcar passes ≈ a triangular window: the same cutoff, far less ripple.
+    const smooth = smoothSeries(smoothSeries(series, halfWindow), halfWindow)
+    const base = smooth[0]
+    for (let i = 0; i < n; i++) target.values[i * 3 + axis] = series[i] - (smooth[i] - base)
+  }
+
+  const converted = new AnimationClip(clip.name, clip.duration, tracks)
+  converted.userData = { ...(clip.userData || {}), inPlace: true }
+  return converted
+}
+
 // Bones of `bone`'s subtree that are mapped and have no mapped bone between them
 // and `bone` — i.e. where its chain continues. Descends through unmapped bones so
 // an intermediate helper/twist bone does not break a chain.

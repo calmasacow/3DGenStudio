@@ -144,10 +144,14 @@ export async function fetchMotionServiceHealth() {
 // hierarchy and rest offsets, so the clip binds by bone name against whichever
 // source scene is already loaded, and the user's bone mapping survives across
 // generations.
+//
+// Always TRAVELLING: the service can bake the in-place conversion itself, but that
+// bakes it into the BVH we then store, making the choice permanent and per-motion.
+// `makeClipInPlace` does the same job on the clip at bake time instead, so the
+// stored motion stays the canonical travelling one and the toggle is reversible.
 export async function generateMotionClip({
   prompt,
   duration = 5,
-  inPlace = false,
   seed = null,
   diffusionSteps = 100,
   postprocess = true,
@@ -167,7 +171,7 @@ export async function generateMotionClip({
     body: JSON.stringify({
       prompt: text,
       duration: Math.min(KIMODO_MAX_DURATION, Math.max(KIMODO_MIN_DURATION, Number(duration) || 5)),
-      in_place: !!inPlace,
+      in_place: false,
       seed: Number.isFinite(seed) ? seed : null,
       diffusion_steps: Number(diffusionSteps) || 100,
       postprocess: !!postprocess,
@@ -220,6 +224,9 @@ export async function listSavedMotions() {
   return body.motions || []
 }
 
+// `inPlace` records that the BVH ITSELF was baked in place, which only motions
+// saved before the conversion became a bake-time post-process ever are. New saves
+// leave it false: the stored motion travels, and in-place is applied on apply.
 export async function saveMotion({ name, prompt, bvh, inPlace = false, seed = null } = {}) {
   const body = await libraryJson(
     await fetch(LIBRARY_BASE, {
