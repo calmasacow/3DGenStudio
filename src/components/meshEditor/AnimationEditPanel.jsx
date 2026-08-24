@@ -98,7 +98,9 @@ export default function AnimationEditPanel({
   onEdit,               // (trackName, [x, y, z]) — nulls mean "leave this axis"
   onClearValue,         // (trackName) — this frame takes the value between its neighbours
   onFrameOperation,     // ('insert' | 'append' | 'delete' | 'trimBefore' | 'trimAfter')
-  onSmoothLoop,         // rewrite the last frame so the loop does not hitch
+  onSmoothLoop,         // ease the last `seamFrames` into the start pose
+  seamFrames,
+  onSeamFramesChange,
   gizmoMode,            // 'translate' | 'rotate' — which gizmo the bone carries
   onGizmoModeChange,
   onAddPositionTrack,
@@ -288,12 +290,28 @@ export default function AnimationEditPanel({
           </button>
 
           {/* The finishing move after a trim: the trim decides WHERE the cycle ends,
-              this makes the crossing itself smooth. */}
+              this makes the crossing itself smooth. Its own frame count, because the
+              answer here is "as few as get the job done" — every extra frame bends
+              more of the tail towards the start pose. */}
           <button type="button" className="mesh-editor-icon-btn" disabled={playing || frameCount < 3}
             onClick={onSmoothLoop}
-            title="Smooth transition — ease the last ±frames into the start pose so the loop crosses the seam at the clip's own rate instead of jolting. A bigger ±frames is smoother and bends more of the tail. Forward travel is left alone (blending it would slide the character backwards), as is anything already smooth.">
+            title={`Smooth transition — rewrite the last ${seamFrames} frame${seamFrames === 1 ? '' : 's'} so the loop crosses the seam at the clip's own rate instead of jolting. Forward travel is left alone (blending it would slide the character backwards), as is anything already smooth.`}>
             <span className="material-symbols-outlined">all_inclusive</span>
           </button>
+          <label className="mesh-editor-anim-dock__axis mesh-editor-anim-dock__seam"
+            title="How many frames the transition is spread over. 1 rewrites only the last frame; raise it when the seam still jolts, lower it if the motion visibly runs backwards into the loop point.">
+            <input
+              type="number"
+              className="mesh-editor-panel__input"
+              min={1}
+              max={Math.max(1, frameCount - 2)}
+              step={1}
+              value={seamFrames}
+              disabled={playing}
+              onChange={e => onSeamFramesChange?.(Math.max(1, Number(e.target.value) || 1))}
+              aria-label="Transition frames"
+            />
+          </label>
         </div>
       </div>
 

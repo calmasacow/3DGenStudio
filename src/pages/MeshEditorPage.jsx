@@ -536,6 +536,11 @@ export default function MeshEditorPage() {
   const [animEditGizmoMode, setAnimEditGizmoMode] = useState('rotate')
   const [animEditScope, setAnimEditScope] = useState(DEFAULT_EDIT_SCOPE)
   const [animEditSpan, setAnimEditSpan] = useState(DEFAULT_EDIT_SPAN)
+  // How many frames the loop transition is spread over. 1 = rewrite only the last
+  // frame; more is smoother but bends more of the tail towards the start pose, which
+  // reads as the motion briefly running backwards when the tail was heading the other
+  // way. Deliberately separate from `animEditSpan` (the value-edit falloff).
+  const [animSeamFrames, setAnimSeamFrames] = useState(1)
   const [animEditRevision, setAnimEditRevision] = useState(0)     // the clip mutates in place
   const [animEditedClips, setAnimEditedClips] = useState(() => new Set())
   // Copied frame pose: the values live in a ref (they are only read on paste), the
@@ -5418,9 +5423,7 @@ export default function MeshEditorPage() {
     const clipName = selectedAnimation
     const clip = animClipRef.current
     if (!clipName || !clip || animPlaying) return
-    // The ±frames field doubles as the blend length: a bigger window is smoother and
-    // alters more of the tail, which is the only trade-off this operation has.
-    const result = smoothLoopSeam(clip, { span: animEditSpan })
+    const result = smoothLoopSeam(clip, { span: animSeamFrames })
     if (!result) return
     editedClipsRef.current.set(clipName, clip)
     setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
@@ -5435,7 +5438,7 @@ export default function MeshEditorPage() {
     // Park on the frame that changed, so the fix is visible rather than theoretical.
     const description = describeClip(clip)
     if (description) setAnimEditFrame(description.frameCount - 1)
-  }, [selectedAnimation, animPlaying, animEditSpan, historyFor, syncAnimEditCounts])
+  }, [selectedAnimation, animPlaying, animSeamFrames, historyFor, syncAnimEditCounts])
 
   const stepAnimEditHistory = useCallback((direction) => {
     const clipName = selectedAnimation
@@ -9080,6 +9083,8 @@ export default function MeshEditorPage() {
                   onClearValue={handleAnimClearFrameValue}
                   onFrameOperation={handleAnimFrameOperation}
                   onSmoothLoop={handleAnimSmoothLoop}
+                  seamFrames={animSeamFrames}
+                  onSeamFramesChange={setAnimSeamFrames}
                   gizmoMode={animEditGizmoMode}
                   onAddPositionTrack={handleAnimAddPositionTrack}
                   canAddPositionTrack={!!animGizmoBone}

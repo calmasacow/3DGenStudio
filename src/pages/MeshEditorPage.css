@@ -2596,6 +2596,13 @@
   accent-color: #8ff5ff;
 }
 
+/* The transition length, sitting with the loop tools rather than in the editor pane:
+   it belongs to that button, not to the value fields. */
+.mesh-editor-anim-dock__seam input {
+  width: 3.4rem;
+  text-align: center;
+}
+
 .mesh-editor-anim-dock__frame-ops {
   display: inline-flex;
   align-items: center;
