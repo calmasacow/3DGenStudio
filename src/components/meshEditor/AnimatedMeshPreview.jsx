@@ -25,12 +25,20 @@ const _bw = new THREE.Quaternion()
 const _pq = new THREE.Quaternion()
 
 export default function AnimatedMeshPreview({
-  object, mixerRoot, clip, playing = true, timeScale = 1,
+  object, mixerRoot, clip, playing = true, timeScale = 1, time = null, onPausedAt = null,
   alignFloor = true, floorOffset = 0, armExtension = 0, armTargets = null,
 }) {
   const mixerRef = useRef(null)
   const actionRef = useRef(null)
   const groupRef = useRef(null)
+  // Both are read from effects that must NOT re-run when they change: the action is
+  // rebuilt only when the clip changes, and `onPausedAt` must fire when playback
+  // stops — not every time the parent hands down a new callback identity (that
+  // would keep snapping the frame back to the mixer's time mid-scrub).
+  const timeRef = useRef(time)
+  const onPausedAtRef = useRef(onPausedAt)
+  useEffect(() => { timeRef.current = time }, [time])
+  useEffect(() => { onPausedAtRef.current = onPausedAt }, [onPausedAt])
 
   // Retargeted clips use ".bones[name]" track paths, which the mixer can only
   // resolve against a node that has a `.skeleton` — i.e. the SkinnedMesh, not the
@@ -68,14 +76,32 @@ export default function AnimatedMeshPreview({
     action.setLoop(THREE.LoopRepeat, Infinity)
     action.clampWhenFinished = false
     action.play()
+    // A rebuilt action starts at 0; while the edit dock is scrubbing, that would
+    // throw the user back to the first frame every time the clip object changes.
+    if (timeRef.current != null) action.time = timeRef.current
     actionRef.current = action
     return () => { action.stop(); m.uncacheAction(clip) }
   }, [clip])
 
+  // Pausing is what makes the edit dock work: a paused action still evaluates its
+  // interpolants and applies the pose every frame (three zeroes the delta rather
+  // than skipping the action), so an in-place edit to the clip's values shows up on
+  // the mesh on the next frame with no rebuild.
   useEffect(() => {
     const action = actionRef.current
-    if (action) action.paused = !playing
+    if (!action) return
+    action.paused = !playing
+    // Hand back where free playback stopped, so the dock can resume from the frame
+    // on screen instead of wherever the scrub bar was left.
+    if (!playing) onPausedAtRef.current?.(action.time)
   }, [playing])
+
+  // Controlled scrub. Only while paused: during playback the mixer owns the time,
+  // and writing to it here would fight the clock.
+  useEffect(() => {
+    const action = actionRef.current
+    if (action && time != null && !playing) action.time = time
+  }, [time, playing])
   useEffect(() => {
     if (mixerRef.current) mixerRef.current.timeScale = timeScale
   }, [timeScale])

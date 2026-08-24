@@ -334,11 +334,26 @@ function ClipGallery({ animation, emptyLabel, previewsAvailable = true }) {
             selected={animation.selectedAnimation === clip.name}
             busy={animation.retargeting === clip.name}
             checked={checkedSet.has(clip.name)}
+            edited={!!animation.editedClips?.has(clip.name)}
             onSelect={() => animation.onSelectAnimation(clip.name)}
             onToggleChecked={() => animation.onToggleChecked(clip.name)}
           />
         ))}
       </div>
+
+      {/* The dock edits the clip that is PLAYING, so it needs a selection. */}
+      {animation?.selectedAnimation && (
+        <button
+          type="button"
+          className={`mesh-editor-anim__floor-btn ${animation?.editOpen ? 'mesh-editor-anim__floor-btn--on' : ''}`}
+          onClick={animation?.onToggleEdit}
+          aria-pressed={!!animation?.editOpen}
+          title="Pause the animation and correct any bone's rotation or position, frame by frame"
+        >
+          <span className="material-symbols-outlined">tune</span>
+          <span>{animation?.editOpen ? 'Close animation editor' : 'Edit animation'}</span>
+        </button>
+      )}
 
       <button
         type="button"

@@ -1,0 +1,346 @@
+// Animation edit dock: the full-width strip under the mesh-editor workspace that
+// appears in Auto Rig mode while a retargeted clip is playing.
+//
+// Opening it PAUSES the preview and holds it at the selected frame — the whole
+// point is to see one pose while you correct it. Playback is still available, but
+// while it runs the frame controls are inert: following the mixer live would mean
+// a state update (and a re-render of the whole editor page) every frame.
+//
+// The clip being edited is the RETARGETED one — your mesh's own bones, the same
+// object the mixer is playing and the same one Save writes out — so edits show up
+// on the mesh as you type, with no rebake.
+//
+// Presentational: every value comes from the clip description the page passes in,
+// and every change goes back out through a handler.
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { EDIT_SCOPES, MAX_EDIT_SPAN, readFrameValues } from '../../utils/animationEdit'
+
+// One editable axis. Kept as local text so typing "-" or "1." is possible, and
+// committed on Enter/blur — a commit per keystroke would rewrite the whole track
+// on every character.
+function AxisField({ label, value, disabled, onCommit }) {
+  const [text, setText] = useState('')
+  const [editing, setEditing] = useState(false)
+  const display = editing ? text : (value == null ? '' : formatNumber(value))
+
+  return (
+    <label className="mesh-editor-anim-dock__axis">
+      <span>{label}</span>
+      <input
+        type="text"
+        inputMode="decimal"
+        className="mesh-editor-panel__input"
+        value={display}
+        disabled={disabled}
+        onFocus={e => { setEditing(true); setText(e.target.value) }}
+        onChange={e => setText(e.target.value)}
+        onBlur={() => { setEditing(false); commit(text, value, onCommit) }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { e.currentTarget.blur() }
+          else if (e.key === 'Escape') { setEditing(false); e.currentTarget.blur() }
+        }}
+      />
+    </label>
+  )
+}
+
+function commit(text, value, onCommit) {
+  const next = Number(String(text).trim())
+  if (!Number.isFinite(next) || next === value) return
+  onCommit(next)
+}
+
+function formatNumber(v) {
+  if (!Number.isFinite(v)) return ''
+  const abs = Math.abs(v)
+  return abs >= 100 ? v.toFixed(2) : abs >= 1 ? v.toFixed(3) : v.toFixed(4)
+}
+
+function timeLabel(seconds) {
+  const s = Math.max(0, Number(seconds) || 0)
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}.${String(Math.round((s % 1) * 100)).padStart(2, '0')}`
+}
+
+export default function AnimationEditPanel({
+  clipName,
+  description,          // from describeClip: { fps, frameCount, duration, times, bones }
+  clip,                 // the live clip object — read directly, see `revision`
+  revision,             // bumped on every edit so the fields re-read the mutated clip
+  frame,
+  onFrameChange,
+  playing,
+  onTogglePlay,
+  selectedBone,         // bone NAME, or null
+  onSelectBone,
+  scope,
+  onScopeChange,
+  span,
+  onSpanChange,
+  onEdit,               // (trackName, [x, y, z]) — nulls mean "leave this axis"
+  edited,
+  onRevert,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onClose,
+}) {
+  const [search, setSearch] = useState('')
+  const rowRefs = useRef(new Map())
+  const bones = useMemo(() => description?.bones || [], [description])
+  const frameCount = description?.frameCount || 0
+  const row = useMemo(
+    () => bones.find(b => b.boneName === selectedBone) || null,
+    [bones, selectedBone],
+  )
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return bones
+    return bones.filter(b => b.boneName.toLowerCase().includes(q))
+  }, [bones, search])
+
+  // Values are read straight off the clip, which is mutated in place — `revision`
+  // and `frame` are what make that safe to memoise.
+  const rotation = useMemo(
+    () => (clip && row?.rotation ? readFrameValues(clip, row.rotation, frame) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clip, row?.rotation, frame, revision],
+  )
+  const position = useMemo(
+    () => (clip && row?.position ? readFrameValues(clip, row.position, frame) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clip, row?.position, frame, revision],
+  )
+
+  // Keep the selected bone's row visible when the selection comes from the
+  // viewport or the skeleton tree rather than from this list.
+  useEffect(() => {
+    if (selectedBone) rowRefs.current.get(selectedBone)?.scrollIntoView({ block: 'nearest' })
+  }, [selectedBone])
+
+  const step = delta => onFrameChange(Math.max(0, Math.min(frameCount - 1, frame + delta)))
+  const fieldsDisabled = playing || !row?.editable
+
+  return (
+    <section className="mesh-editor-anim-dock" aria-label="Animation edit">
+      <header className="mesh-editor-anim-dock__head">
+        <span className="mesh-editor-anim-dock__title">
+          <span className="material-symbols-outlined">animation</span>
+          <span>{clipName || 'Animation'}</span>
+        </span>
+        {edited && (
+          <span className="mesh-editor-anim-dock__badge" title="This clip has hand edits">edited</span>
+        )}
+
+        <div className="mesh-editor-anim-dock__transport">
+          <button type="button" className="mesh-editor-icon-btn" onClick={() => onFrameChange(0)}
+            disabled={playing} title="First frame">
+            <span className="material-symbols-outlined">first_page</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={() => step(-1)}
+            disabled={playing || frame <= 0} title="Previous frame">
+            <span className="material-symbols-outlined">chevron_left</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={onTogglePlay}
+            title={playing ? 'Pause at the current frame' : 'Play the clip'}>
+            <span className="material-symbols-outlined">{playing ? 'pause' : 'play_arrow'}</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={() => step(1)}
+            disabled={playing || frame >= frameCount - 1} title="Next frame">
+            <span className="material-symbols-outlined">chevron_right</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={() => onFrameChange(frameCount - 1)}
+            disabled={playing} title="Last frame">
+            <span className="material-symbols-outlined">last_page</span>
+          </button>
+
+          <input
+            type="number"
+            className="mesh-editor-panel__input mesh-editor-anim-dock__frame"
+            min={0}
+            max={Math.max(0, frameCount - 1)}
+            step={1}
+            value={frame}
+            disabled={playing}
+            onChange={e => onFrameChange(Number(e.target.value))}
+            aria-label="Frame"
+          />
+          <span className="mesh-editor-panel__hint">
+            / {Math.max(0, frameCount - 1)} · {timeLabel(description?.times?.[frame] ?? 0)}
+            {description?.fps ? ` · ${Math.round(description.fps)} fps` : ''}
+          </span>
+        </div>
+
+        <div className="mesh-editor-anim-dock__head-actions">
+          <button type="button" className="mesh-editor-icon-btn" onClick={onUndo} disabled={!canUndo} title="Undo the last edit">
+            <span className="material-symbols-outlined">undo</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={onRedo} disabled={!canRedo} title="Redo">
+            <span className="material-symbols-outlined">redo</span>
+          </button>
+          <button type="button" className="mesh-editor-btn mesh-editor-btn--ghost" onClick={onRevert} disabled={!edited}
+            title="Throw the hand edits away and rebake this clip from the current settings">
+            <span className="material-symbols-outlined">restart_alt</span>
+            <span>Revert</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" onClick={onClose} title="Close the animation editor">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Scrub bar. A range input rather than a canvas timeline: Phase 1 has no
+          per-key marks to draw, since the bake puts a key on every frame. */}
+      <input
+        type="range"
+        className="mesh-editor-anim-dock__scrub"
+        min={0}
+        max={Math.max(0, frameCount - 1)}
+        step={1}
+        value={frame}
+        disabled={playing}
+        onChange={e => onFrameChange(Number(e.target.value))}
+        aria-label="Scrub to frame"
+      />
+
+      <div className="mesh-editor-anim-dock__body">
+        <div className="mesh-editor-anim-dock__bones">
+          <div className="mesh-editor-anim-dock__bones-head">
+            <span className="mesh-editor-panel__hint">Animated bones ({bones.length})</span>
+          </div>
+          {bones.length > 8 && (
+            <div className="mesh-editor-anim__search">
+              <span className="material-symbols-outlined">search</span>
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search bones…"
+                aria-label="Search animated bones"
+              />
+              {search && (
+                <button type="button" className="mesh-editor-anim__search-clear" onClick={() => setSearch('')}
+                  title="Clear search" aria-label="Clear search">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              )}
+            </div>
+          )}
+          <div className="mesh-editor-anim-dock__bones-list">
+            {filtered.length === 0 ? (
+              <div className="mesh-editor-layers-panel__empty">No animated bone matches that.</div>
+            ) : filtered.map(b => (
+              <button
+                key={b.boneName}
+                type="button"
+                ref={el => { if (el) rowRefs.current.set(b.boneName, el); else rowRefs.current.delete(b.boneName) }}
+                className={`mesh-editor-anim-dock__bone ${b.boneName === selectedBone ? 'mesh-editor-anim-dock__bone--selected' : ''}`}
+                onClick={() => onSelectBone(b.boneName)}
+                title={b.editable
+                  ? `${b.boneName} — ${b.rotation ? 'rotation' : ''}${b.rotation && b.position ? ' + ' : ''}${b.position ? 'position' : ''}`
+                  : `${b.boneName} is driven by the Hand curl sliders (${b.keyCount} keys, off the frame grid) and is rebuilt on every bake — not editable here`}
+              >
+                <span className="mesh-editor-anim-dock__bone-name">{b.boneName}</span>
+                {b.position && <span className="material-symbols-outlined" title="Has a position track">open_with</span>}
+                {!b.editable && <span className="material-symbols-outlined">lock</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mesh-editor-anim-dock__editor">
+          {!row ? (
+            <div className="mesh-editor-layers-panel__empty">
+              Pick a bone — on the list, in the Skeleton tab, or on the mesh — to edit its pose at
+              this frame.
+            </div>
+          ) : (
+            <>
+              <div className="mesh-editor-anim-dock__editor-head">
+                <strong>{row.boneName}</strong>
+                <span className="mesh-editor-panel__hint">frame {frame}</span>
+                {!row.editable && (
+                  <span className="mesh-editor-anim-dock__badge mesh-editor-anim-dock__badge--warn">locked</span>
+                )}
+              </div>
+
+              {rotation && (
+                <div className="mesh-editor-anim-dock__row">
+                  <span className="mesh-editor-anim-dock__row-label">Rotation (°)</span>
+                  {['X', 'Y', 'Z'].map((axis, i) => (
+                    <AxisField
+                      key={axis}
+                      label={axis}
+                      value={rotation[i]}
+                      disabled={fieldsDisabled}
+                      onCommit={v => onEdit(row.rotation, [i === 0 ? v : null, i === 1 ? v : null, i === 2 ? v : null])}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {position && (
+                <div className="mesh-editor-anim-dock__row">
+                  <span className="mesh-editor-anim-dock__row-label">Position</span>
+                  {['X', 'Y', 'Z'].map((axis, i) => (
+                    <AxisField
+                      key={axis}
+                      label={axis}
+                      value={position[i]}
+                      disabled={fieldsDisabled}
+                      onCommit={v => onEdit(row.position, [i === 0 ? v : null, i === 1 ? v : null, i === 2 ? v : null])}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* The bake carries a key on EVERY frame, so an edit confined to one
+                  frame is a 33 ms pop, not a fix. This is where you say how far the
+                  correction should reach. */}
+              <div className="mesh-editor-anim-dock__row mesh-editor-anim-dock__row--scope">
+                <span className="mesh-editor-anim-dock__row-label">Apply to</span>
+                {EDIT_SCOPES.map(s => (
+                  <button
+                    key={s.value}
+                    type="button"
+                    className={`mesh-editor-anim-dock__scope ${scope === s.value ? 'mesh-editor-anim-dock__scope--on' : ''}`}
+                    onClick={() => onScopeChange(s.value)}
+                    aria-pressed={scope === s.value}
+                    title={s.value === 'falloff'
+                      ? 'Blend the correction out over the neighbouring frames — what you want for a baked clip'
+                      : s.value === 'frame'
+                        ? 'Change this frame only (a deliberate one-frame spike)'
+                        : 'Offset every frame by the same correction — for a pose that is wrong throughout'}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+                {scope === 'falloff' && (
+                  <label className="mesh-editor-anim-dock__axis">
+                    <span>±frames</span>
+                    <input
+                      type="number"
+                      className="mesh-editor-panel__input"
+                      min={1}
+                      max={MAX_EDIT_SPAN}
+                      step={1}
+                      value={span}
+                      onChange={e => onSpanChange(Number(e.target.value))}
+                    />
+                  </label>
+                )}
+              </div>
+
+              <span className="mesh-editor-panel__hint">
+                Rotations are stored as quaternions, so a committed angle is read back from the
+                quaternion — 190° comes back as −170°, and the pose is identical.
+                {edited ? ' This clip is hand-edited: the rest-pose, in-place and hand-curl settings no longer rebake it. Revert to hand it back to the bake.' : ''}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}

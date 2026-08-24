@@ -158,8 +158,11 @@ import SkeletonPanel from '../components/meshEditor/SkeletonPanel'
 import AnimatedMeshPreview from '../components/meshEditor/AnimatedMeshPreview'
 import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import MotionLibraryModal from '../components/meshEditor/MotionLibraryModal'
+import AnimationEditPanel from '../components/meshEditor/AnimationEditPanel'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
+import { describeClip, applyFrameEdit, restoreTrackValues, frameTime,
+  DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
   listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
@@ -225,6 +228,9 @@ const DEFAULT_REPAIR_OPTIONS = {
 // history: at 10, a heavy 300k-face mesh costs on the order of 100 MB if every
 // slot is filled with one.
 const MAX_BAKE_SOURCES = 10
+// Undo depth for the animation edit dock. Each entry holds two copies of one
+// track's values (~2 KB for a 4s rotation track), so 100 is a few hundred KB.
+const ANIM_EDIT_HISTORY_LIMIT = 100
 
 const DEFAULT_OPTIMIZE_OPTIONS = {
   simplify_ratio: 0.5,
@@ -511,6 +517,22 @@ export default function MeshEditorPage() {
   // property of the BAKE, not of the motion: the source clip keeps its travel, so
   // this can be turned on and off for any clip, however it was produced.
   const [animInPlace, setAnimInPlace] = useState(false)
+  // --- Animation edit dock (Phase 1) ---
+  // Frame-level correction of the RETARGETED clip: the dock pauses the preview,
+  // holds it at `animEditFrame`, and edits the clip object the mixer is already
+  // playing, so a change lands on the mesh without a rebake. An edited clip becomes
+  // AUTHORITATIVE — `editedClipsRef` outlives the bake cache, which every bake
+  // toggle clears — and only a rig/mapping change or an explicit Revert drops it.
+  const [animEditOpen, setAnimEditOpen] = useState(false)
+  const [animPlaying, setAnimPlaying] = useState(true)
+  const [animEditFrame, setAnimEditFrame] = useState(0)
+  const [animEditBone, setAnimEditBone] = useState(null)          // bone NAME, not index
+  const [animEditScope, setAnimEditScope] = useState(DEFAULT_EDIT_SCOPE)
+  const [animEditSpan, setAnimEditSpan] = useState(DEFAULT_EDIT_SPAN)
+  const [animEditRevision, setAnimEditRevision] = useState(0)     // the clip mutates in place
+  const [animEditedClips, setAnimEditedClips] = useState(() => new Set())
+  const [animEditUndoCount, setAnimEditUndoCount] = useState(0)
+  const [animEditRedoCount, setAnimEditRedoCount] = useState(0)
   const [animArmExtension, setAnimArmExtension] = useState(0)    // Expand/Contract arms (%)
   const [animArmTargets, setAnimArmTargets] = useState(null)     // { left:[], right:[] } upper-arm target bones
   const [checkedAnimations, setCheckedAnimations] = useState(() => new Set())  // clip names ticked for Save
@@ -555,6 +577,21 @@ export default function MeshEditorPage() {
   const animSourceRef = useRef(null)   // loaded reference: { scene, skinnedMesh, boneNames, clips, hipName }
   const animTargetRef = useRef(null)   // loaded target skinned mesh: { scene, skinnedMesh, boneNames }
   const retargetedClipsRef = useRef(new Map())  // clipName -> retargeted THREE.AnimationClip (cache)
+  const editedClipsRef = useRef(new Map())     // clipName -> hand-edited clip (survives cache clears)
+  // Undo history per clip, so undo can never reach into a clip you are not looking
+  // at: { clipName -> { undo: [op], redo: [op] } }, op = { trackName, before, after }.
+  const animEditHistoryRef = useRef(new Map())
+  // Edits are bound to the target rig and the bone mapping that produced them, so
+  // when either changes they are not "stale", they are meaningless. Declared here,
+  // beside the refs it clears, because the callbacks that call it are defined
+  // further up the body than the rest of the dock's handlers.
+  const resetAnimEdits = useCallback(() => {
+    editedClipsRef.current.clear()
+    animEditHistoryRef.current.clear()
+    setAnimEditUndoCount(0)
+    setAnimEditRedoCount(0)
+    setAnimEditedClips(prev => (prev.size ? new Set() : prev))
+  }, [])
   // The rigged GLB blob returned by the service, kept for Save-as-version / download.
   const riggedBlobRef = useRef(null)
   // Whether the live rig came from the last Auto Rig result (adopted) or the
@@ -2153,6 +2190,8 @@ export default function MeshEditorPage() {
           animSourceRef.current = null
           animTargetRef.current = null
           retargetedClipsRef.current.clear()
+          editedClipsRef.current.clear()
+          animEditHistoryRef.current.clear()
           setAutoRigResult(null)
           riggedBlobRef.current = null
           rigResultAdoptedRef.current = true
@@ -4448,6 +4487,7 @@ export default function MeshEditorPage() {
       // the Animations tab re-maps against the freshly-rigged bones.
       animTargetRef.current = null
       retargetedClipsRef.current.clear()
+      resetAnimEdits()
       setAnimMapping(null)
       setAnimClips([])
       setSelectedAnimation(null)
@@ -4477,7 +4517,7 @@ export default function MeshEditorPage() {
       setAutoRigRunning(false)
       setAutoRigProgress(null)
     }
-  }, [geometry, autoRigRunning, autoRigOptions, texturableMesh, applyGeometryUpdate, adoptRiggedTexturable])
+  }, [geometry, autoRigRunning, autoRigOptions, texturableMesh, applyGeometryUpdate, adoptRiggedTexturable, resetAnimEdits])
 
   const handleDismissRigResult = useCallback(() => {
     setAutoRigResult(null)
@@ -4519,6 +4559,7 @@ export default function MeshEditorPage() {
   const invalidateAnimationTarget = useCallback((mappingToo) => {
     animTargetRef.current = null
     retargetedClipsRef.current.clear()
+    resetAnimEdits()
     setAnimPreview(null)
     setSelectedAnimation(null)
     if (mappingToo) {
@@ -4528,7 +4569,7 @@ export default function MeshEditorPage() {
       setAnimArmExtension(0)
       setCheckedAnimations(new Set())
     }
-  }, [])
+  }, [resetAnimEdits])
 
   const pushRigSnapshot = useCallback(() => {
     const snapshot = snapshotRig(rigRef.current, geometry)
@@ -4774,6 +4815,7 @@ export default function MeshEditorPage() {
     setCheckedAnimations(new Set())
     animSourceRef.current = null
     retargetedClipsRef.current.clear()
+    resetAnimEdits()
     if (!referenceId) return
     setAnimLoading(true)
     try {
@@ -4786,7 +4828,7 @@ export default function MeshEditorPage() {
     } finally {
       setAnimLoading(false)
     }
-  }, [ensureAnimTargetScene])
+  }, [ensureAnimTargetScene, resetAnimEdits])
 
   // `referenceIdOverride` exists because of a stale-closure trap: the Kimodo tab
   // calls ensureKimodoSource() (which setAnimReferenceId's to 'kimodo') and then
@@ -4864,10 +4906,12 @@ export default function MeshEditorPage() {
     setSelectedAnimation(null)
     setAnimPreview(null)
     // A re-map invalidates every retargeted clip (they were baked against the old
-    // mapping) and any pending Save selection.
+    // mapping) and any pending Save selection — hand edits included: they were made
+    // on top of the old mapping's bake.
     retargetedClipsRef.current.clear()
+    resetAnimEdits()
     setCheckedAnimations(new Set())
-  }, [])
+  }, [resetAnimEdits])
 
   // Retarget a reference clip onto the target skeleton, memoised by clip name so
   // playback and Save reuse the same bake. Returns the THREE.AnimationClip.
@@ -4877,6 +4921,11 @@ export default function MeshEditorPage() {
   const getRetargetedClip = useCallback(async (
     clipName, matchRestPose = animMatchRestPose, inPlace = animInPlace,
   ) => {
+    // A hand-edited clip is authoritative and is never rebaked behind the user's
+    // back: it lives outside the bake cache, so it survives every clear a bake
+    // toggle triggers. Only Revert (or a rig/mapping change) gives it back.
+    const edited = editedClipsRef.current.get(clipName)
+    if (edited) return edited
     const cached = retargetedClipsRef.current.get(clipName)
     if (cached) return cached
     const source = animSourceRef.current
@@ -4991,6 +5040,146 @@ export default function MeshEditorPage() {
     if (selectedAnimation) void showRetargetedClip(selectedAnimation, animMatchRestPose, next)
   }, [animInPlace, animMatchRestPose, selectedAnimation, showRetargetedClip])
 
+  // --- Animation edit dock ---------------------------------------------------
+
+  // Everything the dock needs about the clip on screen: the frame grid and one row
+  // per animated bone. Recomputed only when the clip OBJECT changes — value edits
+  // mutate it in place and are picked up through `animEditRevision` instead.
+  const animEditDescription = useMemo(
+    () => (animPreview?.clip ? describeClip(animPreview.clip) : null),
+    [animPreview?.clip],
+  )
+
+  // Single source of truth for "the dock is on screen": the canvas shell shrinks by
+  // exactly the dock's height, so if this and the dock's own render condition ever
+  // disagreed the column would overflow the page — which is the bug that put the
+  // dock here in the first place.
+  const animEditDocked = activeMenu === 'autorig' && animEditOpen && !!animPreview?.clip && !!animEditDescription
+
+  // Clamp the frame into the new clip's range rather than resetting to 0, so
+  // stepping through one clip and switching to another keeps you roughly in place.
+  useEffect(() => {
+    if (!animEditDescription) return
+    setAnimEditFrame(f => Math.max(0, Math.min(animEditDescription.frameCount - 1, f)))
+  }, [animEditDescription])
+
+  // Default the dock's bone to the hips (the one bone that always carries both
+  // tracks), and keep it valid when the clip changes.
+  useEffect(() => {
+    const bones = animEditDescription?.bones
+    if (!bones?.length) return
+    setAnimEditBone(prev => (prev && bones.some(b => b.boneName === prev)
+      ? prev
+      : (bones.find(b => b.position)?.boneName || bones[0].boneName)))
+  }, [animEditDescription])
+
+  // Bone selection is shared with the skeleton tree and the viewport: picking a
+  // bone on the mesh selects it in the dock too.
+  useEffect(() => {
+    if (selectedBone == null) return
+    const name = skeleton?.names?.[selectedBone]
+    if (!name) return
+    if (animEditDescription?.bones?.some(b => b.boneName === name)) setAnimEditBone(name)
+  }, [selectedBone, skeleton, animEditDescription])
+
+  const handleAnimEditSelectBone = useCallback((boneName) => {
+    setAnimEditBone(boneName)
+    const index = skeleton?.names?.indexOf(boneName)
+    if (index != null && index >= 0) setSelectedBone(index)
+  }, [skeleton])
+
+  const historyFor = useCallback((clipName) => {
+    let history = animEditHistoryRef.current.get(clipName)
+    if (!history) {
+      history = { undo: [], redo: [] }
+      animEditHistoryRef.current.set(clipName, history)
+    }
+    return history
+  }, [])
+
+  const syncAnimEditCounts = useCallback((clipName) => {
+    const history = animEditHistoryRef.current.get(clipName)
+    setAnimEditUndoCount(history?.undo.length || 0)
+    setAnimEditRedoCount(history?.redo.length || 0)
+  }, [])
+
+  useEffect(() => { syncAnimEditCounts(selectedAnimation) }, [selectedAnimation, syncAnimEditCounts])
+
+  // Opening the dock pauses the preview: the point is to hold ONE pose while you
+  // correct it. Closing hands playback back.
+  const handleToggleAnimEdit = useCallback(() => {
+    setAnimEditOpen(prev => {
+      setAnimPlaying(prev)
+      return !prev
+    })
+  }, [])
+
+  // Free playback stopped wherever it stopped; convert that to a frame so the dock
+  // resumes from the pose on screen instead of the last scrubbed frame.
+  const handleAnimPausedAt = useCallback((time) => {
+    const description = animEditDescription
+    if (!description) return
+    const frame = Math.round((Number(time) || 0) * description.fps)
+    setAnimEditFrame(Math.max(0, Math.min(description.frameCount - 1, frame)))
+  }, [animEditDescription])
+
+  // One value edit: mutate the live clip, mark it hand-edited, remember how to put
+  // it back. The mesh updates on the next frame — a paused action keeps re-applying
+  // the clip's values, so nothing has to be rebuilt.
+  const handleAnimEditValue = useCallback((trackName, nextXYZ) => {
+    const clipName = selectedAnimation
+    const clip = animPreview?.clip
+    if (!clipName || !clip || animPlaying) return
+    const result = applyFrameEdit(clip, trackName, animEditFrame, nextXYZ, {
+      scope: animEditScope, span: animEditSpan,
+    })
+    if (!result) return
+    editedClipsRef.current.set(clipName, clip)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    const history = historyFor(clipName)
+    history.undo.push({ trackName, before: result.before, after: result.after })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(clipName)
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, animPreview, animPlaying, animEditFrame, animEditScope, animEditSpan,
+    historyFor, syncAnimEditCounts])
+
+  const stepAnimEditHistory = useCallback((direction) => {
+    const clipName = selectedAnimation
+    const clip = clipName ? editedClipsRef.current.get(clipName) : null
+    if (!clip) return
+    const history = historyFor(clipName)
+    const from = direction === 'undo' ? history.undo : history.redo
+    const to = direction === 'undo' ? history.redo : history.undo
+    const op = from.pop()
+    if (!op) return
+    restoreTrackValues(clip, op.trackName, direction === 'undo' ? op.before : op.after)
+    to.push(op)
+    syncAnimEditCounts(clipName)
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, historyFor, syncAnimEditCounts])
+
+  // Hand the clip back to the bake: drop the edit, drop the cached bake, re-run it
+  // with whatever the bake settings are NOW (which is the only honest meaning of
+  // "revert" once the rest-pose or in-place toggle has moved since the edit).
+  const handleAnimRevertEdits = useCallback(async () => {
+    const clipName = selectedAnimation
+    if (!clipName || !editedClipsRef.current.has(clipName)) return
+    editedClipsRef.current.delete(clipName)
+    retargetedClipsRef.current.delete(clipName)
+    animEditHistoryRef.current.delete(clipName)
+    syncAnimEditCounts(clipName)
+    setAnimEditedClips(prev => {
+      if (!prev.has(clipName)) return prev
+      const next = new Set(prev)
+      next.delete(clipName)
+      return next
+    })
+    setAnimEditRevision(r => r + 1)
+    await showRetargetedClip(clipName, animMatchRestPose, animInPlace)
+  }, [selectedAnimation, syncAnimEditCounts, showRetargetedClip, animMatchRestPose, animInPlace])
+
   const handleToggleAnimationChecked = useCallback((clipName) => {
     setCheckedAnimations(prev => {
       const next = new Set(prev)
@@ -5051,11 +5240,12 @@ export default function MeshEditorPage() {
     setCheckedAnimations(new Set())
     setKimodoAutoMapped(false)
     retargetedClipsRef.current.clear()
+    resetAnimEdits()
     const source = await loadKimodoSkeletonSource()
     animSourceRef.current = source
     setAnimReferenceId(KIMODO_SOURCE_ID)
     return source
-  }, [animReferenceId])
+  }, [animReferenceId, resetAnimEdits])
 
   const handleKimodoOpenMapping = useCallback(async () => {
     setKimodoError(null)
@@ -5319,6 +5509,9 @@ export default function MeshEditorPage() {
     onToggleMatchRestPose: handleToggleMatchRestPose,
     inPlace: animInPlace,
     onToggleInPlace: handleToggleInPlace,
+    editOpen: animEditOpen,
+    onToggleEdit: handleToggleAnimEdit,
+    editedClips: animEditedClips,
     armExtension: animArmExtension,
     onArmExtensionChange: setAnimArmExtension,
     canAdjustArms: !!(animArmTargets && (animArmTargets.left.length || animArmTargets.right.length)),
@@ -5329,6 +5522,7 @@ export default function MeshEditorPage() {
   }), [animReferenceId, handleSelectAnimReference, handleOpenBoneMapping, animMapping, animClips,
     selectedAnimation, handleSelectAnimation, animRetargeting, animLoading, animError, animAlignFloor,
     animMatchRestPose, handleToggleMatchRestPose, animInPlace, handleToggleInPlace,
+    animEditOpen, handleToggleAnimEdit, animEditedClips,
     animArmExtension, animArmTargets, checkedAnimations, handleToggleAnimationChecked, animSaving, handleSaveAnimations])
 
   // On-demand watertight check for the Auto Retopo panel. The position-welded
@@ -8268,254 +8462,297 @@ export default function MeshEditorPage() {
               </div>
             </aside>
 
-            <div
-              ref={canvasShellRef}
-              className={`mesh-editor-canvas-shell ${(activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection') ? 'mesh-editor-canvas-shell--texturing' : ''}`}
-              onPointerDown={handleCanvasPointerDown}
-              onPointerMove={handleCanvasPointerMove}
-              onPointerUp={handleCanvasPointerUp}
-              onPointerCancel={handleCanvasPointerCancel}
-              onPointerLeave={() => { setPaintCursorPos(null); setSculptCursor(null); if (projectionMaskCursorRef.current) projectionMaskCursorRef.current.style.display = 'none'; }}
-            >
-              <canvas
-                ref={projectionMaskCanvasRef}
-                className={`mesh-editor-projection-mask ${activeMenu === 'texturing' && hasProjectionMask ? 'mesh-editor-projection-mask--active' : ''}`}
-              />
-              <canvas ref={maskOverlayCanvasRef} className="mesh-editor-mask-overlay" />
-              {loading ? (
-                <div className="mesh-editor-empty-state">
-                  <span className="material-symbols-outlined mesh-editor-empty-state__icon">progress_activity</span>
-                  <span>Loading mesh editor...</span>
-                </div>
-              ) : geometry ? (
-                <>
-                  <Canvas
-                    key={contextRevision}
-                    shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false}
-                    resize={{ offsetSize: true }}
-                    style={{ width: '100%', height: '100%' }}
-                    gl={{ powerPreference: 'high-performance' }}
-                    onCreated={({ gl }) => {
-                      const canvas = gl.domElement
-                      const handleLost = (event) => {
-                        event.preventDefault()
-                        console.warn('WebGL context lost — awaiting restore.')
-                      }
-                      const handleRestored = () => {
-                        console.warn('WebGL context restored — rebuilding scene.')
-                        setContextRevision(rev => rev + 1)
-                      }
-                      canvas.addEventListener('webglcontextlost', handleLost, false)
-                      canvas.addEventListener('webglcontextrestored', handleRestored, false)
-                    }}
-                  >
-                    <PerspectiveCamera makeDefault position={[3, 3, 5]} near={0.0001} far={4000} />
-                    <ambientLight intensity={displayMode === 'sculpt' ? 0.42 : 1.25} />
-                    <directionalLight
-                      position={displayMode === 'sculpt' ? [5, 7, 4] : [5, 7, 9]}
-                      intensity={displayMode === 'sculpt' ? 2.2 : 2}
-                      castShadow={showShadows}
-                      shadow-mapSize-width={2048}
-                      shadow-mapSize-height={2048}
-                      shadow-bias={-0.00015}
-                      shadow-normalBias={0.04}
-                      shadow-camera-near={0.5}
-                      shadow-camera-far={120}
-                    />
-                    <directionalLight
-                      position={displayMode === 'sculpt' ? [-4, 2, -5] : [-5, 3, -4]}
-                      intensity={displayMode === 'sculpt' ? 0.7 : 0.6}
-                      color={displayMode === 'sculpt' ? '#ffffff' : '#8ff5ff'}
-                    />
-                    {activeMenu === 'autorig' && animPreview ? (
-                      <AnimatedMeshPreview
-                        object={animPreview.scene}
-                        mixerRoot={animPreview.skinnedMesh}
-                        clip={animPreview.clip}
-                        alignFloor={animAlignFloor}
-                        floorOffset={animPreview.floorOffset}
-                        armExtension={animArmExtension}
-                        armTargets={animArmTargets}
-                      />
-                    ) : (activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection' || activeMenu === 'optimize' || activeMenu === 'bake') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
-                      <TexturedMesh
-                        key={textureRevision}
-                        root={texturableMesh.root}
-                        textureKey={texturableMesh.textureKey}
-                        displayTexture={displayTextureRef.current}
-                        showShadows={showShadows}
-                        displayMode={displayMode}
-                        showWireframe={showWireframe}
-                      />
-                    ) : activeMenu === 'boolean' && booleanHasPreview && booleanMaskTexture ? (
-                      <BooleanPreviewMesh
-                        geometry={booleanPreviewGeometry || geometry}
-                        maskTexture={booleanMaskTexture}
-                        maskWidth={booleanBrushMaskRef.current?.width || 1}
-                        maskHeight={booleanBrushMaskRef.current?.height || 1}
-                        stampMatrix={booleanStampMatrix}
-                        operation={booleanOperation}
-                        size={booleanStampSize}
-                        depth={booleanStampDepth}
-                        offset={booleanStampOffset}
-                        threshold={24}
-                        previewColor={booleanPreviewColor}
-                        showShadows={showShadows}
-                      />
-                    ) : (
-                      <EditorMesh
-                        geometry={geometry}
-                        selectedFaceIndices={activeMenu === 'modeling' ? selectedFaceIndices : []}
-                        selectedVertexIndices={activeMenu === 'modeling' ? selectedVertexIndices : []}
-                        showShadows={showShadows}
-                        displayMode={displayMode}
-                        showWireframe={showWireframe}
-                      />
-                    )}
-                    {activeMenu === 'boolean' && booleanHasPreview && (!booleanMaskTexture || booleanPlaceMode) && (
-                      <group renderOrder={30}>
-                        <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
-                          <meshStandardMaterial
-                            color={booleanPreviewColor}
-                            emissive={booleanPreviewColor}
-                            emissiveIntensity={0.12}
-                            transparent
-                            opacity={0.14}
-                            metalness={0.05}
-                            roughness={0.45}
-                            depthTest
-                            depthWrite={false}
-                            side={THREE.DoubleSide}
-                          />
-                        </mesh>
-                        <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
-                          <meshBasicMaterial
-                            color="#ffffff"
-                            wireframe
-                            transparent
-                            opacity={0.18}
-                            depthTest
-                            depthWrite={false}
-                          />
-                        </mesh>
-                      </group>
-                    )}
-                    <SkeletonOverlay skeleton={skeleton} visible={showSkeleton && !animPreview} selectedBone={selectedBone} />
-                    {activeMenu === 'autorig' && rigEditing && rigEditable && showSkeleton && !animPreview && (
-                      <BoneTransformGizmo
-                        skeleton={skeleton}
-                        boneIndex={selectedBone}
-                        onDragStart={handleRigGizmoDragStart}
-                        onDrag={handleRigGizmoDrag}
-                        onDragEnd={handleRigGizmoDragEnd}
-                      />
-                    )}
-                    <Grid
-                      infiniteGrid
-                      fadeDistance={60}
-                      cellColor="#47484A"
-                      sectionColor="#AC89FF"
-                      sectionThickness={1.5}
-                      sectionSize={10}
-                    />
-                    <CameraRig
-                      geometry={geometry}
-                      frameKey={meshFrameKey}
-                      onCameraReady={camera => { cameraRef.current = camera }}
-                      controlsEnabled={activeMenu !== 'texturing' || !hasProjectionMask}
-                      allowPan={activeMenu !== 'projection' || !!projectionMaskEditLayerId}
-                      lockToCenter={activeMenu === 'projection' && !projectionMaskEditLayerId}
-                    />
-                  </Canvas>
-                  {selectionBox && activeMenu === 'modeling' && (
-                    <div
-                      className="mesh-editor-selection-box"
-                      style={{
-                        left: Math.min(selectionBox.startPoint.x, selectionBox.endPoint.x),
-                        top: Math.min(selectionBox.startPoint.y, selectionBox.endPoint.y),
-                        width: Math.max(1, Math.abs(selectionBox.endPoint.x - selectionBox.startPoint.x)),
-                        height: Math.max(1, Math.abs(selectionBox.endPoint.y - selectionBox.startPoint.y))
+            {/* Viewport column: the 3D canvas plus whatever docks under it. The
+                canvas shell has a fixed, viewport-derived height, so anything sharing
+                this column has to take its height OUT of the canvas — see
+                `--mesh-editor-anim-dock-height`. */}
+            <div className="mesh-editor-viewport">
+              <div
+                ref={canvasShellRef}
+                className={`mesh-editor-canvas-shell ${(activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection') ? 'mesh-editor-canvas-shell--texturing' : ''} ${animEditDocked ? 'mesh-editor-canvas-shell--docked' : ''}`}
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
+                onPointerCancel={handleCanvasPointerCancel}
+                onPointerLeave={() => { setPaintCursorPos(null); setSculptCursor(null); if (projectionMaskCursorRef.current) projectionMaskCursorRef.current.style.display = 'none'; }}
+              >
+                <canvas
+                  ref={projectionMaskCanvasRef}
+                  className={`mesh-editor-projection-mask ${activeMenu === 'texturing' && hasProjectionMask ? 'mesh-editor-projection-mask--active' : ''}`}
+                />
+                <canvas ref={maskOverlayCanvasRef} className="mesh-editor-mask-overlay" />
+                {loading ? (
+                  <div className="mesh-editor-empty-state">
+                    <span className="material-symbols-outlined mesh-editor-empty-state__icon">progress_activity</span>
+                    <span>Loading mesh editor...</span>
+                  </div>
+                ) : geometry ? (
+                  <>
+                    <Canvas
+                      key={contextRevision}
+                      shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false}
+                      resize={{ offsetSize: true }}
+                      style={{ width: '100%', height: '100%' }}
+                      gl={{ powerPreference: 'high-performance' }}
+                      onCreated={({ gl }) => {
+                        const canvas = gl.domElement
+                        const handleLost = (event) => {
+                          event.preventDefault()
+                          console.warn('WebGL context lost — awaiting restore.')
+                        }
+                        const handleRestored = () => {
+                          console.warn('WebGL context restored — rebuilding scene.')
+                          setContextRevision(rev => rev + 1)
+                        }
+                        canvas.addEventListener('webglcontextlost', handleLost, false)
+                        canvas.addEventListener('webglcontextrestored', handleRestored, false)
                       }}
-                    />
-                  )}
-                </>
-              ) : (
-                <div className="mesh-editor-empty-state">
-                  <span className="material-symbols-outlined mesh-editor-empty-state__icon">deployed_code_alert</span>
-                  <span>Mesh could not be loaded.</span>
-                </div>
-              )}
-              {activeMenu === 'sculpting' && sculptCursor && (
-                <div
-                  className="mesh-editor-paint-cursor mesh-editor-sculpt-cursor"
-                  style={{
-                    left: sculptCursor.x,
-                    top: sculptCursor.y,
-                    width: sculptCursor.pixelRadius * 2,
-                    height: sculptCursor.pixelRadius * 2
-                  }}
-                />
-              )}
-              {activeMenu === 'painting' && paintCursorPos && (
-                <div
-                  className="mesh-editor-paint-cursor"
-                  style={{
-                    left: paintCursorPos.x,
-                    top: paintCursorPos.y,
-                    width: paintBrushNaturalSize
-                      ? (paintBrushNaturalSize.width >= paintBrushNaturalSize.height
-                          ? paintBrushSize
-                          : paintBrushSize * (paintBrushNaturalSize.width / paintBrushNaturalSize.height))
-                      : paintBrushSize,
-                    height: paintBrushNaturalSize
-                      ? (paintBrushNaturalSize.height >= paintBrushNaturalSize.width
-                          ? paintBrushSize
-                          : paintBrushSize * (paintBrushNaturalSize.height / paintBrushNaturalSize.width))
-                      : paintBrushSize
-                  }}
-                />
-              )}
-              {activeMenu === 'projection' && projectionMaskEditLayerId && (
-                <div
-                  ref={projectionMaskCursorRef}
-                  className="mesh-editor-paint-cursor"
-                  style={{
-                    left: 0,
-                    top: 0,
-                    width: projectionMaskBrushSize,
-                    height: projectionMaskBrushSize,
-                    display: 'none'
-                  }}
-                />
-              )}
-              {/* Animated veil shown while a released mask stroke (or a Clear/Fill) is
-                  being applied. Drawing/clearing is blocked until it disappears. */}
-              {activeMenu === 'projection' && maskApplying && (
-                <div className="mesh-editor-mask-applying">
-                  <div className="mesh-editor-mask-applying__badge">
-                    <span className="material-symbols-outlined">brush</span>
-                    <span>Applying mask…</span>
+                    >
+                      <PerspectiveCamera makeDefault position={[3, 3, 5]} near={0.0001} far={4000} />
+                      <ambientLight intensity={displayMode === 'sculpt' ? 0.42 : 1.25} />
+                      <directionalLight
+                        position={displayMode === 'sculpt' ? [5, 7, 4] : [5, 7, 9]}
+                        intensity={displayMode === 'sculpt' ? 2.2 : 2}
+                        castShadow={showShadows}
+                        shadow-mapSize-width={2048}
+                        shadow-mapSize-height={2048}
+                        shadow-bias={-0.00015}
+                        shadow-normalBias={0.04}
+                        shadow-camera-near={0.5}
+                        shadow-camera-far={120}
+                      />
+                      <directionalLight
+                        position={displayMode === 'sculpt' ? [-4, 2, -5] : [-5, 3, -4]}
+                        intensity={displayMode === 'sculpt' ? 0.7 : 0.6}
+                        color={displayMode === 'sculpt' ? '#ffffff' : '#8ff5ff'}
+                      />
+                      {activeMenu === 'autorig' && animPreview ? (
+                        <AnimatedMeshPreview
+                          object={animPreview.scene}
+                          mixerRoot={animPreview.skinnedMesh}
+                          clip={animPreview.clip}
+                          // The dock owns the clock while it is open: paused and held at
+                          // one frame unless the user asks for playback.
+                          playing={!animEditOpen || animPlaying}
+                          time={animEditOpen && !animPlaying ? frameTime(animEditDescription, animEditFrame) : null}
+                          onPausedAt={handleAnimPausedAt}
+                          alignFloor={animAlignFloor}
+                          floorOffset={animPreview.floorOffset}
+                          armExtension={animArmExtension}
+                          armTargets={animArmTargets}
+                        />
+                      ) : (activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection' || activeMenu === 'optimize' || activeMenu === 'bake') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
+                        <TexturedMesh
+                          key={textureRevision}
+                          root={texturableMesh.root}
+                          textureKey={texturableMesh.textureKey}
+                          displayTexture={displayTextureRef.current}
+                          showShadows={showShadows}
+                          displayMode={displayMode}
+                          showWireframe={showWireframe}
+                        />
+                      ) : activeMenu === 'boolean' && booleanHasPreview && booleanMaskTexture ? (
+                        <BooleanPreviewMesh
+                          geometry={booleanPreviewGeometry || geometry}
+                          maskTexture={booleanMaskTexture}
+                          maskWidth={booleanBrushMaskRef.current?.width || 1}
+                          maskHeight={booleanBrushMaskRef.current?.height || 1}
+                          stampMatrix={booleanStampMatrix}
+                          operation={booleanOperation}
+                          size={booleanStampSize}
+                          depth={booleanStampDepth}
+                          offset={booleanStampOffset}
+                          threshold={24}
+                          previewColor={booleanPreviewColor}
+                          showShadows={showShadows}
+                        />
+                      ) : (
+                        <EditorMesh
+                          geometry={geometry}
+                          selectedFaceIndices={activeMenu === 'modeling' ? selectedFaceIndices : []}
+                          selectedVertexIndices={activeMenu === 'modeling' ? selectedVertexIndices : []}
+                          showShadows={showShadows}
+                          displayMode={displayMode}
+                          showWireframe={showWireframe}
+                        />
+                      )}
+                      {activeMenu === 'boolean' && booleanHasPreview && (!booleanMaskTexture || booleanPlaceMode) && (
+                        <group renderOrder={30}>
+                          <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
+                            <meshStandardMaterial
+                              color={booleanPreviewColor}
+                              emissive={booleanPreviewColor}
+                              emissiveIntensity={0.12}
+                              transparent
+                              opacity={0.14}
+                              metalness={0.05}
+                              roughness={0.45}
+                              depthTest
+                              depthWrite={false}
+                              side={THREE.DoubleSide}
+                            />
+                          </mesh>
+                          <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
+                            <meshBasicMaterial
+                              color="#ffffff"
+                              wireframe
+                              transparent
+                              opacity={0.18}
+                              depthTest
+                              depthWrite={false}
+                            />
+                          </mesh>
+                        </group>
+                      )}
+                      <SkeletonOverlay skeleton={skeleton} visible={showSkeleton && !animPreview} selectedBone={selectedBone} />
+                      {activeMenu === 'autorig' && rigEditing && rigEditable && showSkeleton && !animPreview && (
+                        <BoneTransformGizmo
+                          skeleton={skeleton}
+                          boneIndex={selectedBone}
+                          onDragStart={handleRigGizmoDragStart}
+                          onDrag={handleRigGizmoDrag}
+                          onDragEnd={handleRigGizmoDragEnd}
+                        />
+                      )}
+                      <Grid
+                        infiniteGrid
+                        fadeDistance={60}
+                        cellColor="#47484A"
+                        sectionColor="#AC89FF"
+                        sectionThickness={1.5}
+                        sectionSize={10}
+                      />
+                      <CameraRig
+                        geometry={geometry}
+                        frameKey={meshFrameKey}
+                        onCameraReady={camera => { cameraRef.current = camera }}
+                        controlsEnabled={activeMenu !== 'texturing' || !hasProjectionMask}
+                        allowPan={activeMenu !== 'projection' || !!projectionMaskEditLayerId}
+                        lockToCenter={activeMenu === 'projection' && !projectionMaskEditLayerId}
+                      />
+                    </Canvas>
+                    {selectionBox && activeMenu === 'modeling' && (
+                      <div
+                        className="mesh-editor-selection-box"
+                        style={{
+                          left: Math.min(selectionBox.startPoint.x, selectionBox.endPoint.x),
+                          top: Math.min(selectionBox.startPoint.y, selectionBox.endPoint.y),
+                          width: Math.max(1, Math.abs(selectionBox.endPoint.x - selectionBox.startPoint.x)),
+                          height: Math.max(1, Math.abs(selectionBox.endPoint.y - selectionBox.startPoint.y))
+                        }}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <div className="mesh-editor-empty-state">
+                    <span className="material-symbols-outlined mesh-editor-empty-state__icon">deployed_code_alert</span>
+                    <span>Mesh could not be loaded.</span>
                   </div>
-                </div>
-              )}
-              {/* Source image ComfyUI returned for the layer being masked — shown in
-                  the bottom-left so the user can reference it while drawing the mask. */}
-              {(() => {
-                if (activeMenu !== 'projection' || !projectionMaskEditLayerId) {
-                  return null
-                }
-                const layerData = projectionLayerDataRef.current.get(projectionMaskEditLayerId)
-                const sourceUrl = layerData?.generatedAsset ? buildAssetUrl(layerData.generatedAsset) : null
-                if (!sourceUrl) {
-                  return null
-                }
-                return (
-                  <div className="mesh-editor-projection-source-preview">
-                    <span className="mesh-editor-projection-source-preview__label">ComfyUI image</span>
-                    <img src={sourceUrl} alt="ComfyUI projection source" />
+                )}
+                {activeMenu === 'sculpting' && sculptCursor && (
+                  <div
+                    className="mesh-editor-paint-cursor mesh-editor-sculpt-cursor"
+                    style={{
+                      left: sculptCursor.x,
+                      top: sculptCursor.y,
+                      width: sculptCursor.pixelRadius * 2,
+                      height: sculptCursor.pixelRadius * 2
+                    }}
+                  />
+                )}
+                {activeMenu === 'painting' && paintCursorPos && (
+                  <div
+                    className="mesh-editor-paint-cursor"
+                    style={{
+                      left: paintCursorPos.x,
+                      top: paintCursorPos.y,
+                      width: paintBrushNaturalSize
+                        ? (paintBrushNaturalSize.width >= paintBrushNaturalSize.height
+                            ? paintBrushSize
+                            : paintBrushSize * (paintBrushNaturalSize.width / paintBrushNaturalSize.height))
+                        : paintBrushSize,
+                      height: paintBrushNaturalSize
+                        ? (paintBrushNaturalSize.height >= paintBrushNaturalSize.width
+                            ? paintBrushSize
+                            : paintBrushSize * (paintBrushNaturalSize.height / paintBrushNaturalSize.width))
+                        : paintBrushSize
+                    }}
+                  />
+                )}
+                {activeMenu === 'projection' && projectionMaskEditLayerId && (
+                  <div
+                    ref={projectionMaskCursorRef}
+                    className="mesh-editor-paint-cursor"
+                    style={{
+                      left: 0,
+                      top: 0,
+                      width: projectionMaskBrushSize,
+                      height: projectionMaskBrushSize,
+                      display: 'none'
+                    }}
+                  />
+                )}
+                {/* Animated veil shown while a released mask stroke (or a Clear/Fill) is
+                    being applied. Drawing/clearing is blocked until it disappears. */}
+                {activeMenu === 'projection' && maskApplying && (
+                  <div className="mesh-editor-mask-applying">
+                    <div className="mesh-editor-mask-applying__badge">
+                      <span className="material-symbols-outlined">brush</span>
+                      <span>Applying mask…</span>
+                    </div>
                   </div>
-                )
-              })()}
+                )}
+                {/* Source image ComfyUI returned for the layer being masked — shown in
+                    the bottom-left so the user can reference it while drawing the mask. */}
+                {(() => {
+                  if (activeMenu !== 'projection' || !projectionMaskEditLayerId) {
+                    return null
+                  }
+                  const layerData = projectionLayerDataRef.current.get(projectionMaskEditLayerId)
+                  const sourceUrl = layerData?.generatedAsset ? buildAssetUrl(layerData.generatedAsset) : null
+                  if (!sourceUrl) {
+                    return null
+                  }
+                  return (
+                    <div className="mesh-editor-projection-source-preview">
+                      <span className="mesh-editor-projection-source-preview__label">ComfyUI image</span>
+                      <img src={sourceUrl} alt="ComfyUI projection source" />
+                    </div>
+                  )
+                })()}
+              </div>
+
+              {/* Under the 3D view, inside the CANVAS column — not a sibling of the
+                  workspace grid. The grid is already as tall as the page (the canvas
+                  shell is clamped to ~100vh), so anything after it lands below the
+                  fold of a page that does not scroll. Here the canvas gives up the
+                  height instead, via `--mesh-editor-anim-dock-height`. */}
+              {animEditDocked && (
+                <AnimationEditPanel
+                  clipName={selectedAnimation}
+                  description={animEditDescription}
+                  clip={animPreview.clip}
+                  revision={animEditRevision}
+                  frame={animEditFrame}
+                  onFrameChange={setAnimEditFrame}
+                  playing={animPlaying}
+                  onTogglePlay={() => setAnimPlaying(p => !p)}
+                  selectedBone={animEditBone}
+                  onSelectBone={handleAnimEditSelectBone}
+                  scope={animEditScope}
+                  onScopeChange={setAnimEditScope}
+                  span={animEditSpan}
+                  onSpanChange={setAnimEditSpan}
+                  onEdit={handleAnimEditValue}
+                  edited={animEditedClips.has(selectedAnimation)}
+                  onRevert={handleAnimRevertEdits}
+                  canUndo={animEditUndoCount > 0}
+                  canRedo={animEditRedoCount > 0}
+                  onUndo={() => stepAnimEditHistory('undo')}
+                  onRedo={() => stepAnimEditHistory('redo')}
+                  onClose={handleToggleAnimEdit}
+                />
+              )}
             </div>
 
             {activeMenu === 'autorig' && skeleton && (
@@ -8945,6 +9182,7 @@ export default function MeshEditorPage() {
                       </div>
                     )}
 
+
                     {/* ── Seam Smoothing ── */}
                     <label className="post-proc-panel__section-toggle">
                       <input
@@ -8990,7 +9228,6 @@ export default function MeshEditorPage() {
                         </div>
                       </>
                     )}
-
                     <div className="post-proc-panel__actions">
                       <button
                         type="button"

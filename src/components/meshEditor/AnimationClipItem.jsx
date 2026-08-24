@@ -3,7 +3,7 @@
 // the corner checkbox marks it for inclusion when the mesh is saved.
 import { useRef, useState } from 'react'
 
-export default function AnimationClipItem({ name, previewUrl, selected, busy, checked, onSelect, onToggleChecked }) {
+export default function AnimationClipItem({ name, previewUrl, selected, busy, checked, edited, onSelect, onToggleChecked }) {
   const videoRef = useRef(null)
   const [failed, setFailed] = useState(false)
 
@@ -57,6 +57,16 @@ export default function AnimationClipItem({ name, previewUrl, selected, busy, ch
         )}
         {selected && !busy && (
           <span className="material-symbols-outlined mesh-editor-anim-item__playing">play_arrow</span>
+        )}
+        {/* Hand-edited clips are no longer rebaked, so the bake toggles appear to
+            do nothing to them — say which ones those are. */}
+        {edited && (
+          <span
+            className="material-symbols-outlined mesh-editor-anim-item__edited"
+            title="Hand-edited — the bake settings no longer apply to this clip"
+          >
+            tune
+          </span>
         )}
       </div>
       <span className="mesh-editor-anim-item__name">{name}</span>
