@@ -377,6 +377,15 @@
       "position": 9,
       "createdAt": 1787038770610,
       "updatedAt": 1787038780405
+    },
+    {
+      "id": 43,
+      "parentId": 32,
+      "title": "Kimodo",
+      "icon": "description",
+      "position": 2,
+      "createdAt": 1787566174502,
+      "updatedAt": 1787566182700
     }
   ]
 }
