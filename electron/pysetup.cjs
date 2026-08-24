@@ -337,7 +337,7 @@ async function setupSkintokens({ uv, serviceDir, venvDir, dataDir, onProgress })
 //   - the vendored package installs with --no-deps: its pyproject pulls the
 //     interactive demo's stack (gradio, viser, mujoco) this headless service
 //     never imports.
-async function setupKimodo({ uv, serviceDir, venvDir, dataDir, modelsDir, llamaBase, onProgress }) {
+async function setupKimodo({ uv, appRoot, serviceDir, venvDir, dataDir, modelsDir, llamaBase, onProgress }) {
   // Kimodo needs an NVIDIA GPU. Say so before, not several GB into, a torch
   // install that has no macOS CUDA build to find.
   if (IS_MAC) {
@@ -409,14 +409,25 @@ async function setupKimodo({ uv, serviceDir, venvDir, dataDir, modelsDir, llamaB
     }
   }
 
-  // Optional: the C++ foot-skate cleanup. Needs CMake + a C++17 compiler, which
-  // most machines do not have, and the service runs fine without it — generation
-  // just skips post-processing. Never fatal.
-  onProgress({ kind: 'phase', phase: 'Building MotionCorrection (optional)', pct: 0.5 });
+  // The C++ foot-skate cleanup (`motion_correction`). Building it from source needs
+  // CMake, a C++17 compiler, Python headers AND git + network access (its CMakeLists
+  // fetches pybind11 and Eigen) — a combination almost no end user has, which is why
+  // a prebuilt wheel is tried first and the source build is only the fallback.
+  //
+  // Never fatal either way: without it the service still generates motion, it just
+  // reports `postprocess_unavailable` and skips the cleanup.
+  onProgress({ kind: 'phase', phase: 'Installing MotionCorrection (foot-skate cleanup)', pct: 0.5 });
   {
-    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', path.join(serviceDir, 'MotionCorrection')], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
-    if (r.code !== 0) {
-      onProgress({ kind: 'log', text: '\nMotionCorrection did not build (needs CMake + a C++17 compiler). The service still works; foot-skate post-processing is disabled.\n' });
+    const installed = await installPrebuiltWheel({
+      uv, vp, appRoot, package: 'motion_correction', env,
+      onLine: (t) => onProgress({ kind: 'log', text: t }),
+    });
+    if (!installed) {
+      onProgress({ kind: 'phase', phase: 'Building MotionCorrection from source (optional)', pct: 0.52 });
+      const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', path.join(serviceDir, 'MotionCorrection')], { cwd: serviceDir, env, onLine: (t) => onProgress({ kind: 'log', text: t }) });
+      if (r.code !== 0) {
+        onProgress({ kind: 'log', text: '\nMotionCorrection is not installed: no prebuilt wheel matched this platform and the source build failed (it needs CMake, a C++17 compiler, and git + network access for pybind11/Eigen). The service still works — generation just skips foot-skate cleanup.\n' });
+      }
     }
   }
 
@@ -443,6 +454,61 @@ async function setupKimodo({ uv, serviceDir, venvDir, dataDir, modelsDir, llamaB
   fs.writeFileSync(depsMarker(venvDir), new Date().toISOString());
   onProgress({ kind: 'phase', phase: 'Motion generation ready', pct: 1 });
   onProgress({ kind: 'done' });
+}
+
+// Install a wheel we shipped for this platform, if one matches.
+//
+// Matching is left to uv/pip: a wheel's filename encodes the Python ABI and the
+// platform (`…-cp313-cp313-win_amd64.whl`), and installing a mismatched one is
+// refused rather than silently wrong. So each candidate is simply attempted, and the
+// IMPORT is what decides success — a wheel can install and still fail to load (a
+// missing system library, the wrong glibc), and quietly leaving that broken would be
+// worse than falling back to a source build.
+//
+// Returns true only when the module actually imports.
+async function installPrebuiltWheel({ uv, vp, appRoot, package: pkg, env, onLine }) {
+  const dir = appRoot ? path.join(appRoot, 'resources', 'wheels', pkg) : null;
+  const emit = (s) => { if (onLine) try { onLine(s); } catch { /* ignore */ } };
+  let wheels = [];
+  try {
+    wheels = fs.readdirSync(dir)
+      .filter((f) => f.toLowerCase().endsWith('.whl'))
+      // Prefer the ones whose platform tag mentions this OS, but try the rest too:
+      // the tag vocabulary (manylinux_x_y, musllinux, …) is not ours to parse.
+      .sort((a, b) => platformScore(b) - platformScore(a));
+  } catch { /* no wheels shipped for this package */ }
+  if (!wheels.length) {
+    emit(`No prebuilt ${pkg} wheel is bundled for this platform.\n`);
+    return false;
+  }
+
+  for (const wheel of wheels) {
+    const r = await runStream(uv, ['pip', 'install', '--python', vp, '--no-deps', path.join(dir, wheel)], { env, onLine });
+    if (r.code !== 0) continue;
+    const probe = await runStream(vp, ['-c', `import ${pkg}; print("${pkg} ok")`], { env, onLine });
+    if (probe.code === 0) {
+      emit(`Installed the prebuilt ${wheel} — no compiler needed.\n`);
+      return true;
+    }
+    // Installed but unusable: take it back out so a later source build is not
+    // shadowed by a broken module.
+    emit(`${wheel} installed but could not be imported on this machine; removing it.\n`);
+    await runStream(uv, ['pip', 'uninstall', '--python', vp, pkg], { env, onLine });
+  }
+  return false;
+}
+
+// Ranking, not filtering: uv is the authority on whether a wheel is installable, so
+// this only decides what to TRY FIRST. On Linux a `manylinux_*` wheel outranks a bare
+// `linux_x86_64` one, which carries the glibc of whatever machine built it — a wheel
+// built on Ubuntu 26.04 requires GLIBC_2.43 and will not load on 24.04 or older, so
+// trying it first would cost an install-and-uninstall round trip on most machines.
+function platformScore(wheel) {
+  const name = wheel.toLowerCase();
+  if (IS_WIN) return name.includes('win') ? 1 : 0;
+  if (IS_MAC) return name.includes('macos') ? 1 : 0;
+  if (name.includes('manylinux') || name.includes('musllinux')) return 2;
+  return name.includes('linux') ? 1 : 0;
 }
 
 // Remap a child onProgress event's pct into a [lo, hi] slice of the parent bar.
@@ -557,6 +623,9 @@ module.exports = {
   venvPython,
   isReady,
   ensureUv,
+  // Exported for the wheel-vs-source check: it decides whether a feature works on a
+  // machine with no compiler, so it is worth being able to test on its own.
+  installPrebuiltWheel,
   setupPythonServer,
   setupSkintokens,
   setupKimodo,

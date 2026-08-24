@@ -24,7 +24,7 @@ run_server.bat        # Windows
 ```
 
 First run provisions Python 3.13 via `uv`, installs `requirements.txt`, picks a
-CUDA-matched torch, installs the vendored package, builds `MotionCorrection`, and
+CUDA-matched torch, installs the vendored package, installs `MotionCorrection`, and
 downloads the weights. Afterwards it just starts the service.
 
 Configure the URL/port in **Settings → Motion Generation (Python) Connection**.
@@ -152,11 +152,26 @@ transformers graph, keeping bidirectional attention and PEFT intact.
 
 ## MotionCorrection is optional
 
-The C++/pybind11 foot-skate cleanup needs CMake and a C++17 compiler. If it did
-not build, the service starts anyway, `/health` reports
-`"motion_correction": false`, and generation skips post-processing (expect some
-foot sliding). To add it later:
+The C++/pybind11 foot-skate cleanup is installed from a **prebuilt wheel** in
+`resources/wheels/motion_correction/` when one matches the platform — that is the
+normal path, and it needs no compiler. `run_server.bat` / `run_server.sh` and the
+desktop installer all try the wheel first and only then fall back to building from
+source, which needs CMake, a C++17 compiler **and** git + network access (the
+CMakeLists fetches pybind11 and Eigen).
+
+If neither works the service starts anyway, `/health` reports
+`"motion_correction": false`, and generation skips post-processing (expect some foot
+sliding). To add it later, either install a wheel:
+
+```
+uv pip install --no-deps ../../resources/wheels/motion_correction/<matching>.whl
+```
+
+…or build it:
 
 ```
 pip install --no-deps ./MotionCorrection
 ```
+
+See `resources/wheels/motion_correction/README.md` for how the wheels are built and
+which platforms each one covers.

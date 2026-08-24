@@ -70,6 +70,10 @@ files:
   # Bundled reference animation library (mesh2motion, MIT) served at /resources:
   # skinned animation GLBs, mp4 clip previews, and the clean skeleton-only rig
   # GLBs used by the Auto Rig → Animations bone-mapping 3D views.
+  # Prebuilt motion_correction wheels (foot-skate cleanup). ~360 KB each and they
+  # replace a from-source CMake build that needs a C++ compiler, so shipping them is
+  # the difference between the feature working and being silently skipped.
+  - resources/wheels/**/*
   - resources/animations/**/*
   - resources/animpreviews/**/*
   - resources/rigs/**/*

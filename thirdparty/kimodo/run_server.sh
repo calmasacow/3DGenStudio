@@ -66,12 +66,40 @@ setup() {
   echo "Installing the vendored Kimodo package..."
   SKIP_MOTION_CORRECTION_IN_SETUP=1 "$UV" pip install --no-deps -e .
 
+  # MotionCorrection (the C++ foot-skate cleanup): prebuilt wheel first, source
+  # build second. Building needs CMake, a C++17 compiler AND git + network access
+  # (its CMakeLists fetches pybind11 and Eigen), so the wheel is what makes this
+  # work on a machine that has none of them.
+  #
+  # manylinux/musllinux wheels are tried before a bare linux_x86_64 one, which
+  # carries the glibc of whatever machine built it. And the IMPORT decides success,
+  # not the install: a wheel can install and still fail to load, and leaving that in
+  # place would shadow the source build with a broken module.
   echo
-  echo "Building MotionCorrection (foot-skate cleanup; optional)..."
-  if ! "$UV" pip install --no-deps ./MotionCorrection; then
-    echo "[warn] MotionCorrection did not build -- needs CMake + a C++17 compiler"
-    echo "       (build-essential + cmake)."
-    echo "       The service still works; foot-skate post-processing is disabled."
+  echo "Installing MotionCorrection (foot-skate cleanup; optional)..."
+  MC_WHEELS="$(cd ../.. && pwd)/resources/wheels/motion_correction"
+  mc_ok=""
+  for whl in "$MC_WHEELS"/*manylinux*.whl "$MC_WHEELS"/*musllinux*.whl "$MC_WHEELS"/*linux_x86_64.whl; do
+    [ -f "$whl" ] || continue
+    echo "  trying prebuilt $(basename "$whl")"
+    if "$UV" pip install --no-deps "$whl" >/dev/null 2>&1 \
+       && python -c "import motion_correction" >/dev/null 2>&1; then
+      mc_ok=1
+      break
+    fi
+    echo "  [warn] $(basename "$whl") installed but could not be imported here; removing it."
+    "$UV" pip uninstall motion_correction >/dev/null 2>&1 || true
+  done
+  if [ -n "$mc_ok" ]; then
+    echo "MotionCorrection installed from a prebuilt wheel -- no compiler needed."
+  else
+    echo "No usable prebuilt wheel found; building MotionCorrection from source..."
+    if ! "$UV" pip install --no-deps ./MotionCorrection; then
+      echo "[warn] MotionCorrection is not installed. Building it needs cmake, a C++17"
+      echo "       compiler (build-essential) and git + network access for"
+      echo "       pybind11/Eigen. The service still works; foot-skate"
+      echo "       post-processing is disabled."
+    fi
   fi
 
   echo

@@ -10,9 +10,11 @@
 :: its own pyproject: the vendored pyproject pulls the interactive demo's stack
 :: (gradio, viser, trimesh, mujoco) that this headless service never imports.
 ::
-:: MotionCorrection (the C++/pybind11 foot-skate cleanup) is built SEPARATELY and
-:: is allowed to fail: it needs CMake + a C++17 compiler, and the service runs
-:: fine without it -- generation just skips post-processing.
+:: MotionCorrection (the C++/pybind11 foot-skate cleanup) is installed SEPARATELY
+:: from a prebuilt wheel in resources/wheels/, falling back to a source build. Both
+:: are allowed to fail: building needs CMake, a C++17 compiler AND git + network
+:: (its CMakeLists fetches pybind11 and Eigen), and the service runs fine without
+:: it -- generation just skips post-processing.
 ::
 :: Env overrides:
 ::   KIMODO_PORT=8400           bind port (also KIMODO_HOST)
@@ -110,13 +112,41 @@ set "SKIP_MOTION_CORRECTION_IN_SETUP=1"
 "%UV%" pip install --no-deps -e . || exit /b 1
 
 :: --- MotionCorrection (optional) --------------------------------------------
+:: Prebuilt wheel first, source build second. The wheel in resources/wheels/ is
+:: built with a static CRT so it needs no Visual C++ redistributable, and it is what
+:: makes this step work on a machine with no compiler at all.
+::
+:: The IMPORT is what decides success, not the install: a wheel can install and
+:: still fail to load (wrong ABI, missing system library), and leaving that in place
+:: would shadow the source build with a broken module.
 echo.
-echo Building MotionCorrection ^(foot-skate cleanup; optional^)...
-"%UV%" pip install --no-deps .\MotionCorrection
-if errorlevel 1 (
-  echo [warn] MotionCorrection did not build -- needs CMake + a C++17 compiler
-  echo        ^(Visual Studio Build Tools or MinGW-w64^).
-  echo        The service still works; foot-skate post-processing is disabled.
+set "MC_WHEELS=%~dp0..\..\resources\wheels\motion_correction"
+set "MC_OK="
+for %%f in ("%MC_WHEELS%\*win_amd64.whl") do (
+  if not defined MC_OK (
+    echo Installing prebuilt %%~nxf ...
+    "%UV%" pip install --no-deps "%%~ff" >nul 2>nul
+    if not errorlevel 1 (
+      python -c "import motion_correction" >nul 2>nul
+      if not errorlevel 1 set "MC_OK=1"
+    )
+    if not defined MC_OK (
+      echo [warn] %%~nxf installed but could not be imported here; removing it.
+      "%UV%" pip uninstall motion_correction >nul 2>nul
+    )
+  )
+)
+if defined MC_OK (
+  echo MotionCorrection installed from a prebuilt wheel -- no compiler needed.
+) else (
+  echo No usable prebuilt wheel found; building MotionCorrection from source...
+  "%UV%" pip install --no-deps .\MotionCorrection
+  if errorlevel 1 (
+    echo [warn] MotionCorrection is not installed. Building it needs CMake, a C++17
+    echo        compiler ^(Visual Studio Build Tools or MinGW-w64^) and git + network
+    echo        access for pybind11/Eigen. The service still works; foot-skate
+    echo        post-processing is disabled.
+  )
 )
 
 :: --- weights ----------------------------------------------------------------

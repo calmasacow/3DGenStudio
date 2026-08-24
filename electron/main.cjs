@@ -735,7 +735,9 @@ async function doSetup(opts, send) {
       modelsDir = String(settings?.apis?.motiontools?.modelsPath || '').trim() || null;
     } catch { /* fall back to the default folder under MOTION_DATA */ }
     await setupKimodo({
-      uv, serviceDir: KIMODO_DIR, venvDir: MOTION_VENV, dataDir: MOTION_DATA,
+      // appRoot: where the prebuilt motion_correction wheels ship
+      // (resources/wheels/), so the foot-skate cleanup does not need a compiler.
+      uv, appRoot: APP_ROOT, serviceDir: KIMODO_DIR, venvDir: MOTION_VENV, dataDir: MOTION_DATA,
       modelsDir, llamaBase: LLAMA_BASE,
       onProgress: (e) => send({ service: 'motion', ...e }),
     });
