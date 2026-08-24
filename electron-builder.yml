@@ -53,6 +53,11 @@ files:
   - mcp/**/*
   - version.json
   - package.json
+  # Licences shown in-app. META-LLAMA-3-LICENSE is not documentation: the motion
+  # installer displays it and will not proceed until it is accepted, so a missing
+  # file would leave Kimodo uninstallable in a packaged build.
+  - LICENSE
+  - META-LLAMA-3-LICENSE
   - dist/**/*
   - electron/**/*
   # App icon shown on the splash/setup windows (electron/splash.html loads it

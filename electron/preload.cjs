@@ -68,6 +68,13 @@ contextBridge.exposeInMainWorld('genStudioSetup', {
     ipcRenderer.on('setup:progress', handler);
     return () => ipcRenderer.removeListener('setup:progress', handler);
   },
+  // Meta Llama 3 licence, which the motion service's text encoder is built on.
+  // Installing it is gated on acceptance in the main process, so both installers
+  // (first-run window and Settings) show the same text and record the same consent.
+  //   llamaLicense       -> { ok, accepted, text }
+  //   acceptLlamaLicense -> { ok, accepted }
+  llamaLicense: () => ipcRenderer.invoke('license:llama3'),
+  acceptLlamaLicense: () => ipcRenderer.invoke('license:llama3-accept'),
   // Tell the main process the user is done and the app can launch (first-run window).
   finish: () => ipcRenderer.send('setup:finish'),
 });

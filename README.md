@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-08-24** | Animations: Integrated Kimodo<br>MCP: Added support for Tags<br>ComfyUI: Updated dependencies and nodes<br>QwenVL: Added new models |
 | **2026-08-21** | Assets: Can tag assets<br>Uninstaller: Can delete your data<br>Hitem3D: Added v3.0 model<br>TripoAI: Added 8K "extreme" texture quality<br>Graph: Added missing labels for external APIs<br>Optimize and LOD export: Added more options |
 | **2026-08-19** | Bake mode: Fixed colour too dark<br>Installer: Fixed process still open<br>Updated MCP |
 | **2026-08-18** | MeshEditor new modes: Bake and Game-Ready<br>Export: Can export LOD and Collision Mesh<br>Animations: Improved human retargeting<br>Desktop App: Can see logs<br>Fixed Z-Image Turbo VAE download<br>Auto-Rig: Can edit/add/delete bones. |
@@ -128,7 +129,10 @@ Each stage feeds the next. Use **ComfyUI** workflows or external APIs at any ste
 6. **Projection:** With ComfyUI, project views on the mesh to get higher texture quality.
 7. **Auto UV:** Automatically unwrap your mesh to generate clean UV coordinates.
 8. **Auto Retopo:** Automatically retopologize your mesh for a cleaner, optimized topology (with non-manifold edge cleanup).
-9. **Auto Rig:** Automatically generate a skeleton and skin weights for your mesh using AI.
+9. **Auto Rig:** Automatically generate a skeleton and skin weights for your mesh using AI, retarget reference animations onto it, or generate one from a text prompt with **Kimodo** (see licensing below).
+10. **Optimize / LOD:** Reduce triangles, generate an LOD chain and convex collision hulls.
+11. **Bake:** Bake normal / AO / position maps between meshes.
+12. **Game-Ready:** Check the mesh against engine budgets — triangles, topology, UVs, materials, scale and pivot.
 
 ---
 
@@ -302,6 +306,57 @@ A complete Wiki is included with the application.
 - [**SkinTokens**](https://github.com/VAST-AI-Research/SkinTokens) — used in **Auto Rig** for AI-powered skeleton generation and skinning.
 - [**mesh2motion-app**](https://github.com/Mesh2Motion/mesh2motion-app) — used in **Auto Rig** for skeleton/animation reference.
 - [**excalidraw**](https://github.com/excalidraw/excalidraw) — used for Brainstorming Boards.
+- [**kimodo**](https://github.com/nv-tlabs/kimodo) — used for text-to-motion.
+
+---
+
+## ⚖️ Kimodo & Meta Llama 3 licensing
+
+**Built with Meta Llama 3.**
+
+Motion generation (**Mesh Editor → Auto Rig → Kimodo**) is optional and off by
+default. If you install it, be aware of what it pulls in and under which terms.
+
+| Component | Source | License |
+| :--- | :--- | :--- |
+| Kimodo | [nv-tlabs/kimodo](https://github.com/nv-tlabs/kimodo) | Apache&nbsp;2.0 — `thirdparty/kimodo/LICENSE` |
+| Kimodo-SOMA checkpoint (~1.1&nbsp;GB) | [nvidia/Kimodo-SOMA-RP-v1.1](https://huggingface.co/nvidia/Kimodo-SOMA-RP-v1.1) | NVIDIA's model card terms |
+| LLM2Vec | [McGill-NLP/llm2vec](https://github.com/McGill-NLP/llm2vec) | MIT — `thirdparty/kimodo/ATTRIBUTIONS.MD` |
+| **Meta Llama&nbsp;3-8B-Instruct (~16&nbsp;GB)** | Hugging Face | **[Meta Llama 3 Community License](META-LLAMA-3-LICENSE)** |
+
+Kimodo turns your prompt into a motion embedding with **LLM2Vec**, which is built on
+**Meta Llama 3** — so installing motion generation downloads Meta Llama 3-8B-Instruct
+weights, and your use of them is governed by Meta's license.
+
+### What that means for you
+
+- **You must accept the license before installing.** The desktop installer shows the
+  full text when you tick *Motion Generation (Kimodo)* and will not proceed until you
+  accept; the same gate is in **Settings → Mesh Tools → Motion Generation**. The
+  acceptance is recorded in the app's data folder.
+- **The weights are not redistributed by this project.** 3D Gen Studio ships no Llama
+  weights: they are downloaded from Hugging Face, by you, onto your machine, when you
+  opt in.
+- **Attribution.** If you redistribute the Llama Materials or build a product on them,
+  the license requires you to display *"Built with Meta Llama 3"*, to ship a copy of
+  the agreement, and to prefix any AI model you distribute that was created with them
+  with *"Llama 3"*.
+- **Acceptable use.** Your use must follow Meta's
+  [Acceptable Use Policy](https://llama.meta.com/llama3/use-policy).
+- **Large operators.** If your products had more than 700 million monthly active users
+  in the month before the Llama 3 release date, you need a separate license from Meta.
+- **No warranty.** The Llama Materials are provided "as is" — see sections 3 and 4 of
+  the agreement.
+
+> Meta Llama 3 is licensed under the Meta Llama 3 Community License, Copyright ©
+> Meta Platforms, Inc. All Rights Reserved.
+
+The complete agreement ships with the app and is in this repository as
+[`META-LLAMA-3-LICENSE`](META-LLAMA-3-LICENSE); Meta publishes it at
+<https://llama.meta.com/llama3/license>.
+
+If you would rather not accept it, leave Kimodo uninstalled — every other feature,
+including **Auto Rig** and the reference **Animations** library, works without it.
 
 ---
 

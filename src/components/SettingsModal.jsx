@@ -392,6 +392,86 @@ function AutoStartToggle({ checked, onChange, warning }) {
 // same uv provisioning as the first-run window via the genStudioSetup bridge and
 // shows live progress. Renders nothing outside the desktop app.
 //
+// Meta Llama 3 licence gate for the motion service. Kimodo's text encoder is LLM2Vec
+// over Meta Llama 3, so installing it downloads Meta Llama 3 weights — which Meta
+// licenses under an agreement the user has to accept.
+//
+// This is the SECOND place the motion service can be installed from (the first-run
+// setup window is the other), and the main process refuses the install until the
+// acceptance is recorded — so the gate has to exist here too, not just there.
+function LlamaLicenseGate({ onChange }) {
+  const bridge = typeof window !== 'undefined' ? window.genStudioSetup : null
+  const isDesktop = typeof window !== 'undefined' && window.genStudioDesktop?.isDesktop && bridge
+  const [state, setState] = useState(null)      // { accepted, text }
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!isDesktop) return undefined
+    let alive = true
+    bridge.llamaLicense()
+      .then(res => { if (alive) { setState(res || null); onChange?.(!!res?.accepted) } })
+      .catch(() => {})
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDesktop, bridge])
+
+  if (!isDesktop || !state) return null
+
+  const accept = async () => {
+    setError('')
+    try {
+      const res = await bridge.acceptLlamaLicense()
+      if (!res?.accepted) throw new Error('The acceptance could not be saved.')
+      setState(prev => ({ ...prev, accepted: true }))
+      onChange?.(true)
+      setOpen(false)
+    } catch (e) {
+      setError(e?.message || 'The acceptance could not be saved.')
+    }
+  }
+
+  return (
+    <div className="settings-license">
+      <p className="settings-helper-text">
+        <b>Built with Meta Llama 3.</b> Kimodo encodes your prompt with LLM2Vec, which is built on
+        Meta Llama 3, so installing motion generation downloads Meta Llama 3-8B-Instruct
+        (~16 GB) from Hugging Face. Meta licenses those weights under the Meta Llama 3
+        Community License.
+      </p>
+      <div className="settings-license__row">
+        {state.accepted ? (
+          <span className="settings-license__ok">
+            <span className="material-symbols-outlined">check_circle</span>
+            Meta Llama 3 Community License accepted
+          </span>
+        ) : (
+          <label className="settings-license__accept">
+            <input type="checkbox" checked={false} onChange={() => setOpen(true)} />
+            I accept the Meta Llama 3 Community License
+          </label>
+        )}
+        <button type="button" className="settings-license__link" onClick={() => setOpen(o => !o)}>
+          {open ? 'Hide the licence' : 'Read the licence'}
+        </button>
+      </div>
+      {open && (
+        <>
+          <pre className="settings-license__text">
+            {state.text || 'The licence file could not be read. The full text is at https://llama.meta.com/llama3/license'}
+          </pre>
+          {!state.accepted && (
+            <button type="button" className="settings-btn-primary" onClick={accept}>
+              I Accept
+            </button>
+          )}
+        </>
+      )}
+      {error && <p className="settings-helper-text" style={{ color: 'var(--error)' }}>{error}</p>}
+    </div>
+  )
+}
+
 // `service` is the key both setup:run and setup:status use ('rigging' | 'motion'
 // | 'comfyui').
 // `availableKey` (optional) names a setup:status flag that must be true for the
@@ -400,7 +480,10 @@ function AutoStartToggle({ checked, onChange, warning }) {
 // `onInstalled` lets the parent re-read the settings the main process wrote during
 // the install (the managed ComfyUI sets path/modelsPath/port/managed), so the open
 // form doesn't keep — and later save — its pre-install copy.
-function ServiceInstaller({ service, buttonLabel, readyText, note, availableKey, unavailableText, onInstalled }) {
+// `blockedReason` (optional) disables the button and says why — used for the motion
+// service, whose install the main process refuses until the Meta Llama 3 licence has
+// been accepted (see LlamaLicenseGate below).
+function ServiceInstaller({ service, buttonLabel, readyText, note, availableKey, unavailableText, onInstalled, blockedReason }) {
   const bridge = typeof window !== 'undefined' ? window.genStudioSetup : null
   const isDesktop = typeof window !== 'undefined' && window.genStudioDesktop?.isDesktop && bridge
   const [status, setStatus] = useState(null)
@@ -427,6 +510,7 @@ function ServiceInstaller({ service, buttonLabel, readyText, note, availableKey,
   if (!isDesktop) return null
 
   const handleInstall = async () => {
+    if (blockedReason) { setError(blockedReason); return }
     setError(''); setRunning(true); setPhase('Starting…'); setPct(0)
     try {
       const res = await bridge.run({ [service]: true })
@@ -467,7 +551,8 @@ function ServiceInstaller({ service, buttonLabel, readyText, note, availableKey,
       <button
         type="button"
         onClick={handleInstall}
-        disabled={running}
+        title={blockedReason || undefined}
+        disabled={running || !!blockedReason}
         style={{
           fontFamily: 'inherit', fontSize: '13px', fontWeight: 600,
           cursor: running ? 'default' : 'pointer', opacity: running ? 0.6 : 1,
@@ -537,6 +622,9 @@ export default function SettingsModal({ onClose }) {
   const { settings, updateSettings, addCustomApi, refreshSettings } = useSettings()
   const [localSettings, setLocalSettings] = useState(settings)
   const [activeTab, setActiveTab] = useState('apis')
+  // Whether the Meta Llama 3 licence has been accepted — the motion installer is
+  // blocked until it is (the main process enforces the same rule).
+  const [llamaAccepted, setLlamaAccepted] = useState(false)
   const [showAddCustom, setShowAddCustom] = useState(false)
   const [newCustom, setNewCustom] = useState({ name: '', url: '', headers: '', body: '', type: 'image-generation' })
 
@@ -1277,11 +1365,13 @@ export default function SettingsModal({ onClose }) {
                   minutes idle, so the GPU stays free for rigging and ComfyUI.
                   Outside the desktop app, start it from thirdparty/kimodo/run_server.
                 </p>
+                <LlamaLicenseGate onChange={setLlamaAccepted} />
                 <ServiceInstaller
                   service="motion"
                   buttonLabel="Install motion service"
                   readyText="Motion service is installed and ready."
                   note="One-time install; downloads ~17 GB and needs an NVIDIA GPU."
+                  blockedReason={llamaAccepted ? '' : 'Accept the Meta Llama 3 Community License above first — the text encoder downloads Meta Llama 3 weights.'}
                 />
                 <ServiceControl name="motion" />
                 <AutoStartToggle

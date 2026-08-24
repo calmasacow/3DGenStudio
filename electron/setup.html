@@ -21,8 +21,19 @@
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .sub { font-size: 12.5px; color: var(--muted); margin-top: -8px; }
-  .services { display: flex; flex-direction: column; gap: 10px; }
+  .head { flex: none; }
+  /* Takes whatever is left and scrolls. `min-height: 0` is what allows a flex item
+     to shrink below its content — without it the list pushes the footer (and the
+     install button) off the bottom of a window that cannot scroll. */
+  .services {
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    display: flex; flex-direction: column; gap: 10px; padding-right: 4px;
+  }
   .svc {
+    /* `flex: none` matters: as shrinkable items of the scrolling column the cards
+       compressed to fit instead of letting the list scroll, which squeezed the text
+       and progress bars rather than giving them a scrollbar. */
+    flex: none;
     border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
     background: var(--card); display: flex; flex-direction: column; gap: 8px;
   }
@@ -40,13 +51,34 @@
     background: linear-gradient(90deg, var(--accent1), var(--accent2)); transition: width .3s; }
   label.opt { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
   label.opt input { accent-color: var(--accent1); width: 15px; height: 15px; }
+  /* Fixed slice of the window, not `flex: 1`: as a flex item competing with the
+     service list it was handed zero height in an already-overflowing page, which is
+     why "Show details" appeared to do nothing. */
   .log {
-    flex: 1; min-height: 90px; border: 1px solid var(--line); border-radius: 10px;
+    flex: none; height: 200px; border: 1px solid var(--line); border-radius: 10px;
     background: #0a0c11; color: #9aa3b2; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 11px; line-height: 1.45; padding: 10px 12px; overflow-y: auto; white-space: pre-wrap;
     display: none;
   }
-  .row { display: flex; align-items: center; gap: 12px; }
+  /* A short window (the user shrank it, or a small laptop screen) cannot afford
+     200px of log AND a usable service list. Measured: at the 460px minimum the list
+     drops to 58px with a 200px log, and to ~128px with this. */
+  @media (max-height: 560px) {
+    .log { height: 130px; }
+    body { padding: 18px 24px; gap: 12px; }
+  }
+  .row { flex: none; display: flex; align-items: center; gap: 12px; }
+  .err { flex: none; }
+  /* Dark, thin scrollbars — the default Windows ones are a bright slab on this page. */
+  .services::-webkit-scrollbar, .log::-webkit-scrollbar { width: 10px; }
+  .services::-webkit-scrollbar-thumb, .log::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.14); border-radius: 6px;
+    border: 3px solid transparent; background-clip: content-box;
+  }
+  .services::-webkit-scrollbar-thumb:hover, .log::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.26); background-clip: content-box;
+  }
+  .services::-webkit-scrollbar-track, .log::-webkit-scrollbar-track { background: transparent; }
   .spacer { flex: 1; }
   button {
     font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -58,10 +90,46 @@
   button:disabled { opacity: .45; cursor: default; filter: none; }
   .err { color: var(--err); font-size: 12px; min-height: 15px; }
   .link { color: var(--accent2); cursor: pointer; font-size: 11.5px; }
+  .note { font-size: 11px; color: var(--muted); }
+  .note .link { font-size: 11px; }
+
+  /* Licence gate. `position: fixed` so it never takes part in the page's flex
+     layout — the service list and the footer keep the geometry they were measured
+     with. */
+  .sheet {
+    position: fixed; inset: 0; z-index: 10; display: none;
+    background: rgba(6, 8, 12, 0.82); backdrop-filter: blur(2px);
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  .sheet.open { display: flex; }
+  .sheet__box {
+    /* `height: 100%` (not just a max): sized to its content the box collapsed to
+       ~300px and the licence pane fell back to its 120px minimum, which is a poor
+       way to present 117 lines of agreement. Filling the sheet gives the text the
+       window. */
+    width: 100%; max-width: 720px; height: 100%; max-height: 100%;
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px;
+  }
+  .sheet__title { font-size: 15px; font-weight: 700; }
+  .sheet__lead { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .sheet__text {
+    flex: 1; min-height: 120px; overflow-y: auto; white-space: pre-wrap;
+    background: #0a0c11; border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; font-size: 11px; line-height: 1.5; color: #b9c0cf;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    -webkit-user-select: text; user-select: text;
+  }
+  .sheet__text::-webkit-scrollbar { width: 10px; }
+  .sheet__text::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.14); border-radius: 6px;
+    border: 3px solid transparent; background-clip: content-box;
+  }
 </style>
 </head>
 <body>
-  <div>
+  <div class="head">
     <h1>Set up 3D Gen Studio</h1>
     <div class="sub">First launch installs the local Python services. This runs once; later launches are instant.</div>
   </div>
@@ -106,8 +174,32 @@
         <span class="svc__tag">optional · NVIDIA GPU, ~17 GB download</span>
       </div>
       <label class="opt"><input type="checkbox" id="opt-motion" /> Install NVIDIA Kimodo, which turns a text prompt into an animation (needs an NVIDIA GPU; downloads ~17 GB, most of it the text encoder)</label>
+      <!-- Its text encoder is LLM2Vec over Meta Llama 3, so installing it downloads
+           Meta Llama 3 weights, which carry a licence the user has to accept. -->
+      <div class="note" id="motion-license-note">
+        Built with Meta Llama 3 — the text encoder downloads Meta Llama 3 weights.
+        <span class="link" id="show-license">Read the Meta Llama 3 Community License</span>
+      </div>
       <div class="svc__phase" style="display:none"></div>
       <div class="bar" style="display:none"><i></i></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="license-sheet">
+    <div class="sheet__box">
+      <div class="sheet__title">Meta Llama 3 Community License</div>
+      <div class="sheet__lead">
+        Kimodo encodes your prompt with LLM2Vec, which is built on <b>Meta Llama 3</b>. Installing
+        motion generation downloads Meta Llama&nbsp;3-8B-Instruct (~16&nbsp;GB) from Hugging Face, and
+        Meta licenses those weights under the agreement below. You have to accept it to install.
+      </div>
+      <pre class="sheet__text" id="license-text">Loading…</pre>
+      <div class="row">
+        <span class="note" id="license-state"></span>
+        <div class="spacer"></div>
+        <button id="license-decline">Decline</button>
+        <button id="license-accept" class="primary">I Accept</button>
+      </div>
     </div>
   </div>
 
@@ -180,16 +272,91 @@
     }
   });
 
+  // ---- Meta Llama 3 licence gate -------------------------------------------
+  // Ticking the Kimodo box opens the licence; the box only stays ticked if the user
+  // accepts. Acceptance is recorded by the main process (not here), because the
+  // install refuses to run without that record however it was started.
+  const sheet = $('#license-sheet');
+  let licenseAccepted = false;
+  let licenseLoaded = false;
+
+  async function loadLicense() {
+    if (licenseLoaded) return;
+    try {
+      const res = await window.genStudioSetup.llamaLicense();
+      licenseAccepted = !!res?.accepted;
+      $('#license-text').textContent = res?.text
+        || 'The licence file could not be read. It ships with the app as META-LLAMA-3-LICENSE, and the full text is at https://llama.meta.com/llama3/license';
+      licenseLoaded = true;
+    } catch {
+      $('#license-text').textContent = 'The licence could not be loaded. The full text is at https://llama.meta.com/llama3/license';
+    }
+  }
+
+  function paintLicenseState() {
+    $('#license-state').textContent = licenseAccepted ? 'Accepted' : '';
+    $('#motion-license-note').style.opacity = licenseAccepted ? '0.75' : '1';
+  }
+
+  async function openLicense() {
+    await loadLicense();
+    paintLicenseState();
+    sheet.classList.add('open');
+    $('#license-text').scrollTop = 0;
+  }
+
+  const closeLicense = () => sheet.classList.remove('open');
+
+  $('#show-license').addEventListener('click', openLicense);
+
+  $('#opt-motion').addEventListener('change', async (e) => {
+    if (!e.target.checked || licenseAccepted) return;
+    await openLicense();
+  });
+
+  $('#license-accept').addEventListener('click', async () => {
+    try {
+      const res = await window.genStudioSetup.acceptLlamaLicense();
+      licenseAccepted = !!res?.accepted;
+    } catch { licenseAccepted = false; }
+    if (!licenseAccepted) {
+      errEl.textContent = 'The acceptance could not be saved, so motion generation cannot be installed. Check the app data folder is writable.';
+      $('#opt-motion').checked = false;
+    }
+    paintLicenseState();
+    closeLicense();
+  });
+
+  $('#license-decline').addEventListener('click', () => {
+    // Declining is a real answer: untick the option and carry on with the rest.
+    if (!licenseAccepted) $('#opt-motion').checked = false;
+    closeLicense();
+  });
+
+  // Reflect an acceptance from an earlier run (or from Settings) as soon as the
+  // window opens, so the box does not re-prompt.
+  loadLicense().then(paintLicenseState);
+
   $('#toggle-log').addEventListener('click', () => {
     const show = logEl.style.display === 'none' || !logEl.style.display;
     logEl.style.display = show ? 'block' : 'none';
     $('#toggle-log').textContent = show ? 'Hide details' : 'Show details';
+    // A hidden element cannot be scrolled, so anything logged while it was closed
+    // left the view at the top — showing it would open on the first line of an
+    // install that is already thousands of lines in.
+    if (show) logEl.scrollTop = logEl.scrollHeight;
   });
 
   async function runInstall() {
     errEl.textContent = '';
     const rigging = $('#opt-rigging').checked;
     const motion = $('#opt-motion').checked;
+    // Belt and braces: the main process refuses too, but failing here keeps the
+    // user in the dialog that can fix it instead of in an install error.
+    if (motion && !licenseAccepted) {
+      await openLicense();
+      return;
+    }
     const comfyui = $('#opt-comfyui').checked;
     $('#btn-install').disabled = true;
     $('#opt-rigging').disabled = true;

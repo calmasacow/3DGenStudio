@@ -78,6 +78,17 @@ const MOTION_VENV = path.join(DATA_ROOT, 'motion-venv');
 // adapter, and — unless Settings points the model folder elsewhere — the Kimodo
 // checkpoint and the 16 GB Llama-3 base beneath checkpoints/.
 const MOTION_DATA = path.join(DATA_ROOT, 'motion-data');
+// Kimodo's text encoder is LLM2Vec over Meta Llama 3, so installing it downloads
+// Llama-3-8B-Instruct weights — which are licensed, not merely open. The Meta Llama 3
+// Community License requires the user to accept it ("By clicking 'I Accept' below or
+// by using or distributing any portion or element of the Llama Materials"), so the
+// install is gated on an explicit acceptance recorded here.
+//
+// The gate is enforced in doSetup(), NOT in the UI: there are two ways to install the
+// motion service — the first-run setup window and Settings — and a check in one of
+// them would leave the other as an unlocked side door.
+const LLAMA_LICENSE_FILE = path.join(APP_ROOT, 'META-LLAMA-3-LICENSE');
+const LLAMA_ACCEPT_FILE = path.join(DATA_ROOT, 'meta-llama-3-license-accepted.json');
 // Managed ComfyUI: code, venv, and a separate data root (models/input/output/
 // user/temp, each passed as its own --*-directory flag — see startComfyUI for why
 // NOT --base-directory). Keeping data out of the code dir means reinstalling or
@@ -708,6 +719,12 @@ async function doSetup(opts, send) {
     });
   }
 
+  // Gate the DOWNLOAD, not the request: a re-run with motion already installed has
+  // nothing to fetch, and failing an idempotent call would be a worse answer than
+  // doing nothing. Settings still shows the licence notice in that case.
+  if (motion && !isReady(MOTION_VENV) && !llamaLicenseAccepted()) {
+    throw new Error('Motion generation needs the Meta Llama 3 Community License to be accepted first — its text encoder downloads Meta Llama 3 weights. Accept it in the installer, or in Settings → Mesh Tools → Motion Generation.');
+  }
   if (motion && !isReady(MOTION_VENV)) {
     // The model folder is a setting, so an install started from Settings has to
     // honour it — otherwise the weights land in the default folder and the
@@ -783,6 +800,21 @@ function registerSetupIpc() {
     motion: isReady(MOTION_VENV),
     comfyui: comfyReady(),
     comfyuiAvailable: comfyAvailable(),
+    // Whether the motion service may be installed at all (see LLAMA_ACCEPT_FILE).
+    llama3License: llamaLicenseAccepted(),
+  }));
+
+  // The licence text itself, so both installers can show it in-app rather than
+  // sending the user to a web page to agree to something.
+  ipcMain.handle('license:llama3', () => ({
+    ok: true,
+    accepted: llamaLicenseAccepted(),
+    text: readLlamaLicense(),
+  }));
+
+  ipcMain.handle('license:llama3-accept', () => ({
+    ok: acceptLlamaLicense(),
+    accepted: llamaLicenseAccepted(),
   }));
 
   ipcMain.handle('setup:run', async (event, opts = {}) => {
@@ -809,11 +841,46 @@ function registerSetupIpc() {
   });
 }
 
+function llamaLicenseAccepted() {
+  try { return fs.existsSync(LLAMA_ACCEPT_FILE); } catch { return false; }
+}
+
+function readLlamaLicense() {
+  try { return fs.readFileSync(LLAMA_LICENSE_FILE, 'utf8'); } catch { return null; }
+}
+
+// Records WHAT was accepted, not just that something was: the file is the evidence,
+// and a future licence revision has to be distinguishable from this one.
+function acceptLlamaLicense() {
+  try {
+    fs.mkdirSync(DATA_ROOT, { recursive: true });
+    fs.writeFileSync(LLAMA_ACCEPT_FILE, `${JSON.stringify({
+      license: 'META LLAMA 3 COMMUNITY LICENSE AGREEMENT',
+      version: 'Meta Llama 3 Version Release Date: April 18, 2024',
+      url: 'https://llama.meta.com/llama3/license',
+      acceptedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+    }, null, 2)}\n`, 'utf8');
+    return true;
+  } catch (err) {
+    log(`Recording the Meta Llama 3 licence acceptance failed: ${err.message}`);
+    return false;
+  }
+}
+
 // First-run setup window. Resolves when the user launches (or closes) it.
 function runFirstRunSetup() {
   return new Promise((resolve) => {
     const win = new BrowserWindow({
-      width: 640, height: 560, resizable: false, backgroundColor: '#0d0f14',
+      // useContentSize, so these numbers are the PAGE, not the page plus the
+      // window frame — without it the content box was ~30px shorter than asked
+      // for, which was part of why the install button ended up clipped.
+      //
+      // Resizable with a floor: the page keeps the footer pinned and scrolls the
+      // service list, so a short window degrades gracefully, and a user who opens
+      // the details log on a small screen can still make room for it.
+      width: 780, height: 700, minWidth: 620, minHeight: 460,
+      useContentSize: true, resizable: true, backgroundColor: '#0d0f14',
       title: '3D Gen Studio — Setup', show: true, center: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.cjs'),
