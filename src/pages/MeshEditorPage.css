@@ -2584,9 +2584,24 @@
   text-align: right;
 }
 
+.mesh-editor-anim-dock__scrub-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .mesh-editor-anim-dock__scrub {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   accent-color: #8ff5ff;
+}
+
+.mesh-editor-anim-dock__frame-ops {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding-left: 0.4rem;
+  border-left: 1px solid var(--outline-variant, #2a2a30);
 }
 
 .mesh-editor-anim-dock__body {

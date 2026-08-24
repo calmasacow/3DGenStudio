@@ -21,7 +21,7 @@
 // a quaternion, and written back as a delta quaternion premultiplied onto each
 // affected key — never as re-composed Euler per frame, which would throw away the
 // bake's continuity and flip axes wherever the Euler decomposition jumps.
-import { Euler, Quaternion } from 'three'
+import { AnimationClip, Euler, Quaternion } from 'three'
 
 const DEG2RAD = Math.PI / 180
 const RAD2DEG = 180 / Math.PI
@@ -212,4 +212,199 @@ export function restoreTrackValues(clip, trackName, snapshot) {
   if (!track || !snapshot || track.values.length !== snapshot.length) return false
   track.values.set(snapshot)
   return true
+}
+
+// --- Structural edits: adding, inserting and deleting FRAMES ----------------
+// All of them are one primitive: rebuild the clip so that its frame `i` takes its
+// values from old frame `order[i]`. Duplicates in `order` insert, gaps delete, and
+// a shorter `order` trims — one code path to get right instead of four.
+//
+// The frame GRID is preserved, not the duration: `dt` stays what the bake used
+// (~1/30s), so the clip simply becomes shorter or longer and playback speed never
+// changes. That is what makes this usable for looping — trim the tail until the last
+// pose meets the first, and the cycle still runs at the speed it was generated at.
+//
+// Tracks that are not on the grid (the 2-key finger tracks `withHandPose` appends)
+// cannot be re-indexed frame by frame, so their keys are rescaled to the new
+// duration instead — otherwise a trimmed clip would hold the hand pose past its end,
+// or drop it early.
+
+export const MIN_CLIP_FRAMES = 2   // three needs two keys to interpolate a track
+
+function clipGrid(clip) {
+  const description = describeClip(clip)
+  if (!description) return null
+  const dt = description.frameCount > 1 ? description.duration / (description.frameCount - 1) : 0
+  return dt > 0 ? { ...description, dt } : null
+}
+
+function reorderClipFrames(clip, order) {
+  const grid = clipGrid(clip)
+  if (!grid || order.length < MIN_CLIP_FRAMES) return null
+  const newCount = order.length
+  const newDuration = (newCount - 1) * grid.dt
+  const times = new Float32Array(newCount)
+  for (let i = 0; i < newCount; i++) times[i] = i * grid.dt
+
+  const tracks = clip.tracks.map(track => {
+    const keys = track.times.length
+    const stride = Math.round(track.values.length / keys)
+    if (keys !== grid.frameCount) {
+      // Off-grid: keep the keys, move them proportionally into the new duration.
+      const clone = track.clone()
+      const factor = grid.duration > 0 ? newDuration / grid.duration : 1
+      clone.times = Float32Array.from(track.times, t => t * factor)
+      return clone
+    }
+    const values = new Float32Array(newCount * stride)
+    for (let i = 0; i < newCount; i++) {
+      const src = order[i] * stride
+      for (let k = 0; k < stride; k++) values[i * stride + k] = track.values[src + k]
+    }
+    // Same constructor, so quaternion tracks keep their slerp interpolation. Every
+    // on-grid track shares the one `times` array, exactly as the bake writes them.
+    return new track.constructor(track.name, times, values)
+  })
+
+  const out = new AnimationClip(clip.name, newDuration, tracks)
+  out.userData = { ...(clip.userData || {}) }
+  return out
+}
+
+const range = (from, to) => {
+  const out = []
+  for (let i = from; i <= to; i++) out.push(i)
+  return out
+}
+
+// Every operation returns { clip, frame } — the new clip and where the playhead
+// should land — or null when it would not change anything (or would leave the clip
+// with fewer than two frames).
+export function applyFrameOperation(clip, operation, frame) {
+  const grid = clipGrid(clip)
+  if (!grid) return null
+  const n = grid.frameCount
+  const at = Math.max(0, Math.min(n - 1, Math.round(frame) || 0))
+
+  switch (operation) {
+    // A copy of this frame becomes the next one, so the pose is held a frame longer.
+    case 'insert': {
+      const next = reorderClipFrames(clip, [...range(0, at), at, ...range(at + 1, n - 1)])
+      return next ? { clip: next, frame: at + 1 } : null
+    }
+    // A copy of the LAST frame, appended. Handy for closing a loop: append, then
+    // edit the appended frame to match frame 0.
+    case 'append': {
+      const next = reorderClipFrames(clip, [...range(0, n - 1), n - 1])
+      return next ? { clip: next, frame: n } : null
+    }
+    case 'delete': {
+      if (n <= MIN_CLIP_FRAMES) return null
+      const next = reorderClipFrames(clip, range(0, n - 1).filter(i => i !== at))
+      return next ? { clip: next, frame: Math.min(at, n - 2) } : null
+    }
+    // Trims: what actually makes a generated clip loop, since the fix is usually
+    // "the cycle ends 12 frames after it should".
+    case 'trimBefore': {
+      if (at === 0 || n - at < MIN_CLIP_FRAMES) return null
+      const next = reorderClipFrames(clip, range(at, n - 1))
+      return next ? { clip: next, frame: 0 } : null
+    }
+    case 'trimAfter': {
+      if (at === n - 1 || at + 1 < MIN_CLIP_FRAMES) return null
+      const next = reorderClipFrames(clip, range(0, at))
+      return next ? { clip: next, frame: at } : null
+    }
+    default:
+      return null
+  }
+}
+
+// --- Copy / paste a whole frame's pose -------------------------------------
+// A pose is every ON-GRID track's value at one frame: the bones' rotations plus the
+// hip position. The generated finger tracks are left out on purpose — they are two
+// constant keys rebuilt from the Hand-curl sliders on every bake, so pasting them
+// would be writing to something that gets overwritten.
+//
+// Tracks are matched by NAME on paste, so a pose copied from one clip can be pasted
+// into another (they are retargeted onto the same rig); anything the target does not
+// have is skipped and counted rather than failing the paste.
+//
+// Unlike a value edit, which applies a DELTA so the neighbouring frames keep their
+// own motion, a paste applies the pose ABSOLUTELY: with a falloff, the neighbours are
+// blended TOWARDS it (slerp/lerp by the same cosine weights), which is what makes a
+// pasted pose arrive without a pop. At weight 1 the frame is exactly the pose — so
+// "This frame" pastes it verbatim, and "Whole clip" freezes every frame to it.
+
+export function copyFramePose(clip, frame) {
+  const grid = clipGrid(clip)
+  if (!grid) return null
+  const at = Math.max(0, Math.min(grid.frameCount - 1, Math.round(frame) || 0))
+  const tracks = []
+  for (const track of clip.tracks) {
+    const parsed = parseTrackName(track.name)
+    if (!parsed || track.times.length !== grid.frameCount) continue
+    const stride = parsed.kind === 'quaternion' ? 4 : 3
+    tracks.push({
+      name: track.name,
+      kind: parsed.kind,
+      values: track.values.slice(at * stride, at * stride + stride),
+    })
+  }
+  return tracks.length ? { frame: at, tracks } : null
+}
+
+// Returns { entries, applied, skipped } where `entries` are before/after snapshots
+// for the undo stack, one per track actually written.
+export function pasteFramePose(clip, pose, frame, {
+  scope = DEFAULT_EDIT_SCOPE, span = DEFAULT_EDIT_SPAN,
+} = {}) {
+  const grid = clipGrid(clip)
+  if (!grid || !pose?.tracks?.length) return null
+  const at = Math.max(0, Math.min(grid.frameCount - 1, Math.round(frame) || 0))
+  const reach = Math.max(1, Math.round(span) || 1)
+  const entries = []
+  let skipped = 0
+
+  for (const source of pose.tracks) {
+    const track = findTrack(clip, source.name)
+    const parsed = track ? parseTrackName(track.name) : null
+    if (!track || !parsed || parsed.kind !== source.kind || track.times.length !== grid.frameCount) {
+      skipped += 1
+      continue
+    }
+    const stride = source.kind === 'quaternion' ? 4 : 3
+    const n = Math.floor(track.values.length / stride)
+    const before = Float32Array.from(track.values)
+
+    if (source.kind === 'quaternion') {
+      _qTarget.fromArray(source.values, 0)
+      for (let i = 0; i < n; i++) {
+        const w = editWeight(Math.abs(i - at), scope, reach)
+        if (w <= 0) continue
+        _q.fromArray(track.values, i * 4).slerp(_qTarget, w).normalize()
+        _q.toArray(track.values, i * 4)
+      }
+    } else {
+      for (let i = 0; i < n; i++) {
+        const w = editWeight(Math.abs(i - at), scope, reach)
+        if (w <= 0) continue
+        for (let a = 0; a < 3; a++) {
+          const o = i * 3 + a
+          track.values[o] += (source.values[a] - track.values[o]) * w
+        }
+      }
+    }
+
+    const after = Float32Array.from(track.values)
+    // Pasting a pose onto the frame it was copied from changes nothing; do not
+    // record an undo entry (or mark the clip edited) for it.
+    let changed = false
+    for (let i = 0; i < after.length; i++) {
+      if (Math.abs(after[i] - before[i]) > 1e-7) { changed = true; break }
+    }
+    if (changed) entries.push({ trackName: track.name, before, after })
+  }
+
+  return entries.length ? { entries, applied: entries.length, skipped } : null
 }

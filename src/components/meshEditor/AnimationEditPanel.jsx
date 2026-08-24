@@ -77,6 +77,10 @@ export default function AnimationEditPanel({
   span,
   onSpanChange,
   onEdit,               // (trackName, [x, y, z]) — nulls mean "leave this axis"
+  onFrameOperation,     // ('insert' | 'append' | 'delete' | 'trimBefore' | 'trimAfter')
+  onCopyPose,
+  onPastePose,
+  copiedPose,           // { frame, clipName, bones } or null — what the clipboard holds
   edited,
   onRevert,
   canUndo,
@@ -190,19 +194,75 @@ export default function AnimationEditPanel({
         </div>
       </header>
 
-      {/* Scrub bar. A range input rather than a canvas timeline: Phase 1 has no
-          per-key marks to draw, since the bake puts a key on every frame. */}
-      <input
-        type="range"
-        className="mesh-editor-anim-dock__scrub"
-        min={0}
-        max={Math.max(0, frameCount - 1)}
-        step={1}
-        value={frame}
-        disabled={playing}
-        onChange={e => onFrameChange(Number(e.target.value))}
-        aria-label="Scrub to frame"
-      />
+      {/* Scrub bar, plus the frame-structure buttons on the same row — they cost no
+          vertical space there, and the dock's height is a fixed budget.
+
+          A range input rather than a canvas timeline: the bake puts a key on every
+          frame, so there are no per-key marks to draw. */}
+      <div className="mesh-editor-anim-dock__scrub-row">
+        <input
+          type="range"
+          className="mesh-editor-anim-dock__scrub"
+          min={0}
+          max={Math.max(0, frameCount - 1)}
+          step={1}
+          value={frame}
+          disabled={playing}
+          onChange={e => onFrameChange(Number(e.target.value))}
+          aria-label="Scrub to frame"
+        />
+
+        <div className="mesh-editor-anim-dock__frame-ops">
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing}
+            onClick={() => onFrameOperation?.('insert')}
+            title="Insert a copy of this frame after it — the pose is held one frame longer">
+            <span className="material-symbols-outlined">add</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing || frameCount <= 2}
+            onClick={() => onFrameOperation?.('delete')}
+            title="Delete this frame — the clip gets one frame shorter, the speed does not change">
+            <span className="material-symbols-outlined">remove</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing}
+            onClick={() => onFrameOperation?.('append')}
+            title="Append a copy of the last frame at the end of the clip">
+            <span className="material-symbols-outlined">playlist_add</span>
+          </button>
+        </div>
+
+        {/* Copy / paste the whole frame — every animated bone at once. The loop
+            workflow in one line: copy frame 0, go to the last frame, paste. */}
+        <div className="mesh-editor-anim-dock__frame-ops">
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing}
+            onClick={onCopyPose}
+            title="Copy this frame's pose — every animated bone's rotation, plus the hip position">
+            <span className="material-symbols-outlined">content_copy</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing || !copiedPose}
+            onClick={onPastePose}
+            title={copiedPose
+              ? `Paste the pose copied from frame ${copiedPose.frame}${copiedPose.clipName ? ` of “${copiedPose.clipName}”` : ''} (${copiedPose.bones} tracks) onto frame ${frame}. Follows "Apply to": with a falloff the neighbouring frames ease into it.`
+              : 'Nothing copied yet — copy a frame first'}>
+            <span className="material-symbols-outlined">content_paste</span>
+          </button>
+
+        </div>
+
+        {/* The pair that actually closes a loop: a generated walk usually just ends a
+            dozen frames past where the cycle repeats. */}
+        <div className="mesh-editor-anim-dock__frame-ops">
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing || frame === 0}
+            onClick={() => onFrameOperation?.('trimBefore')}
+            title="Delete every frame BEFORE this one (this frame becomes frame 0)">
+            <span className="material-symbols-outlined">keyboard_double_arrow_left</span>
+          </button>
+          <button type="button" className="mesh-editor-icon-btn" disabled={playing || frame >= frameCount - 1}
+            onClick={() => onFrameOperation?.('trimAfter')}
+            title="Delete every frame AFTER this one (this frame becomes the last) — the usual way to make a generated cycle loop">
+            <span className="material-symbols-outlined">keyboard_double_arrow_right</span>
+          </button>
+        </div>
+      </div>
 
       <div className="mesh-editor-anim-dock__body">
         <div className="mesh-editor-anim-dock__bones">

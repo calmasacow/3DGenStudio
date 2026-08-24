@@ -162,8 +162,8 @@ import AnimationEditPanel from '../components/meshEditor/AnimationEditPanel'
 import AnimatedSkeletonOverlay from '../components/meshEditor/AnimatedSkeletonOverlay'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
-import { describeClip, applyFrameEdit, restoreTrackValues, frameTime,
-  DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
+import { describeClip, applyFrameEdit, applyFrameOperation, copyFramePose, pasteFramePose,
+  restoreTrackValues, frameTime, DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
   listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
@@ -532,6 +532,9 @@ export default function MeshEditorPage() {
   const [animEditSpan, setAnimEditSpan] = useState(DEFAULT_EDIT_SPAN)
   const [animEditRevision, setAnimEditRevision] = useState(0)     // the clip mutates in place
   const [animEditedClips, setAnimEditedClips] = useState(() => new Set())
+  // Copied frame pose: the values live in a ref (they are only read on paste), the
+  // label in state so the Paste button can enable itself and say what it holds.
+  const [animPoseLabel, setAnimPoseLabel] = useState(null)
   const [animEditUndoCount, setAnimEditUndoCount] = useState(0)
   const [animEditRedoCount, setAnimEditRedoCount] = useState(0)
   const [animArmExtension, setAnimArmExtension] = useState(0)    // Expand/Contract arms (%)
@@ -586,11 +589,14 @@ export default function MeshEditorPage() {
   // The bone picker hit-tests THIS while an animation is playing — the rest-pose
   // joints it uses otherwise are somewhere else entirely once the mesh moves.
   const liveJointsRef = useRef(null)
+  const animPoseRef = useRef(null)   // { frame, tracks } from copyFramePose
   // Edits are bound to the target rig and the bone mapping that produced them, so
   // when either changes they are not "stale", they are meaningless. Declared here,
   // beside the refs it clears, because the callbacks that call it are defined
   // further up the body than the rest of the dock's handlers.
   const resetAnimEdits = useCallback(() => {
+    animPoseRef.current = null
+    setAnimPoseLabel(null)
     editedClipsRef.current.clear()
     animEditHistoryRef.current.clear()
     setAnimEditUndoCount(0)
@@ -5176,6 +5182,70 @@ export default function MeshEditorPage() {
   }, [selectedAnimation, animPreview, animPlaying, animEditFrame, animEditScope, animEditSpan,
     historyFor, syncAnimEditCounts])
 
+  // Add / insert / delete / trim frames. Unlike a value edit this changes the track
+  // LENGTHS, so the arrays cannot be written in place: a new clip is built and swapped
+  // into the preview, which rebuilds the mixer's action (AnimatedMeshPreview restores
+  // the playhead afterwards, so the swap is invisible). History therefore holds whole
+  // clips for these — tens of KB each, against ~2 KB for a value edit.
+  const handleAnimFrameOperation = useCallback((operation) => {
+    const clipName = selectedAnimation
+    const clip = animPreview?.clip
+    if (!clipName || !clip || animPlaying) return
+    const result = applyFrameOperation(clip, operation, animEditFrame)
+    if (!result) return
+    editedClipsRef.current.set(clipName, result.clip)
+    // The bake cache would otherwise keep the pre-edit object alive for nothing —
+    // `getRetargetedClip` reads the edited map first either way.
+    retargetedClipsRef.current.delete(clipName)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    const history = historyFor(clipName)
+    history.undo.push({ kind: 'clip', before: clip, after: result.clip })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(clipName)
+    setAnimPreview(prev => (prev ? { ...prev, clip: result.clip } : prev))
+    setAnimEditFrame(result.frame)
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, animPreview, animPlaying, animEditFrame, historyFor, syncAnimEditCounts])
+
+  // Copy the whole frame — every animated bone's rotation plus the hip position — so
+  // it can be pasted onto another frame (of this clip or another). The pose is a
+  // snapshot: editing the source frame afterwards does not change what was copied.
+  const handleAnimCopyPose = useCallback(() => {
+    const clip = animPreview?.clip
+    if (!clip || animPlaying) return
+    const pose = copyFramePose(clip, animEditFrame)
+    if (!pose) return
+    animPoseRef.current = pose
+    setAnimPoseLabel({ frame: pose.frame, clipName: selectedAnimation, bones: pose.tracks.length })
+  }, [animPreview, animPlaying, animEditFrame, selectedAnimation])
+
+  // Paste it onto the current frame. In place, like a value edit — the tracks keep
+  // their length, so nothing has to be rebuilt. Honours "Apply to": at falloff the
+  // neighbours are blended towards the pose so it arrives without a pop, which is
+  // exactly what closing a loop wants.
+  const handleAnimPastePose = useCallback(() => {
+    const clipName = selectedAnimation
+    const clip = animPreview?.clip
+    const pose = animPoseRef.current
+    if (!clipName || !clip || !pose || animPlaying) return
+    const result = pasteFramePose(clip, pose, animEditFrame, {
+      scope: animEditScope, span: animEditSpan,
+    })
+    if (!result) return
+    editedClipsRef.current.set(clipName, clip)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    const history = historyFor(clipName)
+    // One undo entry for the whole paste: a pose spans every animated bone, and
+    // undoing it a track at a time would leave the mesh in a pose that never existed.
+    history.undo.push({ kind: 'tracks', entries: result.entries })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(clipName)
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, animPreview, animPlaying, animEditFrame, animEditScope, animEditSpan,
+    historyFor, syncAnimEditCounts])
+
   const stepAnimEditHistory = useCallback((direction) => {
     const clipName = selectedAnimation
     const clip = clipName ? editedClipsRef.current.get(clipName) : null
@@ -5185,7 +5255,20 @@ export default function MeshEditorPage() {
     const to = direction === 'undo' ? history.redo : history.undo
     const op = from.pop()
     if (!op) return
-    restoreTrackValues(clip, op.trackName, direction === 'undo' ? op.before : op.after)
+    if (op.kind === 'clip') {
+      // A whole-clip swap: a frame was added, inserted, deleted or trimmed.
+      const target = direction === 'undo' ? op.before : op.after
+      editedClipsRef.current.set(clipName, target)
+      retargetedClipsRef.current.delete(clipName)
+      setAnimPreview(prev => (prev ? { ...prev, clip: target } : prev))
+    } else if (op.kind === 'tracks') {
+      // A pasted pose: every track it touched, restored together.
+      for (const entry of op.entries) {
+        restoreTrackValues(clip, entry.trackName, direction === 'undo' ? entry.before : entry.after)
+      }
+    } else {
+      restoreTrackValues(clip, op.trackName, direction === 'undo' ? op.before : op.after)
+    }
     to.push(op)
     syncAnimEditCounts(clipName)
     setAnimEditRevision(r => r + 1)
@@ -8791,6 +8874,10 @@ export default function MeshEditorPage() {
                   span={animEditSpan}
                   onSpanChange={setAnimEditSpan}
                   onEdit={handleAnimEditValue}
+                  onFrameOperation={handleAnimFrameOperation}
+                  onCopyPose={handleAnimCopyPose}
+                  onPastePose={handleAnimPastePose}
+                  copiedPose={animPoseLabel}
                   edited={animEditedClips.has(selectedAnimation)}
                   onRevert={handleAnimRevertEdits}
                   canUndo={animEditUndoCount > 0}
