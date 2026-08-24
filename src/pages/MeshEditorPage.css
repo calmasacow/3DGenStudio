@@ -2691,6 +2691,33 @@
   font-size: 0.85rem;
 }
 
+/* Sits at the end of the Rotation / Position rows, lined up with the axis fields. */
+.mesh-editor-anim-dock__clear {
+  margin-left: 0.15rem;
+}
+
+.mesh-editor-anim-dock__clear:not(:disabled):hover {
+  color: var(--error, #ff6b6b);
+  border-color: rgba(255, 107, 107, 0.5);
+}
+
+.mesh-editor-anim-dock__gizmo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.mesh-editor-anim-dock__gizmo .material-symbols-outlined {
+  font-size: 1rem;
+}
+
+.mesh-editor-anim-dock__gizmo .mesh-editor-anim-dock__scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
 .mesh-editor-anim-dock__row {
   display: flex;
   align-items: flex-end;

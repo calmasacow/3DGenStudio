@@ -44,6 +44,25 @@ function AxisField({ label, value, disabled, onCommit }) {
   )
 }
 
+// Drops this frame's own value for one track: the frame takes what interpolation
+// between its neighbours gives, i.e. what deleting its key would look like. It cannot
+// literally delete the key — a sparse track leaves the frame grid the whole dock is
+// built on (frame == index) — and this is indistinguishable on screen.
+function ClearButton({ disabled, onClick, what, frame }) {
+  return (
+    <button
+      type="button"
+      className="mesh-editor-icon-btn mesh-editor-anim-dock__clear"
+      onClick={onClick}
+      disabled={disabled}
+      title={`Clear this bone's ${what} at frame ${frame} — the frame drops its own value and takes the one between its neighbours`}
+      aria-label={`Clear ${what} at frame ${frame}`}
+    >
+      <span className="material-symbols-outlined">delete</span>
+    </button>
+  )
+}
+
 function commit(text, value, onCommit) {
   const next = Number(String(text).trim())
   if (!Number.isFinite(next) || next === value) return
@@ -77,7 +96,12 @@ export default function AnimationEditPanel({
   span,
   onSpanChange,
   onEdit,               // (trackName, [x, y, z]) — nulls mean "leave this axis"
+  onClearValue,         // (trackName) — this frame takes the value between its neighbours
   onFrameOperation,     // ('insert' | 'append' | 'delete' | 'trimBefore' | 'trimAfter')
+  gizmoMode,            // 'translate' | 'rotate' — which gizmo the bone carries
+  onGizmoModeChange,
+  onAddPositionTrack,
+  canAddPositionTrack,
   onCopyPose,
   onPastePose,
   copiedPose,           // { frame, clipName, bones } or null — what the clipboard holds
@@ -323,6 +347,30 @@ export default function AnimationEditPanel({
                 {!row.editable && (
                   <span className="mesh-editor-anim-dock__badge mesh-editor-anim-dock__badge--warn">locked</span>
                 )}
+
+                {/* Which gizmo the bone carries in the viewport. Right-clicking the
+                    bone on the mesh flips it too — this is the discoverable half. */}
+                <div className="mesh-editor-anim-dock__gizmo">
+                  {[
+                    { value: 'translate', icon: 'open_with', label: 'Move' },
+                    { value: 'rotate', icon: 'rotate_right', label: 'Rotate' },
+                  ].map(m => (
+                    <button
+                      key={m.value}
+                      type="button"
+                      className={`mesh-editor-anim-dock__scope ${gizmoMode === m.value ? 'mesh-editor-anim-dock__scope--on' : ''}`}
+                      onClick={() => onGizmoModeChange?.(m.value)}
+                      aria-pressed={gizmoMode === m.value}
+                      disabled={playing}
+                      title={m.value === 'translate'
+                        ? 'Drag the bone along the world axes. A bone with no position track gets one the first time you move it.'
+                        : 'Rotate the bone about its own axes'}
+                    >
+                      <span className="material-symbols-outlined">{m.icon}</span>
+                      <span>{m.label}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {rotation && (
@@ -337,6 +385,32 @@ export default function AnimationEditPanel({
                       onCommit={v => onEdit(row.rotation, [i === 0 ? v : null, i === 1 ? v : null, i === 2 ? v : null])}
                     />
                   ))}
+                  <ClearButton
+                    disabled={fieldsDisabled}
+                    onClick={() => onClearValue?.(row.rotation)}
+                    what="rotation"
+                    frame={frame}
+                  />
+                </div>
+              )}
+
+              {/* Only some bones come out of the bake with a position track — the hips,
+                  normally. Any bone can have one; it just has to exist before there is
+                  anything to type into. */}
+              {!position && row.editable && (
+                <div className="mesh-editor-anim-dock__row">
+                  <span className="mesh-editor-anim-dock__row-label">Position</span>
+                  <button
+                    type="button"
+                    className="mesh-editor-anim-dock__scope"
+                    onClick={onAddPositionTrack}
+                    disabled={playing || !canAddPositionTrack}
+                    title="Add a position track to this bone, every key at its rest position — nothing moves until you edit it. Moving the bone with the gizmo does this for you."
+                  >
+                    <span className="material-symbols-outlined">add</span>
+                    <span>Add position track</span>
+                  </button>
+                  <span className="mesh-editor-panel__hint">This bone is rotation-only so far.</span>
                 </div>
               )}
 
@@ -352,6 +426,12 @@ export default function AnimationEditPanel({
                       onCommit={v => onEdit(row.position, [i === 0 ? v : null, i === 1 ? v : null, i === 2 ? v : null])}
                     />
                   ))}
+                  <ClearButton
+                    disabled={fieldsDisabled}
+                    onClick={() => onClearValue?.(row.position)}
+                    what="position"
+                    frame={frame}
+                  />
                 </div>
               )}
 
@@ -393,8 +473,10 @@ export default function AnimationEditPanel({
               </div>
 
               <span className="mesh-editor-panel__hint">
-                Rotations are stored as quaternions, so a committed angle is read back from the
-                quaternion — 190° comes back as −170°, and the pose is identical.
+                Drag the gizmo on the mesh to pose this bone at this frame; right-click a bone to
+                switch between Move and Rotate. Rotations are stored as quaternions, so a committed
+                angle is read back from the quaternion — 190° comes back as −170°, and the pose is
+                identical.
                 {edited ? ' This clip is hand-edited: the rest-pose, in-place and hand-curl settings no longer rebake it. Revert to hand it back to the bake.' : ''}
               </span>
             </>

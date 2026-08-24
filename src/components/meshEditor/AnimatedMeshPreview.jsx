@@ -36,8 +36,10 @@ export default function AnimatedMeshPreview({
   // stops — not every time the parent hands down a new callback identity (that
   // would keep snapping the frame back to the mixer's time mid-scrub).
   const timeRef = useRef(time)
+  const playingRef = useRef(playing)
   const onPausedAtRef = useRef(onPausedAt)
   useEffect(() => { timeRef.current = time }, [time])
+  useEffect(() => { playingRef.current = playing }, [playing])
   useEffect(() => { onPausedAtRef.current = onPausedAt }, [onPausedAt])
 
   // Retargeted clips use ".bones[name]" track paths, which the mixer can only
@@ -76,9 +78,12 @@ export default function AnimatedMeshPreview({
     action.setLoop(THREE.LoopRepeat, Infinity)
     action.clampWhenFinished = false
     action.play()
-    // A rebuilt action starts at 0; while the edit dock is scrubbing, that would
-    // throw the user back to the first frame every time the clip object changes.
+    // A rebuilt action starts at 0 and un-paused — `AnimationAction.reset()` clears
+    // `paused` — so a clip swap (adding, deleting or trimming a frame, or giving a
+    // bone a position track) would jump to frame 0 and start playing. The effect that
+    // owns `paused` does not re-run here, because `playing` itself did not change.
     if (timeRef.current != null) action.time = timeRef.current
+    action.paused = !playingRef.current
     actionRef.current = action
     return () => { action.stop(); m.uncacheAction(clip) }
   }, [clip])

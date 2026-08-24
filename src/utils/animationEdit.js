@@ -21,7 +21,7 @@
 // a quaternion, and written back as a delta quaternion premultiplied onto each
 // affected key — never as re-composed Euler per frame, which would throw away the
 // bake's continuity and flip axes wherever the Euler decomposition jumps.
-import { AnimationClip, Euler, Quaternion } from 'three'
+import { AnimationClip, Euler, Quaternion, VectorKeyframeTrack } from 'three'
 
 const DEG2RAD = Math.PI / 180
 const RAD2DEG = 180 / Math.PI
@@ -151,7 +151,8 @@ export function applyFrameEdit(clip, trackName, frame, nextXYZ, {
   const n = Math.floor(track.values.length / stride)
   if (n < 1) return null
   const f = Math.max(0, Math.min(n - 1, Math.round(frame) || 0))
-  const reach = Math.max(1, Math.round(span) || 1)
+  // `span` is not clamped here: this function only composes the target and hands the
+  // write (and the clamping) to applyFrameRotation / applyFramePosition.
 
   // null/undefined means "leave this axis alone" — and must be checked BEFORE the
   // Number() cast, since Number(null) is 0, i.e. a silent "drive this axis to zero".
@@ -163,11 +164,7 @@ export function applyFrameEdit(clip, trackName, frame, nextXYZ, {
   })
   if (target.every(v => v === null)) return null
 
-  const before = Float32Array.from(track.values)
-
   if (parsed.kind === 'quaternion') {
-    // Delta in the bone's own parent space, so it composes with whatever the bake
-    // already does on the neighbouring frames instead of replacing it.
     _q.fromArray(track.values, f * 4)
     const current = new Euler().setFromQuaternion(_q, 'XYZ')
     _euler.set(
@@ -176,33 +173,104 @@ export function applyFrameEdit(clip, trackName, frame, nextXYZ, {
       (target[2] ?? current.z * RAD2DEG) * DEG2RAD,
       'XYZ',
     )
-    _qTarget.setFromEuler(_euler)
-    // Normalize before measuring OR applying: `Quaternion.invert()` is a conjugate,
-    // so a key that came back from float32 storage a hair off unit length turns into
-    // a delta that is a hair off unit SCALE — and its `w` then reads as ~0.026° of
-    // rotation that is not there, which would defeat the no-op check below.
-    _qDelta.copy(_qTarget).multiply(_q.invert()).normalize()
-    const deltaDeg = 2 * Math.acos(Math.min(1, Math.abs(_qDelta.w))) * RAD2DEG
-    if (deltaDeg < MIN_ROTATION_DELTA_DEG) return null
-    for (let i = 0; i < n; i++) {
-      const w = editWeight(Math.abs(i - f), scope, reach)
-      if (w <= 0) continue
-      _qStep.identity().slerp(_qDelta, w)
-      _q.fromArray(track.values, i * 4).premultiply(_qStep).normalize()
-      _q.toArray(track.values, i * 4)
-    }
-  } else {
-    const o = f * 3
-    const delta = [0, 1, 2].map(a => (target[a] === null ? 0 : target[a] - track.values[o + a]))
-    if (delta.every(d => Math.abs(d) < MIN_POSITION_DELTA)) return null
-    for (let i = 0; i < n; i++) {
-      const w = editWeight(Math.abs(i - f), scope, reach)
-      if (w <= 0) continue
-      for (let a = 0; a < 3; a++) track.values[i * 3 + a] += delta[a] * w
-    }
+    return applyFrameRotation(clip, trackName, f, _qTarget.setFromEuler(_euler).toArray(), { scope, span })
   }
+  const o = f * 3
+  const vector = [0, 1, 2].map(a => (target[a] === null ? track.values[o + a] : target[a]))
+  return applyFramePosition(clip, trackName, f, vector, { scope, span })
+}
 
+// Rotate a bone to an absolute target quaternion at one frame. Shared by the Euler
+// fields and by the viewport gizmo, which has a world-space quaternion in hand and no
+// reason to round-trip it through Euler angles.
+//
+// The write is a DELTA premultiplied onto each affected key — `target * current-inv`,
+// scaled by the falloff weight — so the neighbouring frames keep their own motion,
+// shifted, instead of collapsing towards one pose. (A pasted pose is the other case:
+// absolute, see pasteFramePose.)
+export function applyFrameRotation(clip, trackName, frame, quaternion, {
+  scope = DEFAULT_EDIT_SCOPE, span = DEFAULT_EDIT_SPAN,
+} = {}) {
+  const track = findTrack(clip, trackName)
+  if (!track || !quaternion || quaternion.length < 4) return null
+  const n = Math.floor(track.values.length / 4)
+  if (n < 1) return null
+  const f = Math.max(0, Math.min(n - 1, Math.round(frame) || 0))
+  const reach = Math.max(1, Math.round(span) || 1)
+
+  const before = Float32Array.from(track.values)
+  _q.fromArray(track.values, f * 4)
+  _qTarget.fromArray(quaternion).normalize()
+  // Normalize before measuring OR applying: `Quaternion.invert()` is a conjugate, so
+  // a key that came back from float32 storage a hair off unit length turns into a
+  // delta that is a hair off unit SCALE — and its `w` then reads as ~0.026 degrees of
+  // rotation that is not there, which would defeat the no-op check below.
+  _qDelta.copy(_qTarget).multiply(_q.invert()).normalize()
+  const deltaDeg = 2 * Math.acos(Math.min(1, Math.abs(_qDelta.w))) * RAD2DEG
+  if (deltaDeg < MIN_ROTATION_DELTA_DEG) return null
+
+  for (let i = 0; i < n; i++) {
+    const w = editWeight(Math.abs(i - f), scope, reach)
+    if (w <= 0) continue
+    _qStep.identity().slerp(_qDelta, w)
+    _q.fromArray(track.values, i * 4).premultiply(_qStep).normalize()
+    _q.toArray(track.values, i * 4)
+  }
   return { before, after: Float32Array.from(track.values) }
+}
+
+// Move a bone to an absolute target position (in the track's own space, i.e. local to
+// the parent bone) at one frame. Same delta-with-falloff rule as the rotation.
+export function applyFramePosition(clip, trackName, frame, vector, {
+  scope = DEFAULT_EDIT_SCOPE, span = DEFAULT_EDIT_SPAN,
+} = {}) {
+  const track = findTrack(clip, trackName)
+  if (!track || !vector || vector.length < 3) return null
+  const n = Math.floor(track.values.length / 3)
+  if (n < 1) return null
+  const f = Math.max(0, Math.min(n - 1, Math.round(frame) || 0))
+  const reach = Math.max(1, Math.round(span) || 1)
+
+  const before = Float32Array.from(track.values)
+  const o = f * 3
+  const delta = [0, 1, 2].map(a => vector[a] - track.values[o + a])
+  if (delta.every(d => Math.abs(d) < MIN_POSITION_DELTA)) return null
+
+  for (let i = 0; i < n; i++) {
+    const w = editWeight(Math.abs(i - f), scope, reach)
+    if (w <= 0) continue
+    for (let a = 0; a < 3; a++) track.values[i * 3 + a] += delta[a] * w
+  }
+  return { before, after: Float32Array.from(track.values) }
+}
+
+// Give a bone a position track it does not have, so it can be MOVED and not only
+// rotated. Every key holds the bone's rest position, so the clip plays identically
+// until something edits it — and the clip is REBUILT rather than mutated, because the
+// mixer binds a clip's tracks once and would never see an appended one.
+//
+// The name follows whatever convention the bone's existing track uses instead of
+// assuming ".bones[Name].": a clip parsed from BVH or glTF uses the bare "Name." form.
+export function ensurePositionTrack(clip, boneName, restPosition) {
+  const grid = clipGrid(clip)
+  if (!grid || !boneName || !restPosition) return null
+  const row = grid.bones.find(b => b.boneName === boneName)
+  if (!row || row.position) return null          // unknown bone, or it already has one
+  const sibling = row.rotation ? findTrack(clip, row.rotation) : null
+  if (!sibling) return null
+  const trackName = sibling.name.replace(/\.quaternion$/, '.position')
+
+  const values = new Float32Array(grid.frameCount * 3)
+  for (let i = 0; i < grid.frameCount; i++) {
+    values[i * 3] = restPosition[0]
+    values[i * 3 + 1] = restPosition[1]
+    values[i * 3 + 2] = restPosition[2]
+  }
+  // Shares the grid's `times` array, as every baked track does.
+  const track = new VectorKeyframeTrack(trackName, sibling.times, values)
+  const out = new AnimationClip(clip.name, clip.duration, [...clip.tracks, track])
+  out.userData = { ...(clip.userData || {}) }
+  return { clip: out, trackName }
 }
 
 // Put a snapshot back (undo / redo). In place, so the clip object stays the one
@@ -407,4 +475,52 @@ export function pasteFramePose(clip, pose, frame, {
   }
 
   return entries.length ? { entries, applied: entries.length, skipped } : null
+}
+
+// --- Clearing one frame's value --------------------------------------------
+// "Delete the value at this frame", on a clip where every frame carries a key: the
+// key stops asserting its own value and takes the one interpolation between its
+// neighbours would give — which is exactly what deleting the key would look like,
+// without making the track sparse (a sparse track leaves the frame grid, and with it
+// the whole dock's frame-is-an-index model).
+//
+// At either end there is only one neighbour, so the value becomes that neighbour's.
+// Single frame only, whatever the Apply-to scope says: clearing a frame is the one
+// operation whose whole point is that it touches nothing else.
+export function clearFrameValue(clip, trackName, frame) {
+  const track = findTrack(clip, trackName)
+  const parsed = parseTrackName(trackName)
+  if (!track || !parsed) return null
+  const stride = parsed.kind === 'quaternion' ? 4 : 3
+  const n = Math.floor(track.values.length / stride)
+  if (n < 2) return null
+  const f = Math.max(0, Math.min(n - 1, Math.round(frame) || 0))
+  const prev = f > 0 ? f - 1 : null
+  const next = f < n - 1 ? f + 1 : null
+  if (prev === null && next === null) return null
+
+  const before = Float32Array.from(track.values)
+  if (parsed.kind === 'quaternion') {
+    if (prev === null || next === null) {
+      _q.fromArray(track.values, (prev ?? next) * 4)
+    } else {
+      _q.fromArray(track.values, prev * 4)
+      _qTarget.fromArray(track.values, next * 4)
+      _q.slerp(_qTarget, 0.5)   // three's slerp takes the shortest path
+    }
+    _q.normalize().toArray(track.values, f * 4)
+  } else {
+    for (let a = 0; a < 3; a++) {
+      track.values[f * 3 + a] = (prev === null || next === null)
+        ? track.values[(prev ?? next) * 3 + a]
+        : (track.values[prev * 3 + a] + track.values[next * 3 + a]) / 2
+    }
+  }
+
+  let changed = false
+  for (let i = f * stride; i < (f + 1) * stride; i++) {
+    if (Math.abs(track.values[i] - before[i]) > 1e-7) { changed = true; break }
+  }
+  if (!changed) return null
+  return { before, after: Float32Array.from(track.values) }
 }

@@ -160,10 +160,12 @@ import BoneMappingModal from '../components/meshEditor/BoneMappingModal'
 import MotionLibraryModal from '../components/meshEditor/MotionLibraryModal'
 import AnimationEditPanel from '../components/meshEditor/AnimationEditPanel'
 import AnimatedSkeletonOverlay from '../components/meshEditor/AnimatedSkeletonOverlay'
+import AnimationBoneGizmo from '../components/meshEditor/AnimationBoneGizmo'
 import { loadReferenceScene, loadReferenceRigScene, loadTargetScene, autoMapBones, retargetAnimationClip, makeClipInPlace, exportAnimatedGlb, findUpperArmTargets, getReference } from '../utils/animationLibrary'
 import { withHandPose } from '../utils/handPose'
-import { describeClip, applyFrameEdit, applyFrameOperation, copyFramePose, pasteFramePose,
-  restoreTrackValues, frameTime, DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
+import { describeClip, applyFrameEdit, applyFrameOperation, applyFrameRotation, applyFramePosition,
+  copyFramePose, pasteFramePose, ensurePositionTrack, clearFrameValue, restoreTrackValues, frameTime,
+  DEFAULT_EDIT_SCOPE, DEFAULT_EDIT_SPAN } from '../utils/animationEdit'
 import { KIMODO_SOURCE_ID, countPromptSegments, generateMotionClip, loadKimodoSkeletonSource,
   listSavedMotions, saveMotion, deleteSavedMotion, loadSavedMotionClip } from '../utils/motionGen'
 import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
@@ -528,6 +530,9 @@ export default function MeshEditorPage() {
   const [animPlaying, setAnimPlaying] = useState(true)
   const [animEditFrame, setAnimEditFrame] = useState(0)
   const [animEditBone, setAnimEditBone] = useState(null)          // bone NAME, not index
+  // Which gizmo the selected bone carries in the viewport. Right-clicking a bone
+  // toggles it, so the mode can be changed without leaving the mesh.
+  const [animEditGizmoMode, setAnimEditGizmoMode] = useState('rotate')
   const [animEditScope, setAnimEditScope] = useState(DEFAULT_EDIT_SCOPE)
   const [animEditSpan, setAnimEditSpan] = useState(DEFAULT_EDIT_SPAN)
   const [animEditRevision, setAnimEditRevision] = useState(0)     // the clip mutates in place
@@ -590,6 +595,15 @@ export default function MeshEditorPage() {
   // joints it uses otherwise are somewhere else entirely once the mesh moves.
   const liveJointsRef = useRef(null)
   const animPoseRef = useRef(null)   // { frame, tracks } from copyFramePose
+  // The clip the gizmo is writing to, and the snapshot taken when its drag began.
+  // Both are refs because a drag delivers dozens of events between renders: reading
+  // the clip out of a closure would write to whatever object that render captured,
+  // and pushing an undo entry per event would bury the history.
+  const animClipRef = useRef(null)
+  const animGizmoDragRef = useRef(null)
+  // Scratch for the world->local conversion, which runs on every drag event.
+  const gizmoMatrixRef = useRef(new THREE.Matrix4())
+  const gizmoQuatRef = useRef(new THREE.Quaternion())
   // Edits are bound to the target rig and the bone mapping that produced them, so
   // when either changes they are not "stale", they are meaningless. Declared here,
   // beside the refs it clears, because the callbacks that call it are defined
@@ -3175,7 +3189,58 @@ export default function MeshEditorPage() {
     }
   }, [])
 
+  // Which bone is under a viewport point, as an index into `skeleton.names`.
+  // `{ ok: false }` means picking is not possible right now (no camera, or a clip is
+  // playing with no live joints drawn) — as opposed to `{ ok: true, index: null }`,
+  // which is a click on empty space and does deselect.
+  const pickBoneAt = useCallback((point) => {
+    const camera = cameraRef.current
+    const rect = canvasShellRef.current?.getBoundingClientRect()
+    if (!camera || !rect || !skeleton?.joints?.length) return { ok: false, index: null }
+    // While a clip plays, hit-test the joints the user can actually see (the ones the
+    // animated overlay drew this frame) instead of the bind pose. Testing the bind
+    // pose then would select a bone from wherever the mesh ISN'T.
+    const live = animPreview && showSkeleton ? liveJointsRef.current : null
+    if (animPreview && !live) return { ok: false, index: null }
+    const joints = live?.positions || skeleton.joints
+
+    const projected = new THREE.Vector3()
+    const PICK_RADIUS_PX = 16
+    let closest = null
+    let closestDist = PICK_RADIUS_PX
+    for (let i = 0; i < joints.length / 3; i += 1) {
+      projected.set(joints[i * 3], joints[i * 3 + 1], joints[i * 3 + 2]).project(camera)
+      if (projected.z > 1) continue // behind the camera
+      const px = (projected.x * 0.5 + 0.5) * rect.width
+      const py = (-projected.y * 0.5 + 0.5) * rect.height
+      const dist = Math.hypot(px - point.x, py - point.y)
+      if (dist <= closestDist) {
+        closestDist = dist
+        closest = i
+      }
+    }
+    if (!live || closest == null) return { ok: true, index: closest }
+    // Map back BY NAME: `selectedBone` indexes the rest-pose skeleton the Skeleton
+    // tree is built from, and the two bone orders need not agree.
+    const index = skeleton.names?.indexOf(live.names[closest])
+    return { ok: true, index: index != null && index >= 0 ? index : null }
+  }, [skeleton, animPreview, showSkeleton])
+
   const handleCanvasPointerDown = useCallback((event) => {
+    // Right-click a bone to swap its gizmo between move and rotate (and select it, so
+    // one gesture does both). Anywhere else the button still belongs to OrbitControls,
+    // which pans with it.
+    if (event.button === 2) {
+      if (activeMenu !== 'autorig' || !animEditOpen || animPlaying || !animPreview) return
+      const point = getPointerPosition(event)
+      if (!point) return
+      const pick = pickBoneAt(point)
+      if (!pick.ok || pick.index == null) return
+      event.preventDefault()
+      setSelectedBone(pick.index)
+      setAnimEditGizmoMode(prev => (prev === 'translate' ? 'rotate' : 'translate'))
+      return
+    }
     if (event.button !== 0) {
       return
     }
@@ -3189,46 +3254,14 @@ export default function MeshEditorPage() {
     // highlighted + selected in the Skeleton panel. Clicking empty space deselects.
     // While the bone gizmo has the pointer, the click belongs to the drag — picking
     // there would deselect the very bone being moved.
-    if (rigGizmoDragRef.current) {
+    if (rigGizmoDragRef.current || animGizmoDragRef.current) {
       return
     }
     if (activeMenu === 'autorig' && skeleton?.joints?.length && cameraRef.current) {
-      const camera = cameraRef.current
-      const rect = canvasShellRef.current?.getBoundingClientRect()
-      if (!rect) return
-      // While a clip plays, hit-test the joints the user can actually see (the ones
-      // the animated overlay drew this frame) instead of the bind pose — and map the
-      // hit back by NAME, since `selectedBone` indexes the rest-pose skeleton the
-      // Skeleton tree is built from and the two orders need not agree.
-      const live = animPreview && showSkeleton ? liveJointsRef.current : null
-      // Animating with no live joints to test means the bones are not on screen (the
-      // overlay is off, or its first frame has not run). Testing the bind pose then
-      // would select a bone from wherever the mesh ISN'T — better to leave the
-      // selection alone than to change it to something arbitrary.
-      if (animPreview && !live) return
-      const joints = live?.positions || skeleton.joints
-      const projected = new THREE.Vector3()
-      const PICK_RADIUS_PX = 16
-      let closestBone = null
-      let closestDist = PICK_RADIUS_PX
-      for (let i = 0; i < joints.length / 3; i += 1) {
-        projected.set(joints[i * 3], joints[i * 3 + 1], joints[i * 3 + 2]).project(camera)
-        if (projected.z > 1) continue // behind the camera
-        const px = (projected.x * 0.5 + 0.5) * rect.width
-        const py = (-projected.y * 0.5 + 0.5) * rect.height
-        const dist = Math.hypot(px - nextPoint.x, py - nextPoint.y)
-        if (dist <= closestDist) {
-          closestDist = dist
-          closestBone = i
-        }
-      }
+      const pick = pickBoneAt(nextPoint)
+      if (!pick.ok) return
       event.preventDefault()
-      if (live && closestBone != null) {
-        const index = skeleton.names?.indexOf(live.names[closestBone])
-        setSelectedBone(index != null && index >= 0 ? index : null)
-      } else {
-        setSelectedBone(closestBone)
-      }
+      setSelectedBone(pick.index)
       return
     }
 
@@ -3563,7 +3596,7 @@ export default function MeshEditorPage() {
     }
 
     canvasShellRef.current?.setPointerCapture?.(event.pointerId)
-  }, [activeMenu, animPreview, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, captureMaskPreviewBase, computeSculptCursorPixelRadius, ensureLayerMaskCanvas, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, pushSculptUndo, resetSelection, scheduleProjectionMaskPaint, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, showSkeleton, skeleton, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
+  }, [activeMenu, animEditOpen, animPlaying, animPreview, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, captureMaskPreviewBase, computeSculptCursorPixelRadius, ensureLayerMaskCanvas, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, pushSculptUndo, resetSelection, scheduleProjectionMaskPaint, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, pickBoneAt, selectionMesh, skeleton, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
 
   const handleCanvasPointerMove = useCallback((event) => {
     if (activeMenu === 'boolean' && booleanPlaceMode) {
@@ -5141,6 +5174,8 @@ export default function MeshEditorPage() {
   // longer on screen — the picker must not hit-test them while waiting for a frame.
   useEffect(() => { liveJointsRef.current = null }, [animPreview])
 
+  useEffect(() => { animClipRef.current = animPreview?.clip || null }, [animPreview])
+
   const handleToggleAnimEdit = useCallback(() => {
     setAnimEditOpen(prev => {
       setAnimPlaying(prev)
@@ -5245,6 +5280,134 @@ export default function MeshEditorPage() {
     setAnimEditRevision(r => r + 1)
   }, [selectedAnimation, animPreview, animPlaying, animEditFrame, animEditScope, animEditSpan,
     historyFor, syncAnimEditCounts])
+
+  // The live bone the gizmo edits: the dock's selection, resolved against the skeleton
+  // actually being played (not the rest-pose snapshot the tree is built from).
+  const animGizmoBone = useMemo(() => {
+    if (!animEditOpen || animPlaying || !animPreview?.skinnedMesh) return null
+    const name = selectedBone != null ? skeleton?.names?.[selectedBone] : animEditBone
+    if (!name) return null
+    return animPreview.skinnedMesh.skeleton.getBoneByName(name) || null
+  }, [animEditOpen, animPlaying, animPreview, selectedBone, skeleton, animEditBone])
+
+  // A drag begins: work out which track it writes to, create a position track if the
+  // bone has none (every key at the rest position, so nothing moves until the drag
+  // does), and snapshot the track for a single undo entry at the end.
+  //
+  // The clip is swapped through `animClipRef` synchronously as well as through state:
+  // the drag's own events arrive before React has committed the new preview, and they
+  // must write to the clip that now carries the new track.
+  const handleGizmoDragStart = useCallback((mode) => {
+    const clipName = selectedAnimation
+    const bone = animGizmoBone
+    let clip = animClipRef.current
+    if (!clipName || !clip || !bone) return
+    const description = describeClip(clip)
+    const row = description?.bones.find(b => b.boneName === bone.name)
+    if (!row?.editable) return
+
+    let trackName = mode === 'translate' ? row.position : row.rotation
+    if (mode === 'translate' && !trackName) {
+      // `bone.position` is the bind local position for a bone with no position track:
+      // the mixer only ever writes the ones a track drives.
+      const created = ensurePositionTrack(clip, bone.name, bone.position.toArray())
+      if (!created) return
+      clip = created.clip
+      trackName = created.trackName
+      animClipRef.current = clip
+      editedClipsRef.current.set(clipName, clip)
+      retargetedClipsRef.current.delete(clipName)
+      setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+      setAnimPreview(prev => (prev ? { ...prev, clip } : prev))
+      setAnimEditRevision(r => r + 1)
+    }
+    if (!trackName) return
+    const track = clip.tracks.find(t => t.name === trackName)
+    if (!track) return
+    animGizmoDragRef.current = { clipName, trackName, before: Float32Array.from(track.values) }
+  }, [selectedAnimation, animGizmoBone])
+
+  // Each drag event: the proxy's WORLD transform, converted into the bone's own space
+  // (what the track stores), written at the current frame with the usual falloff. No
+  // history entry — the whole drag becomes one at drag end.
+  const handleGizmoDrag = useCallback((proxy, mode) => {
+    const drag = animGizmoDragRef.current
+    const clip = animClipRef.current
+    const bone = animGizmoBone
+    if (!drag || !clip || !bone?.parent) return
+    const options = { scope: animEditScope, span: animEditSpan }
+    if (mode === 'translate') {
+      // A track's position is local to the PARENT bone, so undo the parent's full
+      // world transform — not just its rotation.
+      const local = proxy.position.clone().applyMatrix4(
+        gizmoMatrixRef.current.copy(bone.parent.matrixWorld).invert())
+      if (!applyFramePosition(clip, drag.trackName, animEditFrame, local.toArray(), options)) return
+    } else {
+      const parentWorld = bone.parent.getWorldQuaternion(gizmoQuatRef.current).invert()
+      const local = parentWorld.multiply(proxy.quaternion)
+      if (!applyFrameRotation(clip, drag.trackName, animEditFrame, local.toArray(), options)) return
+    }
+    setAnimEditedClips(prev => (prev.has(drag.clipName) ? prev : new Set(prev).add(drag.clipName)))
+    editedClipsRef.current.set(drag.clipName, clip)
+    setAnimEditRevision(r => r + 1)
+  }, [animGizmoBone, animEditFrame, animEditScope, animEditSpan])
+
+  // One undo entry for the whole drag, and only if it actually moved something.
+  const handleGizmoDragEnd = useCallback(() => {
+    const drag = animGizmoDragRef.current
+    animGizmoDragRef.current = null
+    const clip = animClipRef.current
+    if (!drag || !clip) return
+    const track = clip.tracks.find(t => t.name === drag.trackName)
+    if (!track || track.values.length !== drag.before.length) return
+    let changed = false
+    for (let i = 0; i < track.values.length; i++) {
+      if (Math.abs(track.values[i] - drag.before[i]) > 1e-7) { changed = true; break }
+    }
+    if (!changed) return
+    const history = historyFor(drag.clipName)
+    history.undo.push({ kind: 'track', trackName: drag.trackName, before: drag.before, after: Float32Array.from(track.values) })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(drag.clipName)
+  }, [historyFor, syncAnimEditCounts])
+
+  // Give the selected bone a position track without dragging anything, so its
+  // Position fields can be typed into. Not recorded in history: every key is the rest
+  // position, so this changes nothing until an edit does.
+  const handleAnimAddPositionTrack = useCallback(() => {
+    const clipName = selectedAnimation
+    const clip = animClipRef.current
+    const bone = animGizmoBone
+    if (!clipName || !clip || !bone) return
+    const created = ensurePositionTrack(clip, bone.name, bone.position.toArray())
+    if (!created) return
+    animClipRef.current = created.clip
+    editedClipsRef.current.set(clipName, created.clip)
+    retargetedClipsRef.current.delete(clipName)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    setAnimPreview(prev => (prev ? { ...prev, clip: created.clip } : prev))
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, animGizmoBone])
+
+  // Clear one track's value at this frame: the frame takes the interpolation of its
+  // neighbours, which is what deleting its key would look like without taking the
+  // track off the frame grid.
+  const handleAnimClearFrameValue = useCallback((trackName) => {
+    const clipName = selectedAnimation
+    const clip = animClipRef.current
+    if (!clipName || !clip || animPlaying) return
+    const result = clearFrameValue(clip, trackName, animEditFrame)
+    if (!result) return
+    editedClipsRef.current.set(clipName, clip)
+    setAnimEditedClips(prev => (prev.has(clipName) ? prev : new Set(prev).add(clipName)))
+    const history = historyFor(clipName)
+    history.undo.push({ kind: 'track', trackName, before: result.before, after: result.after })
+    if (history.undo.length > ANIM_EDIT_HISTORY_LIMIT) history.undo.shift()
+    history.redo.length = 0
+    syncAnimEditCounts(clipName)
+    setAnimEditRevision(r => r + 1)
+  }, [selectedAnimation, animPlaying, animEditFrame, historyFor, syncAnimEditCounts])
 
   const stepAnimEditHistory = useCallback((direction) => {
     const clipName = selectedAnimation
@@ -8722,6 +8885,18 @@ export default function MeshEditorPage() {
                       {/* The animated counterpart. A SIBLING of AnimatedMeshPreview, never
                           a child: the preview wraps its scene in the floor-offset group,
                           and this reads world positions that already include it. */}
+                      {/* Move/rotate the selected bone straight in the scene. Only while
+                          the dock is open and paused: the drag edits ONE frame, and the
+                          frame is only meaningful when the clock is stopped. */}
+                      {animGizmoBone && (
+                        <AnimationBoneGizmo
+                          bone={animGizmoBone}
+                          mode={animEditGizmoMode}
+                          onDragStart={handleGizmoDragStart}
+                          onDrag={handleGizmoDrag}
+                          onDragEnd={handleGizmoDragEnd}
+                        />
+                      )}
                       {animPreview?.skinnedMesh && (
                         <AnimatedSkeletonOverlay
                           root={animPreview.scene}
@@ -8874,7 +9049,12 @@ export default function MeshEditorPage() {
                   span={animEditSpan}
                   onSpanChange={setAnimEditSpan}
                   onEdit={handleAnimEditValue}
+                  onClearValue={handleAnimClearFrameValue}
                   onFrameOperation={handleAnimFrameOperation}
+                  gizmoMode={animEditGizmoMode}
+                  onAddPositionTrack={handleAnimAddPositionTrack}
+                  canAddPositionTrack={!!animGizmoBone}
+                  onGizmoModeChange={setAnimEditGizmoMode}
                   onCopyPose={handleAnimCopyPose}
                   onPastePose={handleAnimPastePose}
                   copiedPose={animPoseLabel}
