@@ -27,6 +27,16 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v2.6.0',
+    date: '2026-08-24',
+    items: [
+			'Animations: Integrated Kimodo',
+			'MCP: Added support for Tags',
+			'ComfyUI: Updated dependencies and nodes',
+			'QwenVL: Added new models'
+    ],
+  },
+  {
     version: 'v2.5.0',
     date: '2026-08-21',
     items: [
